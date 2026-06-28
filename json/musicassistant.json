@@ -50,8 +50,16 @@
       "type": "info"
     },
     {
-      "text": "Web UI: http://<container-ip>:8095 — MA, players, and HA should be on the same flat network (or VLAN).",
+      "text": "Web UI: http://<container-ip>:8095. Music Assistant requires layer-2 network access — MA, players, and Home Assistant should be on the same flat network or VLAN. Host networking is mandatory for the Docker container.",
       "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host.",
+      "type": "info"
+    },
+    {
+      "text": "If host-network Docker fails on an unprivileged LXC, try privileged mode: `var_unprivileged=0 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/musicassistant.sh)\"`",
+      "type": "warning"
     }
   ]
 }

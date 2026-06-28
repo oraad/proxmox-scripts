@@ -5,7 +5,7 @@ import { Github, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useSyncExternalStore } from "react";
 
-import { basePath, githubRepo, siteName } from "@/config/site-config";
+import { githubRepo, siteName } from "@/config/site-config";
 import { cn } from "@/lib/utils";
 
 function useIsClient() {
@@ -60,7 +60,7 @@ export function SiteHeader() {
         </div>
       </div>
       <div className="border-t border-border/60 px-4 py-2 text-center text-xs text-muted-foreground sm:hidden">
-        <Link href={`${basePath}/scripts`} className="hover:text-foreground">
+        <Link href="/scripts" className="hover:text-foreground">
           Browse scripts
         </Link>
       </div>

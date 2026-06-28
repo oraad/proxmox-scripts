@@ -6,7 +6,7 @@
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
 source <(curl -fsSL "${REPO_RAW}/misc/build.func")
 
-APP="HomeAssistantMCP"
+APP="HAMCP"
 var_tags="${var_tags:-homeassistant;mcp;ai}"
 var_cpu="${var_cpu:-1}"
 var_ram="${var_ram:-1024}"
@@ -23,23 +23,23 @@ variables
 color
 catch_errors
 
-function hamcp_show_endpoint() {
+function ha_mcp_show_endpoint() {
   local port="8086"
   local path="/mcp"
-  if [[ -f /opt/hamcp/.env ]]; then
+  if [[ -f /opt/ha-mcp/.env ]]; then
     set -a
     # shellcheck disable=SC1091
-    source /opt/hamcp/.env
+    source /opt/ha-mcp/.env
     set +a
     port="${MCP_PORT:-8086}"
     path="${MCP_SECRET_PATH:-/mcp}"
   fi
-  if [[ -f /opt/hamcp/mcp_endpoint.txt ]]; then
-    echo -e "${INFO}${YW} Home Assistant MCP endpoint:${CL}"
-    echo -e "${TAB}${GATEWAY}${BGN}$(cat /opt/hamcp/mcp_endpoint.txt)${CL}"
+  if [[ -f /opt/ha-mcp/mcp_endpoint.txt ]]; then
+    echo -e "${INFO}${YW} HA MCP endpoint:${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}$(cat /opt/ha-mcp/mcp_endpoint.txt)${CL}"
     return
   fi
-  echo -e "${INFO}${YW} Home Assistant MCP endpoint:${CL}"
+  echo -e "${INFO}${YW} HA MCP endpoint:${CL}"
   echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:${port}${path}/mcp${CL}"
 }
 
@@ -48,7 +48,7 @@ function update_script() {
   check_container_storage
   check_container_resources
 
-  if [[ ! -f /opt/hamcp/.env ]]; then
+  if [[ ! -f /opt/ha-mcp/.env ]]; then
     msg_error "No ${APP} Installation Found!"
     exit
   fi
@@ -72,16 +72,16 @@ function update_script() {
   fi
   msg_ok "Updated ${APP}"
 
-  if [[ -f /opt/hamcp/.env ]]; then
+  if [[ -f /opt/ha-mcp/.env ]]; then
     set -a
     # shellcheck disable=SC1091
-    source /opt/hamcp/.env
+    source /opt/ha-mcp/.env
     set +a
-    echo "http://${IP:-127.0.0.1}:${MCP_PORT:-8086}${MCP_SECRET_PATH:-/mcp}/mcp" >/opt/hamcp/mcp_endpoint.txt
+    echo "http://${IP:-127.0.0.1}:${MCP_PORT:-8086}${MCP_SECRET_PATH:-/mcp}/mcp" >/opt/ha-mcp/mcp_endpoint.txt
   fi
 
   msg_ok "Updated successfully!"
-  hamcp_show_endpoint
+  ha_mcp_show_endpoint
   exit
 }
 
@@ -91,4 +91,4 @@ description
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-hamcp_show_endpoint
+ha_mcp_show_endpoint

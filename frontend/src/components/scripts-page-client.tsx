@@ -2,7 +2,7 @@
 
 import Fuse from "fuse.js";
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ScriptDetail } from "@/components/script-detail";
 import type { Category, Script } from "@/lib/types";
@@ -15,43 +15,52 @@ type ScriptsPageClientProps = {
 export function ScriptsPageClient({ categories }: ScriptsPageClientProps) {
   const [query, setQuery] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | "all">("all");
+
+  const uniqueScripts = useMemo(() => {
+    const bySlug = new Map<string, Script>();
+    for (const category of categories) {
+      for (const script of category.scripts) {
+        bySlug.set(script.slug, script);
+      }
+    }
+    return [...bySlug.values()];
+  }, [categories]);
+
   const [selectedSlug, setSelectedSlug] = useState<string | null>(
-    categories.flatMap((category) => category.scripts)[0]?.slug ?? null,
+    uniqueScripts[0]?.slug ?? null,
   );
 
-  const allScripts = useMemo(
-    () => categories.flatMap((category) => category.scripts),
-    [categories],
-  );
-
-  const fuse = useMemo(
-    () =>
-      new Fuse(allScripts, {
-        keys: ["name", "slug", "description"],
-        threshold: 0.35,
-      }),
-    [allScripts],
-  );
+  const categoryScripts = useMemo(() => {
+    if (selectedCategoryId === "all") return uniqueScripts;
+    return categories.find((category) => category.id === selectedCategoryId)?.scripts ?? [];
+  }, [categories, selectedCategoryId, uniqueScripts]);
 
   const filteredScripts = useMemo(() => {
-    let scripts = allScripts;
+    if (!query.trim()) return categoryScripts;
 
-    if (selectedCategoryId !== "all") {
-      scripts = scripts.filter((script) => script.categories.includes(selectedCategoryId));
+    const fuse = new Fuse(categoryScripts, {
+      keys: ["name", "slug", "description"],
+      threshold: 0.35,
+    });
+    return fuse.search(query.trim()).map((result) => result.item);
+  }, [categoryScripts, query]);
+
+  useEffect(() => {
+    if (selectedSlug && filteredScripts.some((script) => script.slug === selectedSlug)) {
+      return;
     }
-
-    if (query.trim()) {
-      scripts = fuse.search(query.trim()).map((result) => result.item);
-    }
-
-    return scripts;
-  }, [allScripts, fuse, query, selectedCategoryId]);
+    setSelectedSlug(filteredScripts[0]?.slug ?? null);
+  }, [filteredScripts, selectedSlug]);
 
   const selectedScript =
     filteredScripts.find((script) => script.slug === selectedSlug) ??
     filteredScripts[0] ??
-    allScripts[0] ??
     null;
+
+  const emptyMessage =
+    query.trim().length > 0
+      ? "No scripts match your search."
+      : "No scripts in this category.";
 
   return (
     <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
@@ -75,7 +84,7 @@ export function ScriptsPageClient({ categories }: ScriptsPageClientProps) {
               active={selectedCategoryId === "all"}
               onClick={() => setSelectedCategoryId("all")}
               label="All scripts"
-              count={allScripts.length}
+              count={uniqueScripts.length}
             />
             {categories.map((category) => (
               <CategoryButton
@@ -102,7 +111,7 @@ export function ScriptsPageClient({ categories }: ScriptsPageClientProps) {
           ))}
           {filteredScripts.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">
-              No scripts match your search.
+              {emptyMessage}
             </div>
           ) : null}
         </section>

@@ -1,0 +1,81 @@
+{
+  "name": "HA MCP",
+  "slug": "ha-mcp",
+  "categories": [16],
+  "date_created": "2026-06-28",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 8086,
+  "documentation": "https://github.com/homeassistant-ai/ha-mcp",
+  "website": "https://homeassistant-ai.github.io/ha-mcp/",
+  "logo": "https://www.home-assistant.io/images/favicon-192x192.png",
+  "config_path": "/opt/ha-mcp",
+  "description": "Deploys the official Home Assistant MCP Server (ha-mcp) in HTTP mode via uvx. Provides a LAN MCP endpoint for Cursor and other HTTP-capable AI clients to control Home Assistant through natural language.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/ha-mcp.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 1024,
+        "hdd": 4,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/ha-mcp.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 1024,
+        "hdd": 4,
+        "os": "alpine",
+        "version": "3.24"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "During install you will be prompted for a Home Assistant URL (e.g. http://192.168.1.10:8123) and a long-lived access token (HA Profile → Security → Create Token). The script verifies HA connectivity before starting the service.",
+      "type": "warning"
+    },
+    {
+      "text": "HTTP mode on port 8086 with an auto-generated MCP_SECRET_PATH. Do not expose this port to the internet without a reverse proxy.",
+      "type": "warning"
+    },
+    {
+      "text": "Home Assistant OS users may prefer the official MCP Server add-on. This script is for Container/Core or standalone LXC deployments.",
+      "type": "info"
+    },
+    {
+      "text": "Cursor: add the MCP URL printed at install to ~/.cursor/mcp.json — e.g. {\"mcpServers\":{\"home-assistant\":{\"url\":\"http://<container-ip>:8086/mcp-<secret>/mcp\"}}}. Restart Cursor and confirm in Settings → MCP. See https://github.com/homeassistant-ai/ha-mcp for details.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host.",
+      "type": "info"
+    },
+    {
+      "text": "Retrieve the MCP endpoint anytime: `pct exec <CTID> -- cat /opt/ha-mcp/mcp_endpoint.txt`",
+      "type": "info"
+    },
+    {
+      "text": "HA and this LXC should be on the same LAN/VLAN. Test connectivity from inside the container: `curl -sf -H \"Authorization: Bearer YOUR_TOKEN\" http://YOUR_HA_IP:8123/api/`. Use http:// unless HTTPS is configured. Regenerate the token if revoked.",
+      "type": "warning"
+    },
+    {
+      "text": "Service status — Debian: `systemctl status ha-mcp` and `journalctl -u ha-mcp -n 50`. Alpine: `rc-service ha-mcp status` and `tail -50 /var/log/ha-mcp.log`.",
+      "type": "info"
+    },
+    {
+      "text": "Alpine template: `pveam update` then `pveam available --section system | grep alpine-3.24`. If 3.24 is unavailable, use `var_version=3.23`.",
+      "type": "info"
+    }
+  ]
+}

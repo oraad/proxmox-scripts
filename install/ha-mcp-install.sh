@@ -5,7 +5,7 @@
 # Source: https://github.com/homeassistant-ai/ha-mcp
 
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
-INSTALL_DIR="/opt/hamcp"
+INSTALL_DIR="/opt/ha-mcp"
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
@@ -65,7 +65,7 @@ msg_info "Pre-caching ha-mcp"
 $STD "$UVX_PATH" --python 3.13 ha-mcp@latest --version
 msg_ok "Cached ha-mcp"
 
-msg_info "Setting up ${APPLICATION:-Home Assistant MCP} service"
+msg_info "Setting up ${APPLICATION:-HA MCP} service"
 cat >"${INSTALL_DIR}/start.sh" <<EOF
 #!/bin/sh
 set -a
@@ -80,7 +80,7 @@ if [[ -f /etc/alpine-release ]]; then
 #!/sbin/openrc-run
 
 name="ha-mcp"
-description="Home Assistant MCP Server"
+description="HA MCP Server"
 command="${INSTALL_DIR}/start.sh"
 command_background=true
 command_user=root
@@ -99,7 +99,7 @@ EOF
 else
   cat >"/etc/systemd/system/ha-mcp.service" <<EOF
 [Unit]
-Description=Home Assistant MCP Server (ha-mcp)
+Description=HA MCP Server (ha-mcp)
 After=network-online.target
 Wants=network-online.target
 
@@ -132,7 +132,7 @@ fi
 MCP_ENDPOINT="http://${IP:-127.0.0.1}:8086${MCP_SECRET_PATH}/mcp"
 echo "${MCP_ENDPOINT}" >"${INSTALL_DIR}/mcp_endpoint.txt"
 chmod 600 "${INSTALL_DIR}/mcp_endpoint.txt"
-msg_ok "Installed ${APPLICATION:-Home Assistant MCP}"
+msg_ok "Installed ${APPLICATION:-HA MCP}"
 
 motd_ssh
 customize
@@ -142,11 +142,11 @@ cat <<EOF >/usr/bin/update
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/hamcp.sh)"
+bash -c "\$(curl -fsSL ${REPO_RAW}/ct/ha-mcp.sh)"
 EOF
 chmod +x /usr/bin/update
 
-echo -e "${INFO}${YW} Home Assistant MCP endpoint:${CL}"
+echo -e "${INFO}${YW} HA MCP endpoint:${CL}"
 echo -e "${TAB}${GATEWAY}${BGN}${MCP_ENDPOINT}${CL}"
 echo -e "${INFO}${YW} Add to Cursor (~/.cursor/mcp.json):${CL}"
 echo -e "${TAB}{ \"mcpServers\": { \"home-assistant\": { \"url\": \"${MCP_ENDPOINT}\" } } }"
