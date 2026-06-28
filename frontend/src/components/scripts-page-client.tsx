@@ -2,7 +2,7 @@
 
 import Fuse from "fuse.js";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { ScriptDetail } from "@/components/script-detail";
 import type { Category, Script } from "@/lib/types";
@@ -26,9 +26,7 @@ export function ScriptsPageClient({ categories }: ScriptsPageClientProps) {
     return [...bySlug.values()];
   }, [categories]);
 
-  const [selectedSlug, setSelectedSlug] = useState<string | null>(
-    uniqueScripts[0]?.slug ?? null,
-  );
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
 
   const categoryScripts = useMemo(() => {
     if (selectedCategoryId === "all") return uniqueScripts;
@@ -45,17 +43,15 @@ export function ScriptsPageClient({ categories }: ScriptsPageClientProps) {
     return fuse.search(query.trim()).map((result) => result.item);
   }, [categoryScripts, query]);
 
-  useEffect(() => {
+  const activeSlug = useMemo(() => {
     if (selectedSlug && filteredScripts.some((script) => script.slug === selectedSlug)) {
-      return;
+      return selectedSlug;
     }
-    setSelectedSlug(filteredScripts[0]?.slug ?? null);
+    return filteredScripts[0]?.slug ?? null;
   }, [filteredScripts, selectedSlug]);
 
   const selectedScript =
-    filteredScripts.find((script) => script.slug === selectedSlug) ??
-    filteredScripts[0] ??
-    null;
+    filteredScripts.find((script) => script.slug === activeSlug) ?? null;
 
   const emptyMessage =
     query.trim().length > 0
@@ -105,7 +101,7 @@ export function ScriptsPageClient({ categories }: ScriptsPageClientProps) {
             <ScriptListItem
               key={script.slug}
               script={script}
-              active={selectedScript?.slug === script.slug}
+              active={activeSlug === script.slug}
               onSelect={() => setSelectedSlug(script.slug)}
             />
           ))}
