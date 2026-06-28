@@ -17,9 +17,17 @@ update_os
 
 msg_info "Installing Docker"
 if [[ -f /etc/alpine-release ]]; then
-  $STD apk add docker docker-cli-compose
-  $STD rc-service docker start
+  $STD apk add --no-cache docker docker-cli-compose
   $STD rc-update add docker default
+  $STD rc-service docker start
+  for _ in $(seq 1 30); do
+    [[ -S /var/run/docker.sock ]] && break
+    sleep 1
+  done
+  if [[ ! -S /var/run/docker.sock ]]; then
+    msg_error "Docker daemon did not start — check nesting/keyctl on the LXC"
+    exit 1
+  fi
 else
   DOCKER_CONFIG_PATH='/etc/docker/daemon.json'
   mkdir -p "$(dirname "$DOCKER_CONFIG_PATH")"
@@ -28,10 +36,10 @@ else
 fi
 msg_ok "Installed Docker"
 
-msg_info "Setting up ${APPLICATION:-Music Assistant}"
 mkdir -p "${INSTALL_DIR}/data"
 
-read -r -p "${TAB3}Mount a local music library into the container? (path or leave empty): " media_path
+stop_spinner
+media_path="${var_media_path:-$(prompt_input "${TAB3}Mount a local music library into the container? (path or leave empty):" "" 60)}"
 if [[ -n "${media_path}" && -d "${media_path}" ]]; then
   msg_ok "Will mount ${media_path} at /media"
 elif [[ -n "${media_path}" ]]; then

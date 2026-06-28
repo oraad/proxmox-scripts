@@ -16,14 +16,14 @@ network_check
 update_os
 
 if [[ -f /etc/alpine-release ]]; then
-  $STD apk add curl openssl
+  $STD apk add --no-cache bash ca-certificates curl openssl tar
 else
-  $STD apt-get install -y curl openssl
+  $STD apt-get install -y curl openssl ca-certificates tar
 fi
 
 msg_info "Installing uv"
-$STD sh -c "$(curl -fsSL https://astral.sh/uv/install.sh)"
-export PATH="/root/.local/bin:${PATH}"
+USE_UVX=YES setup_uv || exit 1
+export PATH="/usr/local/bin:${PATH}"
 UVX_PATH="$(command -v uvx)"
 if [[ ! -x "$UVX_PATH" ]]; then
   msg_error "uvx not found after install"
@@ -31,11 +31,9 @@ if [[ ! -x "$UVX_PATH" ]]; then
 fi
 msg_ok "Installed uv (${UVX_PATH})"
 
-msg_info "Configuring Home Assistant connection"
-read -r -p "${TAB3}Home Assistant URL [http://homeassistant.local:8123]: " ha_url
-ha_url="${ha_url:-http://homeassistant.local:8123}"
-read -r -s -p "${TAB3}Home Assistant long-lived access token: " ha_token
-echo
+stop_spinner
+ha_url="${var_ha_url:-$(prompt_input "${TAB3}Home Assistant URL [http://homeassistant.local:8123]:" "http://homeassistant.local:8123" 120)}"
+ha_token="${var_ha_token:-$(prompt_password "${TAB3}Home Assistant long-lived access token:" "" 120)}"
 if [[ -z "${ha_token}" ]]; then
   msg_error "HOMEASSISTANT_TOKEN is required"
   exit 1

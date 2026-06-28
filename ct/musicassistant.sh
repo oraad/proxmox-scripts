@@ -6,7 +6,7 @@
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
 source <(curl -fsSL "${REPO_RAW}/misc/build.func")
 
-APP="MusicAssistant"
+APP="Music Assistant"
 var_tags="${var_tags:-music;media;homeassistant}"
 var_cpu="${var_cpu:-2}"
 var_ram="${var_ram:-2048}"
@@ -47,7 +47,7 @@ function update_script() {
   $STD docker compose pull
   $STD docker compose up -d
   docker inspect ghcr.io/music-assistant/server:latest --format='{{index .RepoDigests 0}}' 2>/dev/null \
-    | awk -F@ '{print $2}' > /opt/musicassistant_version.txt || true
+    | awk -F@ '{print $2}' > /opt/musicassistant/musicassistant_version.txt || true
   msg_ok "Updated ${APP}"
 
   msg_ok "Updated successfully!"

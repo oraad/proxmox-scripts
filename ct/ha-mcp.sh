@@ -6,7 +6,8 @@
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
 source <(curl -fsSL "${REPO_RAW}/misc/build.func")
 
-APP="HAMCP"
+APP="HA MCP"
+NSAPP="ha-mcp"
 var_tags="${var_tags:-homeassistant;mcp;ai}"
 var_cpu="${var_cpu:-1}"
 var_ram="${var_ram:-1024}"
@@ -20,6 +21,8 @@ var_arm64="${var_arm64:-yes}"
 
 header_info "$APP"
 variables
+NSAPP="ha-mcp"
+var_install="ha-mcp-install"
 color
 catch_errors
 
@@ -62,7 +65,7 @@ function update_script() {
   fi
   msg_ok "Base system updated"
 
-  UVX_PATH="$(command -v uvx 2>/dev/null || echo /root/.local/bin/uvx)"
+  UVX_PATH="$(command -v uvx 2>/dev/null || echo /usr/local/bin/uvx)"
   msg_info "Updating ${APP}"
   $STD "$UVX_PATH" --python 3.13 --refresh ha-mcp@latest --version
   if [[ -f /etc/alpine-release ]]; then
