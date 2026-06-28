@@ -1,0 +1,57 @@
+{
+  "name": "Music Assistant",
+  "slug": "musicassistant",
+  "categories": [13, 16, 3],
+  "date_created": "2026-06-28",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 8095,
+  "documentation": "https://www.music-assistant.io/",
+  "website": "https://www.music-assistant.io/",
+  "logo": "https://www.music-assistant.io/favicon.ico",
+  "config_path": "/opt/musicassistant/data",
+  "description": "Music Assistant is a free, open-source media library manager that connects streaming services and local music to a wide range of players. This script deploys the official Docker server in an LXC container with host networking for player discovery.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/musicassistant.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 2048,
+        "hdd": 8,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/musicassistant.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 2048,
+        "hdd": 8,
+        "os": "alpine",
+        "version": "3.24"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Requires Docker with host networking inside the LXC. Enable nesting and keyctl (defaults in this script).",
+      "type": "warning"
+    },
+    {
+      "text": "Music Assistant developers recommend the Home Assistant add-on. This is an unofficial Docker LXC install path.",
+      "type": "info"
+    },
+    {
+      "text": "Web UI: http://<container-ip>:8095 — MA, players, and HA should be on the same flat network (or VLAN).",
+      "type": "info"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Proxmox Custom Scripts contributors
+# License: MIT
+#
+# Thin wrapper around community-scripts build.func that redirects install scripts
+# and ASCII headers to this repository.
+
+REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
+CS_RAW="${CS_RAW:-https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main}"
+
+_build_func_content="$(curl -fsSL "${CS_RAW}/misc/build.func")"
+_build_func_content="${_build_func_content//https:\/\/raw.githubusercontent.com\/community-scripts\/ProxmoxVE\/main\/install/${REPO_RAW}\/install}"
+
+source /dev/stdin <<<"$_build_func_content"
+unset _build_func_content
+
+# Override header fetch so custom ct/headers/* files load from this repo.
+get_header() {
+  local app_name="${1,,}"
+  app_name="${app_name// /}"
+  local header_dir="ct"
+  local header_url="${REPO_RAW}/${header_dir}/headers/${app_name}"
+  local local_header_path="/usr/local/community-scripts/headers/${header_dir}/${app_name}"
+
+  mkdir -p "$(dirname "$local_header_path")"
+
+  if [[ ! -s "$local_header_path" ]]; then
+    if ! curl -fsSL "$header_url" -o "$local_header_path" 2>/dev/null; then
+      command -v msg_warn >/dev/null 2>&1 && msg_warn "Failed to download header: $header_url"
+      return 1
+    fi
+  fi
+
+  cat "$local_header_path"
+}

@@ -1,0 +1,25 @@
+{
+  "categories": [
+    {
+      "id": 3,
+      "name": "Containers & Docker",
+      "sort_order": 3,
+      "description": "Container runtimes and Docker hosts",
+      "icon": "container"
+    },
+    {
+      "id": 13,
+      "name": "Media & Streaming",
+      "sort_order": 13,
+      "description": "Media servers and streaming applications",
+      "icon": "music"
+    },
+    {
+      "id": 16,
+      "name": "IoT & Smart Home",
+      "sort_order": 16,
+      "description": "Home automation and smart home services",
+      "icon": "home"
+    }
+  ]
+}
