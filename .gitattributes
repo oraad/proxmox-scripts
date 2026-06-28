@@ -1,0 +1,2 @@
+*.sh text eol=lf
+misc/build.func text eol=lf
