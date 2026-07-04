@@ -1,0 +1,70 @@
+{
+  "name": "Pangolin CLI Addon",
+  "slug": "add-pangolin-cli",
+  "categories": [0, 4],
+  "date_created": "2026-07-04",
+  "type": "addon",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": null,
+  "documentation": "https://docs.pangolin.net/manage/clients/install-client",
+  "website": "https://pangolin.net/",
+  "logo": "https://pangolin.net/favicon.ico",
+  "config_path": "/etc/pangolin-cli",
+  "description": "Installs Pangolin CLI, the official machine VPN client, on the Proxmox host or into an existing LXC. Joins the target into your Pangolin network using machine client credentials. Prefer an LXC over host install for isolation.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "tools/addon/add-pangolin-cli.sh",
+      "resources": {
+        "cpu": null,
+        "ram": null,
+        "hdd": null,
+        "os": null,
+        "version": null
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "This is the Pangolin VPN / machine client, not the site tunnel agent. To expose private resources to Pangolin, use Pangolin Newt instead.",
+      "type": "info"
+    },
+    {
+      "text": "Create a machine client in the Pangolin dashboard first, then copy the client ID, secret, and endpoint. You will be prompted for these during install.",
+      "type": "warning"
+    },
+    {
+      "text": "Run on the Proxmox host (not inside a container). Choose Proxmox host or an existing LXC, then enter credentials.",
+      "type": "warning"
+    },
+    {
+      "text": "Host install: the entire Proxmox host joins the Pangolin network. Prefer an existing LXC when possible.",
+      "type": "warning"
+    },
+    {
+      "text": "LXC targets need /dev/net/tun passthrough. The script adds the required lines to the container config and restarts the CT if needed. Debian, Ubuntu, or Alpine only.",
+      "type": "info"
+    },
+    {
+      "text": "Manual update — host: `update-pangolin-cli`. Existing LXC: `pct exec <CTID> -- update-pangolin-cli` (does not overwrite an app's `/usr/bin/update`).",
+      "type": "info"
+    },
+    {
+      "text": "Interactive: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin-cli.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended host: `var_target=host var_pangolin_endpoint=https://pangolin.example.com var_client_id=ID var_client_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin-cli.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended LXC: `var_target=101 var_pangolin_endpoint=https://pangolin.example.com var_client_id=ID var_client_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin-cli.sh)\"`",
+      "type": "info"
+    }
+  ]
+}

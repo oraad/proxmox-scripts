@@ -54,7 +54,7 @@
       "type": "info"
     },
     {
-      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host.",
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update Music Assistant or Remove Unused Images. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update.",
       "type": "info"
     },
     {
@@ -63,6 +63,10 @@
     },
     {
       "text": "Alpine template: `pveam update` then `pveam available --section system | grep alpine-3.24`. If 3.24 is unavailable, use `var_version=3.23`.",
+      "type": "info"
+    },
+    {
+      "text": "Optional local music library: during Advanced install you can enter a host path (bind-mounted to `/media` in the LXC). Unattended: `var_media_path=/path/on/host bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/musicassistant.sh)\"`. Unprivileged bind mounts may require correct host directory ownership or `var_unprivileged=0`.",
       "type": "info"
     }
   ]

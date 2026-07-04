@@ -10,9 +10,34 @@ CS_RAW="${CS_RAW:-https://raw.githubusercontent.com/community-scripts/ProxmoxVE/
 
 _build_func_content="$(curl -fsSL "${CS_RAW}/misc/build.func")"
 _build_func_content="${_build_func_content//https:\/\/raw.githubusercontent.com\/community-scripts\/ProxmoxVE\/main\/install/${REPO_RAW}\/install}"
+_build_func_content="${_build_func_content//create_lxc_container || exit \$?/create_lxc_container || exit \$?
+  apply_app_bind_mounts || true}"
 
 source /dev/stdin <<<"$_build_func_content"
 unset _build_func_content
+
+apply_app_bind_mounts() {
+  [[ -z "${var_media_path:-}" ]] && return 0
+  [[ -z "${CTID:-}" ]] && return 0
+  if [[ ! -d "${var_media_path}" ]]; then
+    msg_warn "var_media_path '${var_media_path}' not found on host — skipping bind mount"
+    return 0
+  fi
+
+  msg_info "Binding ${var_media_path} → /media in CT ${CTID}"
+  if ! pct set "$CTID" -mp0 "${var_media_path},mp=/media" >>"${BUILD_LOG:-/dev/null}" 2>&1; then
+    msg_warn "Failed to bind mount — add manually: pct set ${CTID} -mp0 ${var_media_path},mp=/media"
+    return 0
+  fi
+
+  pct reboot "$CTID" >>"${BUILD_LOG:-/dev/null}" 2>&1 || true
+  local _
+  for _ in $(seq 1 30); do
+    pct exec "$CTID" -- true 2>/dev/null && break
+    sleep 2
+  done
+  msg_ok "Bound music library at /media"
+}
 
 # Override header fetch so custom ct/headers/* files load from this repo.
 get_header() {

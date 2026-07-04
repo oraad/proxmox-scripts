@@ -1,0 +1,62 @@
+{
+  "name": "PVE LXC Apps Updater",
+  "slug": "update-apps",
+  "categories": [0],
+  "date_created": "2026-07-04",
+  "type": "pve",
+  "updateable": false,
+  "privileged": false,
+  "interface_port": null,
+  "documentation": "https://github.com/oraad/proxmox-scripts",
+  "website": "https://oraad.github.io/proxmox-scripts/",
+  "logo": null,
+  "config_path": "",
+  "description": "Batch-update LXC apps installed by community-scripts or Proxmox Custom Scripts (musicassistant, ha-mcp, newt, and more). Resolves each container's update script from the URL in /usr/bin/update, with optional vzdump backups, unattended mode, and a summary report.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "tools/pve/update-apps.sh",
+      "resources": {
+        "cpu": null,
+        "ram": null,
+        "hdd": null,
+        "os": null,
+        "version": null
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Run on the Proxmox host (not inside a container). Detects LXCs tagged community-script or proxmox-helper-scripts.",
+      "type": "info"
+    },
+    {
+      "text": "Unlike upstream update-apps, this script downloads ct/<service>.sh from whichever repo each container's /usr/bin/update points at — so custom apps (musicassistant, ha-mcp, newt) and community-scripts apps update in one pass.",
+      "type": "info"
+    },
+    {
+      "text": "Interactive: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/pve/update-apps.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended (all running): `var_backup=no var_container=all_running var_unattended=yes var_skip_confirm=yes bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/pve/update-apps.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Optional vzdump backup before each update; on failure the script can restore from that backup. Logs: /usr/local/community-scripts/update_apps/",
+      "type": "info"
+    },
+    {
+      "text": "Dry-run (var_dry_run=yes) only reports versions for apps that use check_for_gh_release (e.g. newt). Docker/uvx apps (musicassistant, ha-mcp) are skipped in dry-run.",
+      "type": "warning"
+    },
+    {
+      "text": "Per-container update still works: `pct exec <CTID> -- update` or run `update` inside the LXC.",
+      "type": "info"
+    }
+  ]
+}

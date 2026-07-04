@@ -1,0 +1,81 @@
+{
+  "name": "Pangolin Newt",
+  "slug": "newt",
+  "categories": [4],
+  "date_created": "2026-07-04",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": null,
+  "documentation": "https://docs.pangolin.net/manage/sites/install-site",
+  "website": "https://pangolin.net/",
+  "logo": "https://pangolin.net/favicon.ico",
+  "config_path": "/etc/newt",
+  "description": "Deploys Pangolin Newt, a lightweight userspace WireGuard tunnel agent, as a dedicated LXC. Connects outbound to your Pangolin control plane to expose private resources without port forwarding.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/newt.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 512,
+        "hdd": 2,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/newt.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 512,
+        "hdd": 2,
+        "os": "alpine",
+        "version": "3.24"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Create a site in the Pangolin dashboard first, then copy the Newt ID, secret, and endpoint. You will be prompted for these during install.",
+      "type": "warning"
+    },
+    {
+      "text": "Primary updates: enable Automatic Site Updates in Pangolin (org or per-site). Requires Newt ≥ 1.13.0 binary install — this script installs the official static binary as root so self-update can replace /usr/local/bin/newt.",
+      "type": "info"
+    },
+    {
+      "text": "Manual fallback: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Also works with the PVE LXC Apps Updater (dry-run supported via check_for_gh_release).",
+      "type": "info"
+    },
+    {
+      "text": "Newt has no local web UI — it only maintains an outbound tunnel to Pangolin. Check status with `systemctl status newt` (Debian) or `rc-service newt status` (Alpine).",
+      "type": "info"
+    },
+    {
+      "text": "Userspace WireGuard — no TUN device, privileged mode, or nesting required. Prefer this dedicated LXC over host install for isolation.",
+      "type": "info"
+    },
+    {
+      "text": "Unattended: `var_pangolin_endpoint=https://pangolin.example.com var_newt_id=ID var_newt_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/newt.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Alpine template: `pveam update` then `pveam available --section system | grep alpine-3.24`. If 3.24 is unavailable, use `var_version=3.23`.",
+      "type": "info"
+    },
+    {
+      "text": "To install Newt on the Proxmox host or an existing LXC instead, use the Pangolin Newt Addon script.",
+      "type": "info"
+    },
+    {
+      "text": "This is the site tunnel agent (expose resources to Pangolin). To join a host or LXC into the Pangolin network as a machine client, use the Pangolin CLI Addon instead.",
+      "type": "info"
+    }
+  ]
+}

@@ -1,11 +1,25 @@
 {
   "categories": [
     {
+      "id": 0,
+      "name": "Proxmox VE Tools",
+      "sort_order": 0,
+      "description": "Host-side tools for managing Proxmox VE and helper-script LXCs",
+      "icon": "server"
+    },
+    {
       "id": 3,
       "name": "Containers & Docker",
       "sort_order": 3,
       "description": "Container runtimes and Docker hosts",
       "icon": "container"
+    },
+    {
+      "id": 4,
+      "name": "Networking & Monitoring",
+      "sort_order": 4,
+      "description": "Network scanners, tunnel agents, visibility, and monitoring tools",
+      "icon": "network"
     },
     {
       "id": 13,

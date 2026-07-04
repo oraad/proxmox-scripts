@@ -1,0 +1,77 @@
+{
+  "name": "NetAlertX",
+  "slug": "netalertx",
+  "categories": [4, 3],
+  "date_created": "2026-07-04",
+  "type": "ct",
+  "updateable": true,
+  "privileged": true,
+  "interface_port": 20211,
+  "documentation": "https://docs.netalertx.com/",
+  "website": "https://netalertx.com/",
+  "logo": "https://raw.githubusercontent.com/netalertx/NetAlertX/main/docs/img/NetAlertX_logo.png",
+  "config_path": "/opt/netalertx/data",
+  "description": "NetAlertX is a network visibility and asset intelligence tool that discovers devices via ARP and passive protocols. This script deploys the official Docker image in an LXC with host networking for accurate scanning.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/netalertx.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 2048,
+        "hdd": 8,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/netalertx.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 2048,
+        "hdd": 8,
+        "os": "alpine",
+        "version": "3.24"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Defaults to a privileged LXC with nesting and keyctl so Docker can use host networking and ARP/raw sockets. Unprivileged mode often limits discovery: `var_unprivileged=1 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/netalertx.sh)\"`.",
+      "type": "warning"
+    },
+    {
+      "text": "Host networking is mandatory for the NetAlertX container (ARP scanning and passive discovery). The LXC should be on the same LAN/VLAN as the networks you want to monitor.",
+      "type": "warning"
+    },
+    {
+      "text": "Web UI: http://<container-ip>:20211 (GraphQL API on 20212). Initial discovery can take 5–10 minutes.",
+      "type": "info"
+    },
+    {
+      "text": "Optional SCAN_SUBNETS at install: enter a CIDR and interface (e.g. 192.168.1.0/24 and eth0), or leave empty and set SCAN_SUBNETS in Settings after first start. Unattended: `var_scan_subnets=\"['192.168.1.0/24 --interface=eth0']\" bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/netalertx.sh)\"`.",
+      "type": "info"
+    },
+    {
+      "text": "Upstream compose sysctls (arp_ignore / arp_announce) are omitted because they often fail inside LXC. Set them on the Proxmox host if you need ARP flux mitigation.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update NetAlertX or Remove Unused Images. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update.",
+      "type": "info"
+    },
+    {
+      "text": "Data lives under /opt/netalertx/data (config/ and db/). Official image: ghcr.io/netalertx/netalertx:latest.",
+      "type": "info"
+    },
+    {
+      "text": "Alpine template: `pveam update` then `pveam available --section system | grep alpine-3.24`. If 3.24 is unavailable, use `var_version=3.23`.",
+      "type": "info"
+    }
+  ]
+}

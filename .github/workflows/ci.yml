@@ -49,5 +49,5 @@ jobs:
 
       - name: Bash syntax check
         run: |
-          find ct install misc -type f \( -name '*.sh' -o -name 'build.func' \) -print0 \
+          find ct install misc tools -type f \( -name '*.sh' -o -name 'build.func' \) -print0 \
             | xargs -0 -I{} bash -n {}

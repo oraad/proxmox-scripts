@@ -1,0 +1,70 @@
+{
+  "name": "Pangolin Newt Addon",
+  "slug": "add-newt",
+  "categories": [0, 4],
+  "date_created": "2026-07-04",
+  "type": "addon",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": null,
+  "documentation": "https://docs.pangolin.net/manage/sites/install-site",
+  "website": "https://pangolin.net/",
+  "logo": "https://pangolin.net/favicon.ico",
+  "config_path": "/etc/newt",
+  "description": "Installs Pangolin Newt on the Proxmox host or into an existing LXC. Uses the official static binary and systemd/OpenRC so Pangolin Automatic Site Updates work. Prefer the dedicated Newt LXC for isolation.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "tools/addon/add-newt.sh",
+      "resources": {
+        "cpu": null,
+        "ram": null,
+        "hdd": null,
+        "os": null,
+        "version": null
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Run on the Proxmox host (not inside a container). Choose Proxmox host or an existing LXC, then enter Pangolin endpoint, Newt ID, and secret.",
+      "type": "warning"
+    },
+    {
+      "text": "Host install: Newt can reach everything the host can. Treat it as an extension of the internet. Prefer the dedicated Pangolin Newt LXC when possible.",
+      "type": "warning"
+    },
+    {
+      "text": "Primary updates: enable Automatic Site Updates in Pangolin (org or per-site). Requires Newt ≥ 1.13.0 binary install.",
+      "type": "info"
+    },
+    {
+      "text": "Manual fallback — host: `update-newt`. Existing LXC: `pct exec <CTID> -- update-newt` (does not overwrite an app's `/usr/bin/update`).",
+      "type": "info"
+    },
+    {
+      "text": "Interactive: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-newt.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended host: `var_target=host var_pangolin_endpoint=https://pangolin.example.com var_newt_id=ID var_newt_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-newt.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended LXC: `var_target=101 var_pangolin_endpoint=https://pangolin.example.com var_newt_id=ID var_newt_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-newt.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "LXC targets must be Debian, Ubuntu, or Alpine. No TUN device passthrough is required (userspace WireGuard).",
+      "type": "info"
+    },
+    {
+      "text": "This is the site tunnel agent (expose resources to Pangolin). To join a host or LXC into the Pangolin network as a machine client, use the Pangolin CLI Addon instead.",
+      "type": "info"
+    }
+  ]
+}

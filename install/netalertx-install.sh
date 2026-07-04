@@ -2,10 +2,10 @@
 
 # Copyright (c) 2026 Proxmox Custom Scripts contributors
 # License: MIT
-# Source: https://www.music-assistant.io/ | Github: https://github.com/music-assistant/server
+# Source: https://netalertx.com/ | Github: https://github.com/netalertx/NetAlertX
 
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
-INSTALL_DIR="/opt/musicassistant"
+INSTALL_DIR="/opt/netalertx"
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
@@ -44,48 +44,55 @@ else
 fi
 msg_ok "Installed Docker"
 
-mkdir -p "${INSTALL_DIR}/data"
+mkdir -p "${INSTALL_DIR}/data/config" "${INSTALL_DIR}/data/db"
+chown -R 20211:20211 "${INSTALL_DIR}/data"
 
-media_path=""
-if [[ -n "${var_media_path:-}" && -d /media ]]; then
-  media_path="/media"
-  msg_ok "Using bind-mounted library at /media"
-elif [[ -n "${var_media_path:-}" ]]; then
-  msg_warn "var_media_path was set but /media is missing in the container — skipping media mount"
+if [[ -n "${var_scan_subnets:-}" ]]; then
+  msg_ok "Configured SCAN_SUBNETS: ${var_scan_subnets}"
 fi
 
 {
   cat <<'EOF'
 services:
-  music-assistant-server:
-    image: ghcr.io/music-assistant/server:latest
-    container_name: music-assistant-server
-    restart: unless-stopped
+  netalertx:
+    image: ghcr.io/netalertx/netalertx:latest
+    container_name: netalertx
     network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETUID
+      - SETGID
     volumes:
       - ./data:/data
-EOF
-  if [[ -n "${media_path}" ]]; then
-    echo "      - ${media_path}:/media"
-  fi
-  cat <<'EOF'
-    cap_add:
-      - SYS_ADMIN
-      - DAC_READ_SEARCH
-    security_opt:
-      - apparmor:unconfined
+      - /etc/localtime:/etc/localtime:ro
+    tmpfs:
+      - /tmp:uid=20211,gid=20211,mode=1700,rw,noexec,nosuid,nodev
     environment:
-      - LOG_LEVEL=info
+      PORT: "20211"
+      GRAPHQL_PORT: "20212"
 EOF
+  if [[ -n "${var_scan_subnets:-}" ]]; then
+    override_json=$(printf '{"SCAN_SUBNETS":"%s"}' "${var_scan_subnets}")
+    override_yaml=${override_json//\\/\\\\}
+    override_yaml=${override_yaml//\"/\\\"}
+    echo "      APP_CONF_OVERRIDE: \"${override_yaml}\""
+  fi
 } >"${INSTALL_DIR}/compose.yaml"
 
 cd "${INSTALL_DIR}"
 $STD docker compose pull
 $STD docker compose up -d
 
-docker inspect ghcr.io/music-assistant/server:latest --format='{{index .RepoDigests 0}}' 2>/dev/null \
-  | awk -F@ '{print $2}' > "${INSTALL_DIR}/musicassistant_version.txt" || echo "latest" > "${INSTALL_DIR}/musicassistant_version.txt"
-msg_ok "Installed ${APPLICATION:-Music Assistant}"
+docker inspect ghcr.io/netalertx/netalertx:latest --format='{{index .RepoDigests 0}}' 2>/dev/null \
+  | awk -F@ '{print $2}' > "${INSTALL_DIR}/netalertx_version.txt" || echo "latest" > "${INSTALL_DIR}/netalertx_version.txt"
+msg_ok "Installed ${APPLICATION:-NetAlertX}"
 
 motd_ssh
 customize
@@ -95,7 +102,7 @@ cat <<EOF >/usr/bin/update
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/musicassistant.sh)"
+bash -c "\$(curl -fsSL ${REPO_RAW}/ct/netalertx.sh)"
 EOF
 chmod +x /usr/bin/update
 
