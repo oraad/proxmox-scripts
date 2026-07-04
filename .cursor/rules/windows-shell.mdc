@@ -1,0 +1,38 @@
+---
+description: Windows host shell paths, Git Bash, WSL, and Docker execution for agents
+alwaysApply: true
+---
+
+# Windows shell execution (agents)
+
+Cursor on this machine may run **PowerShell** even when commands look like bash. Repo root: `C:\Projects\proxmox` (Git Bash: `/c/Projects/proxmox`, WSL: `/mnt/c/Projects/proxmox`).
+
+## When to use which approach
+
+- **Simple Docker Compose** (no pipes, no `$()`, no HEREDOC): set Shell tool `working_directory` to `C:\Projects\proxmox` and run `docker compose …` directly.
+- **Everything else** (pipes, `head`/`grep`, `$(pwd)`, `scripts/*.sh`, git HEREDOC): wrap in `bash -lc '…'` or run inside WSL/Docker.
+
+## Path rules
+
+| Context | Format | Example |
+|---------|--------|---------|
+| Shell tool `working_directory` | Windows backslashes OK | `C:\Projects\proxmox` |
+| Docker `-v` from Windows host | Git Bash / Docker Desktop style | `"/c/Projects/proxmox:/work"` |
+| Inside WSL bash (`bash -lc`) | WSL mount path | `/mnt/c/Projects/proxmox` |
+| Inside Git Bash | MSYS path | `/c/Projects/proxmox` |
+
+Never use `C:\…` backslashes inside Docker volume strings.
+
+## Anti-patterns
+
+| Avoid (PowerShell) | Use instead |
+|--------------------|-------------|
+| `Select-Object -First N` | `bash -lc '… \| head -n N'` |
+| `Select-String -Pattern` | `bash -lc '… \| grep pattern'` |
+| `$env:VAR` / backtick continuations | `export VAR=…` inside `bash -lc` |
+| `cat <<'EOF'` for git commits | Full commit wrapped in `bash -lc '…'` |
+| `C:\Projects\…` in `docker -v` | `"/c/Projects/…"` |
+
+## On failure
+
+Retry once with `bash -lc` and POSIX paths before changing command logic.

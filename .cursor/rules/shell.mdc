@@ -1,0 +1,12 @@
+---
+description: Shell conventions — bash/Git Bash/WSL/Docker on Windows
+alwaysApply: true
+---
+
+# Shell execution (agents)
+
+- Use **bash**, **Git Bash**, **WSL**, or **Docker exec** for shell commands — never PowerShell-native syntax.
+- On Windows, avoid `$env:`, backtick continuations, `Select-Object`, `Select-String`, and `%CD%`.
+- Use POSIX paths in Docker volume mounts: `-v "/c/Projects/proxmox:/work"`.
+- Prefer Linux commands; use Docker when the host shell differs from CI (Ubuntu + bash).
+- On Windows hosts, see **`windows-shell.mdc`** for path formats, `bash -lc` wrapping, and Docker volume mounts.
