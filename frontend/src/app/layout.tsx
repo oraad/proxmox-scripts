@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 
 import { Providers } from "@/components/providers";
 import { siteDescription, siteName } from "@/config/site-config";
+import { flattenScripts, loadCategories } from "@/lib/data";
 
 import "./globals.css";
 
@@ -13,11 +14,14 @@ export const metadata: Metadata = {
   description: siteDescription,
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const categories = await loadCategories();
+  const scripts = flattenScripts(categories);
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
-        <Providers>{children}</Providers>
+        <Providers scripts={scripts}>{children}</Providers>
       </body>
     </html>
   );

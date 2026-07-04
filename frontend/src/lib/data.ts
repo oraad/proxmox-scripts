@@ -1,18 +1,19 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import type { Category } from "@/lib/types";
-import { basePath } from "@/config/site-config";
 
-export async function fetchCategories(): Promise<Category[]> {
-  const response = await fetch(`${basePath}/categories.json`, {
-    next: { revalidate: false },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to load categories: ${response.statusText}`);
-  }
-
-  return response.json();
+export async function loadCategories(): Promise<Category[]> {
+  const filePath = path.join(process.cwd(), "public/categories.json");
+  const content = await fs.readFile(filePath, "utf8");
+  return JSON.parse(content) as Category[];
 }
 
-export function flattenScripts(categories: Category[]) {
-  return categories.flatMap((category) => category.scripts);
-}
+export {
+  flattenScripts,
+  formatDate,
+  getRelatedScripts,
+  getScriptBySlug,
+  hasAlpineMethod,
+  typeLabel,
+} from "@/lib/scripts";

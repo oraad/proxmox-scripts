@@ -1,14 +1,30 @@
 "use client";
 
 import { ThemeProvider } from "next-themes";
+import { useState } from "react";
 
+import { CommandMenu } from "@/components/command-menu";
+import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
+import type { Script } from "@/lib/types";
 
-export function Providers({ children }: { children: React.ReactNode }) {
+export function Providers({
+  children,
+  scripts,
+}: {
+  children: React.ReactNode;
+  scripts: Script[];
+}) {
+  const [searchOpen, setSearchOpen] = useState(false);
+
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-      <SiteHeader />
-      <main className="mx-auto min-h-[calc(100vh-4rem)] w-full max-w-7xl px-4 py-8 sm:px-6">{children}</main>
+      <div className="flex min-h-screen flex-col">
+        <SiteHeader onOpenSearch={() => setSearchOpen(true)} />
+        <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6">{children}</main>
+        <SiteFooter />
+      </div>
+      <CommandMenu scripts={scripts} open={searchOpen} onOpenChange={setSearchOpen} />
     </ThemeProvider>
   );
 }
