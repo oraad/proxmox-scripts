@@ -8,7 +8,7 @@ export function buildInstallCommand(method: InstallMethod): string {
   const { os, version } = method.resources;
 
   if (method.type === "alpine" || os === "alpine") {
-    return `var_os=alpine var_version=${version ?? "3.24"} bash -c "$(curl -fsSL ${scriptUrl})"`;
+    return `var_os=alpine var_version=${version ?? "3.23"} bash -c "$(curl -fsSL ${scriptUrl})"`;
   }
 
   if (os && os !== "debian") {

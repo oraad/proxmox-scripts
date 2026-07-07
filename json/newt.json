@@ -32,7 +32,7 @@
         "ram": 512,
         "hdd": 2,
         "os": "alpine",
-        "version": "3.24"
+        "version": "3.23"
       }
     }
   ],
@@ -58,7 +58,11 @@
       "type": "info"
     },
     {
-      "text": "Userspace WireGuard — no TUN device, privileged mode, or nesting required. Prefer this dedicated LXC over host install for isolation.",
+      "text": "TUN device passthrough, nesting, and keyctl are enabled by default for tunnel routing (override with `var_tun=no`, `var_nesting=0`, etc.). Prefer this dedicated LXC over host install for isolation.",
+      "type": "info"
+    },
+    {
+      "text": "IPv4 forwarding and NAT masquerade (`iptables -t nat -A POSTROUTING -j MASQUERADE`) are configured inside the container and persist across reboots. Add host/LAN routes to this CT's IP for bidirectional tunnel routing.",
       "type": "info"
     },
     {
@@ -66,7 +70,7 @@
       "type": "info"
     },
     {
-      "text": "Alpine template: `pveam update` then `pveam available --section system | grep alpine-3.24`. If 3.24 is unavailable, use `var_version=3.23`.",
+      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.23`. Download if missing: `pveam download local alpine-3.23-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.23 is not listed on an older Proxmox host.",
       "type": "info"
     },
     {

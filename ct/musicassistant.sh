@@ -14,8 +14,8 @@ var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_unprivileged="${var_unprivileged:-1}"
-var_nesting="${var_nesting:-1}"
-var_keyctl="${var_keyctl:-1}"
+apply_debian13_lxc_defaults
+apply_alpine_lxc_defaults
 var_arm64="${var_arm64:-yes}"
 
 header_info "$APP"

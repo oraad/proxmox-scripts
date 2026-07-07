@@ -24,6 +24,45 @@ else
 fi
 msg_ok "Installed dependencies"
 
+configure_newt_routing() {
+  msg_info "Configuring IPv4 forwarding and NAT masquerade"
+  if [[ -f /etc/alpine-release ]]; then
+    grep -q '^net\.ipv4\.ip_forward=1' /etc/sysctl.conf 2>/dev/null || \
+      echo 'net.ipv4.ip_forward=1' >>/etc/sysctl.conf
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+    $STD apk add --no-cache iptables
+    iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -j MASQUERADE
+
+    install -d -m 0755 /etc/iptables
+    iptables-save >/etc/iptables/iptables.rules
+    cat >/etc/local.d/newt-nat.start <<'EOF'
+#!/bin/sh
+[ -f /etc/iptables/iptables.rules ] && iptables-restore </etc/iptables/iptables.rules
+EOF
+    chmod +x /etc/local.d/newt-nat.start
+    rc-update add local default 2>/dev/null || true
+  else
+    cat >/etc/sysctl.d/99-newt-routing.conf <<'EOF'
+net.ipv4.ip_forward=1
+EOF
+    sysctl --system >/dev/null 2>&1 || sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+    echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+    echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
+    DEBIAN_FRONTEND=noninteractive $STD apt-get install -y -qq iptables-persistent
+
+    iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -j MASQUERADE
+
+    netfilter-persistent save >/dev/null 2>&1 || iptables-save >/etc/iptables/rules.v4
+  fi
+  msg_ok "Configured IPv4 forwarding and NAT masquerade"
+}
+
+configure_newt_routing
+
 newt_arch() {
   local arch
   arch="$(dpkg --print-architecture 2>/dev/null || true)"

@@ -39,6 +39,19 @@ apply_app_bind_mounts() {
   msg_ok "Bound music library at /media"
 }
 
+apply_debian13_lxc_defaults() {
+  [[ "${var_os:-debian}" == "debian" ]] || return 0
+  [[ "${var_version:-13}" == "13" ]] || return 0
+  var_nesting="${var_nesting:-1}"
+  var_keyctl="${var_keyctl:-1}"
+}
+
+apply_alpine_lxc_defaults() {
+  [[ "${var_os:-debian}" == "alpine" ]] || return 0
+  var_nesting="${var_nesting:-1}"
+  var_keyctl="${var_keyctl:-1}"
+}
+
 # Override header fetch so custom ct/headers/* files load from this repo.
 get_header() {
   local app_name

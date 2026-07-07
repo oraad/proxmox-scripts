@@ -36,7 +36,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/ma
 Alpine LXC:
 
 ```bash
-var_os=alpine var_version=3.24 bash -c "$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/musicassistant.sh)"
+var_os=alpine var_version=3.23 bash -c "$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/musicassistant.sh)"
 ```
 
 Per-script install details, ports, warnings, and troubleshooting live on each script page in the catalog (`json/<slug>.json` powers the site).
