@@ -11,10 +11,171 @@ CS_RAW="${CS_RAW:-https://raw.githubusercontent.com/community-scripts/ProxmoxVE/
 _build_func_content="$(curl -fsSL "${CS_RAW}/misc/build.func")"
 _build_func_content="${_build_func_content//https:\/\/raw.githubusercontent.com\/community-scripts\/ProxmoxVE\/main\/install/${REPO_RAW}\/install}"
 _build_func_content="${_build_func_content//create_lxc_container || exit \$?/create_lxc_container || exit \$?
+  apply_extra_nics || true
   apply_app_bind_mounts || true}"
 
 source /dev/stdin <<<"$_build_func_content"
 unset _build_func_content
+
+# Extra LXC NICs (net1–net9) after the upstream wizard's single net0.
+# Interactive Advanced installs only; Default / unattended leave net0 as-is.
+apply_extra_nics() {
+  [[ -z "${CTID:-}" ]] && return 0
+  command -v pct >/dev/null 2>&1 || return 0
+  command -v whiptail >/dev/null 2>&1 || return 0
+
+  if declare -f is_unattended >/dev/null 2>&1 && is_unattended; then
+    return 0
+  fi
+  [[ "${PHS_SILENT:-0}" == "1" ]] && return 0
+  [[ "${var_unattended:-}" =~ ^(yes|true|1)$ ]] && return 0
+  [[ "${UNATTENDED:-}" =~ ^(yes|true|1)$ ]] && return 0
+  [[ ! -t 0 ]] && return 0
+
+  local method="${METHOD:-${MODE:-${mode:-}}}"
+  method="${method,,}"
+  case "$method" in
+    advanced | 2) ;;
+    *) return 0 ;;
+  esac
+
+  _extra_nic_next_index() {
+    local idx=1
+    while [[ "$idx" -le 9 ]]; do
+      if ! pct config "$CTID" 2>/dev/null | grep -q "^net${idx}:"; then
+        echo "$idx"
+        return 0
+      fi
+      idx=$((idx + 1))
+    done
+    return 1
+  }
+
+  _extra_nic_bridge_menu() {
+    local -a menu=()
+    local iface seen=" "
+    _extra_nic_add_bridge() {
+      local name="$1" desc="$2"
+      [[ -z "$name" || "$seen" == *" ${name} "* ]] && return 0
+      seen+="${name} "
+      menu+=("$name" "$desc")
+    }
+    while IFS= read -r iface; do
+      _extra_nic_add_bridge "$iface" "Linux bridge"
+    done < <(ip -br link show type bridge 2>/dev/null | awk '{print $1}' | sort -u)
+
+    if command -v ovs-vsctl >/dev/null 2>&1; then
+      while IFS= read -r iface; do
+        _extra_nic_add_bridge "$iface" "OVS bridge"
+      done < <(ovs-vsctl list-br 2>/dev/null | sort -u)
+    fi
+
+    if [[ -f /etc/pve/sdn/vnets.cfg ]]; then
+      while IFS= read -r iface; do
+        _extra_nic_add_bridge "$iface" "SDN vnet"
+      done < <(awk '/^vnet:/{print $2}' /etc/pve/sdn/vnets.cfg 2>/dev/null)
+    fi
+
+    if [[ ${#menu[@]} -eq 0 ]]; then
+      echo "vmbr0"
+      return 0
+    fi
+
+    local chosen
+    if chosen=$(whiptail --backtitle "Proxmox Custom Scripts" \
+      --title "ADDITIONAL NETWORK BRIDGE" \
+      --ok-button "Next" --cancel-button "Skip" \
+      --menu "\nSelect the bridge or SDN vnet for this adapter:" 16 58 6 \
+      "${menu[@]}" \
+      3>&1 1>&2 2>&3); then
+      echo "$chosen"
+      return 0
+    fi
+    return 1
+  }
+
+  command -v stop_spinner >/dev/null 2>&1 && stop_spinner
+
+  while true; do
+    local idx
+    idx="$(_extra_nic_next_index)" || {
+      msg_warn "Maximum of 10 LXC NICs (net0–net9) already in use"
+      return 0
+    }
+
+    if ! whiptail --backtitle "Proxmox Custom Scripts" \
+      --title "ADDITIONAL NETWORK ADAPTER" \
+      --yes-button "Add adapter" --no-button "Continue" --defaultno \
+      --yesno "Add another network adapter (net${idx} / eth${idx})?\n\nnet0 is already configured. Extra adapters are optional (IoT VLAN, management, etc.)." 12 70; then
+      return 0
+    fi
+
+    local bridge
+    bridge="$(_extra_nic_bridge_menu)" || continue
+    if declare -f validate_bridge >/dev/null 2>&1; then
+      if ! validate_bridge "$bridge" && ! { declare -f validate_sdn_vnet >/dev/null 2>&1 && validate_sdn_vnet "$bridge"; }; then
+        whiptail --msgbox "Bridge or vnet '${bridge}' is not available." 8 58
+        continue
+      fi
+    fi
+
+    local ip_mode
+    ip_mode=$(whiptail --backtitle "Proxmox Custom Scripts" \
+      --title "IPv4 FOR eth${idx}" \
+      --ok-button "Next" --cancel-button "Skip" \
+      --menu "\nSelect IPv4 assignment for eth${idx}:" 14 58 2 \
+      "dhcp" "Automatic (DHCP)" \
+      "static" "Static CIDR (gateway optional)" \
+      3>&1 1>&2 2>&3) || continue
+
+    local ip="dhcp"
+    local gw=""
+    if [[ "$ip_mode" == "static" ]]; then
+      local cidr
+      cidr=$(whiptail --backtitle "Proxmox Custom Scripts" \
+        --title "STATIC IPv4 FOR eth${idx}" \
+        --ok-button "Next" --cancel-button "Skip" \
+        --inputbox "\nEnter IPv4 CIDR (e.g. 192.168.10.50/24)" 10 58 "" \
+        3>&1 1>&2 2>&3) || continue
+      if declare -f validate_ip_address >/dev/null 2>&1 && ! validate_ip_address "$cidr"; then
+        whiptail --msgbox "Invalid IPv4 CIDR.\nExample: 192.168.10.50/24" 8 58
+        continue
+      fi
+      ip="$cidr"
+      gw=$(whiptail --backtitle "Proxmox Custom Scripts" \
+        --title "GATEWAY FOR eth${idx}" \
+        --ok-button "Next" --cancel-button "Skip" \
+        --inputbox "\nEnter gateway IPv4, or leave blank (typical for extra NICs)" 10 58 "" \
+        3>&1 1>&2 2>&3) || continue
+      if [[ -n "$gw" ]] && declare -f validate_gateway_ip >/dev/null 2>&1 && ! validate_gateway_ip "$gw"; then
+        whiptail --msgbox "Invalid gateway IP.\nExample: 192.168.10.1" 8 58
+        continue
+      fi
+    fi
+
+    local vlan
+    vlan=$(whiptail --backtitle "Proxmox Custom Scripts" \
+      --title "VLAN TAG FOR eth${idx}" \
+      --ok-button "Add" --cancel-button "Skip" \
+      --inputbox "\nVLAN tag 1–4094, or leave blank for none" 10 58 "" \
+      3>&1 1>&2 2>&3) || continue
+    if declare -f validate_vlan_tag >/dev/null 2>&1 && ! validate_vlan_tag "$vlan"; then
+      whiptail --msgbox "Invalid VLAN tag. Use 1–4094 or leave blank." 8 58
+      continue
+    fi
+
+    local net_spec="name=eth${idx},bridge=${bridge},ip=${ip}"
+    [[ -n "$gw" ]] && net_spec+=",gw=${gw}"
+    [[ -n "$vlan" ]] && net_spec+=",tag=${vlan}"
+
+    msg_info "Adding net${idx} (${net_spec})"
+    if ! pct set "$CTID" -net"${idx}" "$net_spec" >>"${BUILD_LOG:-/dev/null}" 2>&1; then
+      msg_warn "Failed to add net${idx} — add manually: pct set ${CTID} -net${idx} ${net_spec}"
+      return 0
+    fi
+    msg_ok "Added net${idx} on ${bridge} (eth${idx})"
+  done
+}
 
 apply_app_bind_mounts() {
   [[ -z "${var_media_path:-}" ]] && return 0

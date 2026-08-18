@@ -45,7 +45,7 @@ Per-script install details, ports, warnings, and troubleshooting live on each sc
 
 **Default mode** — Sensible resource defaults with minimal prompts.
 
-**Advanced mode** — Full control over container settings before install.
+**Advanced mode** — Full control over container settings before install, then an optional prompt to add extra LXC NICs (net1–net9). Default and unattended installs keep the single net0 adapter.
 
 After installation, each container includes an **`update`** command (also via `pct exec <CTID> -- update` from the host) to pull the latest application version.
 
