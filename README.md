@@ -13,6 +13,7 @@ One-command LXC installations for self-hosted applications missing from communit
 Current scripts:
 
 - [Music Assistant](https://oraad.github.io/proxmox-scripts/scripts) — Docker server with host networking
+- [ProxCenter](https://oraad.github.io/proxmox-scripts/scripts) — multi-cluster Proxmox VE / PBS management UI
 - [HA MCP](https://oraad.github.io/proxmox-scripts/scripts) — ha-mcp HTTP endpoint for MCP clients
 - [agentgateway](https://oraad.github.io/proxmox-scripts/scripts) — MCP federation proxy in front of multiple mcp (or other Streamable HTTP) backends
 - [NetAlertX](https://oraad.github.io/proxmox-scripts/scripts) — network visibility via Docker with host networking (privileged LXC)
@@ -52,7 +53,7 @@ After installation, each container includes an **`update`** command (also via `p
 
 ### Batch update (community-scripts + custom)
 
-On the Proxmox host, update all tagged helper-script LXCs in one pass — including apps from this repo (musicassistant, ha-mcp, newt) and from community-scripts. The tool reads each container’s `/usr/bin/update` URL and loads `ct/<service>.sh` from the matching repository.
+On the Proxmox host, update all tagged helper-script LXCs in one pass — including apps from this repo (musicassistant, proxcenter, ha-mcp, newt) and from community-scripts. The tool reads each container’s `/usr/bin/update` URL and loads `ct/<service>.sh` from the matching repository.
 
 Interactive:
 

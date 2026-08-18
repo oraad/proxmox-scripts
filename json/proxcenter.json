@@ -1,0 +1,85 @@
+{
+  "name": "ProxCenter",
+  "slug": "proxcenter",
+  "categories": [0, 3],
+  "date_created": "2026-08-18",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 3000,
+  "documentation": "https://docs.proxcenter.io/",
+  "website": "https://www.proxcenter.io/",
+  "logo": "https://github.com/adminsyspro.png",
+  "config_path": "/opt/proxcenter",
+  "description": "Deploys ProxCenter, a multi-cluster management UI for Proxmox VE and Proxmox Backup Server. Community Edition runs the official Docker stack (Next.js frontend + PostgreSQL) on port 3000. Enterprise adds the Go orchestrator when an install token is provided.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/proxcenter.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 4096,
+        "hdd": 12,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/proxcenter.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 4096,
+        "hdd": 12,
+        "os": "alpine",
+        "version": "3.23"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Requires Docker inside the LXC. Nesting and keyctl are enabled by default. The stack publishes port 3000 (HTTP + WebSocket); it does not use host networking.",
+      "type": "warning"
+    },
+    {
+      "text": "Web UI: http://<container-ip>:3000. On first visit, create the admin account, then add Proxmox VE (port 8006) and optional PBS connections using API tokens. The LXC must be able to reach those APIs. Docs: https://docs.proxcenter.io/getting-started/connect-proxmox",
+      "type": "info"
+    },
+    {
+      "text": "The first-run setup endpoint is unauthenticated until an admin exists. Keep this LXC on a trusted LAN or behind a reverse proxy. If you terminate TLS in front of ProxCenter, enable the \"Behind reverse proxy\" toggle in connection settings and set NEXTAUTH_URL / APP_URL in /opt/proxcenter/.env to the public URL, then `docker compose up -d`.",
+      "type": "warning"
+    },
+    {
+      "text": "Interactive install asks Community (default) or Enterprise. Unattended Community: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/proxcenter.sh)\"`. Enterprise: `var_edition=enterprise var_install_token=YOUR_TOKEN bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/proxcenter.sh)\"`. Optional: `var_license_key=...`, `var_image_version=latest`, `var_nextauth_url=https://proxcenter.example.com`.",
+      "type": "info"
+    },
+    {
+      "text": "Config: /opt/proxcenter/.env (mode 600) and /opt/proxcenter/docker-compose.yml. Postgres and app data live in Docker volumes proxcenter_data and postgres_data (plus orchestrator_data for Enterprise). Do not change POSTGRES_PASSWORD after first start unless you also reset the postgres_data volume.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update ProxCenter or Remove Unused Images. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update. Dry-run via PVE LXC Apps Updater is skipped (Docker app).",
+      "type": "info"
+    },
+    {
+      "text": "Official defaults are 2 CPU / 4 GiB RAM / 10+ GiB disk. This script uses 2 / 4096 / 12. Increase RAM for large fleets or Enterprise (orchestrator + WeasyPrint). If Docker fails on an unprivileged LXC, try `var_unprivileged=0`.",
+      "type": "info"
+    },
+    {
+      "text": "Service logs: `cd /opt/proxcenter && docker compose logs -f`. Restart: `docker compose restart`. Health: `curl -sf http://127.0.0.1:3000/api/health`. Enterprise license can also be activated in Settings → License.",
+      "type": "info"
+    },
+    {
+      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.23`. Download if missing: `pveam download local alpine-3.23-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.23 is not listed on an older Proxmox host.",
+      "type": "info"
+    },
+    {
+      "text": "Debian 13 and Alpine installs enable nesting and keyctl by default (Debian: systemd compatibility; Alpine: Docker).",
+      "type": "info"
+    }
+  ]
+}
