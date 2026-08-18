@@ -11,7 +11,7 @@
   "website": "https://oraad.github.io/proxmox-scripts/",
   "logo": null,
   "config_path": "",
-  "description": "Batch-update LXC apps installed by community-scripts or Proxmox Custom Scripts (musicassistant, ha-mcp, newt, and more). Resolves each container's update script from the URL in /usr/bin/update, with optional vzdump backups, unattended mode, and a summary report.",
+  "description": "Batch-update LXC apps installed by community-scripts or Proxmox Custom Scripts (musicassistant, ha-mcp, agentgateway, newt, and more). Resolves each container's update script from the URL in /usr/bin/update, with optional vzdump backups, unattended mode, and a summary report.",
   "install_methods": [
     {
       "type": "default",
@@ -35,7 +35,7 @@
       "type": "info"
     },
     {
-      "text": "Unlike upstream update-apps, this script downloads ct/<service>.sh from whichever repo each container's /usr/bin/update points at — so custom apps (musicassistant, ha-mcp, newt) and community-scripts apps update in one pass.",
+      "text": "Unlike upstream update-apps, this script downloads ct/<service>.sh from whichever repo each container's /usr/bin/update points at — so custom apps (musicassistant, ha-mcp, agentgateway, newt) and community-scripts apps update in one pass.",
       "type": "info"
     },
     {
@@ -51,7 +51,7 @@
       "type": "info"
     },
     {
-      "text": "Dry-run (var_dry_run=yes) only reports versions for apps that use check_for_gh_release (e.g. newt). Docker/uvx apps (musicassistant, ha-mcp) are skipped in dry-run.",
+      "text": "Dry-run (var_dry_run=yes) only reports versions for apps that use check_for_gh_release (e.g. newt, agentgateway). Docker/uvx apps (musicassistant, ha-mcp) are skipped in dry-run.",
       "type": "warning"
     },
     {

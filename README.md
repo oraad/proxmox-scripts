@@ -14,6 +14,7 @@ Current scripts:
 
 - [Music Assistant](https://oraad.github.io/proxmox-scripts/scripts) — Docker server with host networking
 - [HA MCP](https://oraad.github.io/proxmox-scripts/scripts) — ha-mcp HTTP endpoint for Cursor and other MCP clients
+- [agentgateway](https://oraad.github.io/proxmox-scripts/scripts) — MCP federation proxy in front of multiple mcp (or other Streamable HTTP) backends
 - [NetAlertX](https://oraad.github.io/proxmox-scripts/scripts) — network visibility via Docker with host networking (privileged LXC)
 - [Pangolin Newt](https://oraad.github.io/proxmox-scripts/scripts) — dedicated LXC for the Pangolin tunnel agent
 - [Pangolin Newt Addon](https://oraad.github.io/proxmox-scripts/scripts) — install Newt on the Proxmox host or an existing LXC

@@ -87,7 +87,7 @@ function print_usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Update LXC containers created with community-scripts or Proxmox Custom Scripts
-(e.g. musicassistant, ha-mcp). Script source is taken from each container's
+(e.g. musicassistant, ha-mcp, agentgateway). Script source is taken from each container's
 /usr/bin/update URL.
 
 Options:

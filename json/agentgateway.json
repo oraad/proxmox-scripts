@@ -1,0 +1,89 @@
+{
+  "name": "Agent Gateway",
+  "slug": "agentgateway",
+  "categories": [16, 4],
+  "date_created": "2026-08-18",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 3000,
+  "documentation": "https://agentgateway.dev/docs/standalone/latest/",
+  "website": "https://agentgateway.dev/",
+  "logo": "https://agentgateway.dev/favicon.ico",
+  "config_path": "/opt/agentgateway",
+  "description": "Deploys the official agentgateway binary as an MCP federation proxy. One Streamable HTTP endpoint for Cursor (and other clients) that multiplexes tools from multiple backends such as ha-mcp LXCs, with namespaced tool names, API-key auth, and a loopback Admin UI.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/agentgateway.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 1024,
+        "hdd": 4,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/agentgateway.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 1024,
+        "hdd": 4,
+        "os": "alpine",
+        "version": "3.23"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "MCP clients connect to http://<container-ip>:3000/mcp/http with the generated Bearer API key (apiKey.mode: strict). Cursor: copy /opt/agentgateway/mcp_client.json into ~/.cursor/mcp.json. Tools are always prefixed with the target name (prefixMode: always). One dead backend does not fail the whole session (failureMode: failOpen).",
+      "type": "info"
+    },
+    {
+      "text": "Admin UI (15000), Prometheus metrics (15020), and readiness (15021) bind to 127.0.0.1. Tunnel from the Proxmox host: `ssh -L 15000:127.0.0.1:15000 root@<container-ip>` then open http://127.0.0.1:15000/ui. To expose the UI on the LAN (no UI auth): `var_admin_bind=0.0.0.0`. Do not publish 15000/15020/15021 to the internet.",
+      "type": "warning"
+    },
+    {
+      "text": "During install you can paste backends as name=url pairs, comma-separated — e.g. home=http://192.168.1.21:8086/mcp-<secret>,cabin=http://192.168.1.22:8086/mcp-<secret>. Get each ha-mcp URL with `pct exec <CTID> -- cat /opt/ha-mcp/mcp_endpoint.txt`. Leave empty to add servers later in the Admin UI (MCP → Servers, Streamable HTTP) or in /opt/agentgateway/config.yaml. Target names: letters, digits, hyphens only (no underscores).",
+      "type": "info"
+    },
+    {
+      "text": "Unattended: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-secret,cabin=http://192.168.1.22:8086/mcp-secret' bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/agentgateway.sh)\"`. Optional: `var_mcp_port=3000 var_admin_port=15000 var_admin_bind=127.0.0.1`.",
+      "type": "info"
+    },
+    {
+      "text": "Config: /opt/agentgateway/config.yaml (mode 600, user agentgateway). Saving in the Admin UI overwrites this file and strips comments. `config.*` binds and session.key are only applied at process start — restart after changing them. Most other YAML edits hot-reload.",
+      "type": "info"
+    },
+    {
+      "text": "Keep one ha-mcp LXC per Home Assistant. This gateway federates their HTTP endpoints and never sees HA tokens. Do not also register the same ha-mcp URLs directly in Cursor.",
+      "type": "warning"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Updates replace the binary and leave config.yaml / .env in place. Dry-run via PVE LXC Apps Updater works (check_for_gh_release).",
+      "type": "info"
+    },
+    {
+      "text": "Retrieve the MCP URL with `pct exec <CTID> -- cat /opt/agentgateway/mcp_endpoint.txt`. Cursor snippet: `pct exec <CTID> -- cat /opt/agentgateway/mcp_client.json`. API key: `pct exec <CTID> -- grep AGENTGATEWAY_API_KEY /opt/agentgateway/.env`.",
+      "type": "info"
+    },
+    {
+      "text": "Service status — Debian: `systemctl status agentgateway` and `journalctl -u agentgateway -n 50`. Alpine: `rc-service agentgateway status` and `tail -50 /var/log/agentgateway.log`. Official docs: https://agentgateway.dev/docs/standalone/latest/mcp/connect/virtual/",
+      "type": "info"
+    },
+    {
+      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.23`. Download if missing: `pveam download local alpine-3.23-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.23 is not listed on an older Proxmox host. The upstream binary is musl (amd64/arm64).",
+      "type": "info"
+    },
+    {
+      "text": "Debian 13 and Alpine installs enable nesting and keyctl by default (Debian: systemd compatibility; Alpine: Docker and tunnel agents).",
+      "type": "info"
+    }
+  ]
+}
