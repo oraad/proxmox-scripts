@@ -60,7 +60,7 @@ EOF
 chmod 600 "${INSTALL_DIR}/.env"
 
 msg_info "Pre-caching ha-mcp"
-$STD "$UVX_PATH" --python 3.13 ha-mcp@latest --version
+$STD "$UVX_PATH" --python 3.14 ha-mcp@latest --version
 msg_ok "Cached ha-mcp"
 
 msg_info "Setting up ${APPLICATION:-HA MCP} service"
@@ -69,7 +69,7 @@ cat >"${INSTALL_DIR}/start.sh" <<EOF
 set -a
 . ${INSTALL_DIR}/.env
 set +a
-exec ${UVX_PATH} --python 3.13 ha-mcp-web
+exec ${UVX_PATH} --python 3.14 --from ha-mcp@latest ha-mcp-web
 EOF
 chmod 700 "${INSTALL_DIR}/start.sh"
 

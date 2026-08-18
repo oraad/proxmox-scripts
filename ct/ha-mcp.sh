@@ -67,7 +67,15 @@ function update_script() {
 
   UVX_PATH="$(command -v uvx 2>/dev/null || echo /usr/local/bin/uvx)"
   msg_info "Updating ${APP}"
-  $STD "$UVX_PATH" --python 3.13 --refresh ha-mcp@latest --version
+  cat >"/opt/ha-mcp/start.sh" <<EOF
+#!/bin/sh
+set -a
+. /opt/ha-mcp/.env
+set +a
+exec ${UVX_PATH} --python 3.14 --from ha-mcp@latest ha-mcp-web
+EOF
+  chmod 700 /opt/ha-mcp/start.sh
+  $STD "$UVX_PATH" --python 3.14 --refresh ha-mcp@latest --version
   if [[ -f /etc/alpine-release ]]; then
     $STD rc-service ha-mcp restart
   else
