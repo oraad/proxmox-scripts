@@ -16,9 +16,9 @@ network_check
 update_os
 
 if [[ -f /etc/alpine-release ]]; then
-  $STD apk add --no-cache bash ca-certificates curl openssl tar
+  $STD apk add --no-cache bash ca-certificates curl openssl tar jq
 else
-  $STD apt-get install -y curl openssl ca-certificates tar
+  $STD apt-get install -y curl openssl ca-certificates tar jq
 fi
 
 msg_info "Installing uv"
@@ -96,7 +96,7 @@ depend() {
 }
 EOF
   chmod +x /etc/init.d/ha-mcp
-  $STD rc-update add ha-mcp default
+  rc-update add ha-mcp default >/dev/null 2>&1
   $STD rc-service ha-mcp start
 else
   cat >"/etc/systemd/system/ha-mcp.service" <<EOF
@@ -114,8 +114,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-  $STD systemctl daemon-reload
-  $STD systemctl enable --now ha-mcp
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable --now ha-mcp >/dev/null 2>&1
 fi
 
 sleep 2
@@ -131,21 +131,23 @@ else
   fi
 fi
 
+msg_ok "Installed ${APPLICATION:-HA MCP}"
+
 container_ip="${IP:-}"
-if [[ -z "$container_ip" || "$container_ip" == "127.0.0.1" || "$container_ip" == "Unknown" ]]; then
-  if declare -f get_current_ip >/dev/null 2>&1; then
-    container_ip="$(get_current_ip)"
-  fi
+if [[ ! "$container_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$container_ip" == "127.0.0.1" ]]; then
+  container_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
 fi
-if [[ -z "$container_ip" || "$container_ip" == "127.0.0.1" || "$container_ip" == "Unknown" ]]; then
-  container_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ ! "$container_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$container_ip" == "127.0.0.1" ]]; then
+  container_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)"
 fi
 [[ -n "$container_ip" ]] || container_ip="127.0.0.1"
 
 MCP_ENDPOINT="http://${container_ip}:${MCP_PORT:-8086}${MCP_SECRET_PATH}"
-echo "${MCP_ENDPOINT}" >"${INSTALL_DIR}/mcp_endpoint.txt"
-chmod 600 "${INSTALL_DIR}/mcp_endpoint.txt"
-msg_ok "Installed ${APPLICATION:-HA MCP}"
+printf '%s\n' "${MCP_ENDPOINT}" >"${INSTALL_DIR}/mcp_endpoint.txt"
+jq -n --arg url "$MCP_ENDPOINT" \
+  '{mcpServers:{"home-assistant":{url:$url}}}' \
+  >"${INSTALL_DIR}/mcp_client.json"
+chmod 600 "${INSTALL_DIR}/mcp_endpoint.txt" "${INSTALL_DIR}/mcp_client.json"
 
 motd_ssh
 customize
@@ -158,10 +160,5 @@ set +a
 bash -c "\$(curl -fsSL ${REPO_RAW}/ct/ha-mcp.sh)"
 EOF
 chmod +x /usr/bin/update
-
-echo -e "${INFO}${YW} HA MCP endpoint:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}${MCP_ENDPOINT}${CL}"
-echo -e "${INFO}${YW} Add to Cursor (~/.cursor/mcp.json):${CL}"
-echo -e "${TAB}{ \"mcpServers\": { \"home-assistant\": { \"url\": \"${MCP_ENDPOINT}\" } } }"
 
 cleanup_lxc

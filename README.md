@@ -13,7 +13,7 @@ One-command LXC installations for self-hosted applications missing from communit
 Current scripts:
 
 - [Music Assistant](https://oraad.github.io/proxmox-scripts/scripts) — Docker server with host networking
-- [HA MCP](https://oraad.github.io/proxmox-scripts/scripts) — ha-mcp HTTP endpoint for Cursor and other MCP clients
+- [HA MCP](https://oraad.github.io/proxmox-scripts/scripts) — ha-mcp HTTP endpoint for MCP clients
 - [agentgateway](https://oraad.github.io/proxmox-scripts/scripts) — MCP federation proxy in front of multiple mcp (or other Streamable HTTP) backends
 - [NetAlertX](https://oraad.github.io/proxmox-scripts/scripts) — network visibility via Docker with host networking (privileged LXC)
 - [Pangolin Newt](https://oraad.github.io/proxmox-scripts/scripts) — dedicated LXC for the Pangolin tunnel agent

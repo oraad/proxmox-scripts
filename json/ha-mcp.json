@@ -11,7 +11,7 @@
   "website": "https://homeassistant-ai.github.io/ha-mcp/",
   "logo": "https://www.home-assistant.io/images/favicon-192x192.png",
   "config_path": "/opt/ha-mcp",
-  "description": "Deploys the official Home Assistant MCP Server (ha-mcp) in HTTP mode via uvx. Provides a LAN MCP endpoint for Cursor and other HTTP-capable AI clients to control Home Assistant through natural language.",
+  "description": "Deploys the official Home Assistant MCP Server (ha-mcp) in HTTP mode via uvx. Provides a LAN MCP endpoint for HTTP-capable MCP clients to control Home Assistant through natural language.",
   "install_methods": [
     {
       "type": "default",
@@ -54,7 +54,7 @@
       "type": "info"
     },
     {
-      "text": "Cursor: add the MCP URL printed at install to ~/.cursor/mcp.json — e.g. {\"mcpServers\":{\"home-assistant\":{\"url\":\"http://<container-ip>:8086/mcp-<secret>\"}}}. The URL is MCP_SECRET_PATH itself (default /mcp), not /mcp/mcp. Restart Cursor and confirm in Settings → MCP. A browser GET may return 405; that is expected. Settings UI: http://<container-ip>:8086/<secret>/settings. See https://github.com/homeassistant-ai/ha-mcp for details. To federate several ha-mcp LXCs behind one Cursor URL, install the agentgateway script.",
+      "text": "Add the MCP URL printed at install to your MCP client's config — e.g. {\"mcpServers\":{\"home-assistant\":{\"url\":\"http://<container-ip>:8086/mcp-<secret>\"}}}. The URL is MCP_SECRET_PATH itself (default /mcp), not /mcp/mcp. A browser GET may return 405; that is expected. Settings UI: http://<container-ip>:8086/<secret>/settings. See https://github.com/homeassistant-ai/ha-mcp for details. To federate several ha-mcp LXCs behind one MCP URL, install the agentgateway script.",
       "type": "info"
     },
     {

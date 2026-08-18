@@ -6,12 +6,12 @@
   "type": "ct",
   "updateable": true,
   "privileged": false,
-  "interface_port": 3000,
+  "interface_port": 8080,
   "documentation": "https://agentgateway.dev/docs/standalone/latest/",
   "website": "https://agentgateway.dev/",
   "logo": "https://agentgateway.dev/favicon.ico",
   "config_path": "/opt/agentgateway",
-  "description": "Deploys the official agentgateway binary as an MCP federation proxy. One Streamable HTTP endpoint for Cursor (and other clients) that multiplexes tools from multiple backends such as ha-mcp LXCs, with namespaced tool names, API-key auth, and a loopback Admin UI.",
+  "description": "Deploys the official agentgateway binary as an MCP federation proxy. One public HTTP listener on port 8080 serves the UI (HTTP basic auth) and a Streamable HTTP MCP endpoint (Bearer API key or the same basic-auth credentials) that multiplexes tools from backends such as ha-mcp LXCs.",
   "install_methods": [
     {
       "type": "default",
@@ -37,32 +37,36 @@
     }
   ],
   "default_credentials": {
-    "username": null,
+    "username": "admin",
     "password": null
   },
   "notes": [
     {
-      "text": "MCP clients connect to http://<container-ip>:3000/mcp/http with the generated Bearer API key (apiKey.mode: strict). Cursor: copy /opt/agentgateway/mcp_client.json into ~/.cursor/mcp.json. Tools are always prefixed with the target name (prefixMode: always). One dead backend does not fail the whole session (failureMode: failOpen).",
+      "text": "Public listener is 0.0.0.0:8080 (var_public_port, default 8080). UI: http://<container-ip>:8080/ui with HTTP basic auth (default user admin, random password). MCP Streamable HTTP: http://<container-ip>:8080/mcp/http (also /mcp and /sse). Copy /opt/agentgateway/mcp_client.json into your MCP client's config (Bearer API key). MCP also accepts the same basic-auth credentials. Tools are always prefixed with the target name (prefixMode: always). One dead backend does not fail the whole session (failureMode: failOpen).",
       "type": "info"
     },
     {
-      "text": "Admin UI (15000), Prometheus metrics (15020), and readiness (15021) bind to 127.0.0.1. Tunnel from the Proxmox host: `ssh -L 15000:127.0.0.1:15000 root@<container-ip>` then open http://127.0.0.1:15000/ui. To expose the UI on the LAN (no UI auth): `var_admin_bind=0.0.0.0`. Do not publish 15000/15020/15021 to the internet.",
+      "text": "UI and MCP share one 1.4 gateways listener. Two strict auth policies would both have to succeed (AND), so MCP uses optional apiKey + optional basicAuth plus a CEL allow rule so Bearer token OR basic auth works. UI uses basicAuth mode strict only. Basic auth is not TLS; keep this on a LAN or behind a TLS reverse proxy.",
       "type": "warning"
     },
     {
-      "text": "Install does not prompt for backends. After install, add Streamable HTTP servers in the Admin UI (MCP → Servers) or in /opt/agentgateway/config.yaml under mcp.targets. Example: name home, URL from `pct exec <CTID> -- cat /opt/ha-mcp/mcp_endpoint.txt`. Target names: letters, digits, hyphens only (no underscores). mcp.targets must be present even if empty (`targets: []`).",
+      "text": "Prometheus metrics (15020) and readiness (15021) bind to 127.0.0.1. The process also keeps an unauthenticated loopback admin socket on 127.0.0.1:15000 as break-glass (not advertised; do not publish 15000/15020/15021). Optional: var_admin_port / var_admin_bind — leave bind at 127.0.0.1.",
+      "type": "warning"
+    },
+    {
+      "text": "Install does not prompt for backends. After install, add Streamable HTTP servers in the UI (MCP → Servers) or in /opt/agentgateway/config.yaml under mcp.targets. Example: name home, URL from `pct exec <CTID> -- cat /opt/ha-mcp/mcp_endpoint.txt`. Target names: letters, digits, hyphens only (no underscores). mcp.targets must be present even if empty (`targets: []`).",
       "type": "info"
     },
     {
-      "text": "Unattended: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/agentgateway.sh)\"`. Optional backends: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-secret'`. Optional ports: `var_mcp_port=3000 var_admin_port=15000 var_admin_bind=127.0.0.1`.",
+      "text": "Unattended: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/agentgateway.sh)\"`. Optional backends: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-secret'`. Optional: `var_public_port=8080` (alias `var_mcp_port`), `var_ui_user=admin`, `var_ui_password=...`, `var_api_key=...`. Loopback admin: `var_admin_port=15000 var_admin_bind=127.0.0.1`.",
       "type": "info"
     },
     {
-      "text": "Config: /opt/agentgateway/config.yaml (mode 600, user agentgateway). Saving in the Admin UI overwrites this file and strips comments. `config.*` binds and session.key are only applied at process start — restart after changing them. Most other YAML edits hot-reload.",
+      "text": "Config: /opt/agentgateway/config.yaml (mode 600, user agentgateway). Basic-auth hashes live in /opt/agentgateway/htpasswd. Saving in the UI overwrites config.yaml and strips comments. `config.*` binds and session.key are only applied at process start — restart after changing them. Most other YAML edits hot-reload.",
       "type": "info"
     },
     {
-      "text": "Keep one ha-mcp LXC per Home Assistant. This gateway federates their HTTP endpoints and never sees HA tokens. Do not also register the same ha-mcp URLs directly in Cursor.",
+      "text": "Keep one ha-mcp LXC per Home Assistant. This gateway federates their HTTP endpoints and never sees HA tokens. Do not also register the same ha-mcp URLs directly in the MCP client.",
       "type": "warning"
     },
     {
@@ -70,7 +74,7 @@
       "type": "info"
     },
     {
-      "text": "Retrieve the MCP URL with `pct exec <CTID> -- cat /opt/agentgateway/mcp_endpoint.txt`. Cursor snippet: `pct exec <CTID> -- cat /opt/agentgateway/mcp_client.json`. API key: `pct exec <CTID> -- grep AGENTGATEWAY_API_KEY /opt/agentgateway/.env`.",
+      "text": "Retrieve the MCP URL with `pct exec <CTID> -- cat /opt/agentgateway/mcp_endpoint.txt`. UI URL: `pct exec <CTID> -- cat /opt/agentgateway/ui_url.txt`. MCP client snippet: `pct exec <CTID> -- cat /opt/agentgateway/mcp_client.json`. Secrets (API key, UI password): `pct exec <CTID> -- grep -E 'AGENTGATEWAY_API_KEY|UI_USER|UI_PASSWORD' /opt/agentgateway/.env`.",
       "type": "info"
     },
     {

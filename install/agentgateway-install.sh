@@ -17,10 +17,10 @@ update_os
 
 msg_info "Installing dependencies"
 if [[ -f /etc/alpine-release ]]; then
-  $STD apk add --no-cache bash curl ca-certificates openssl jq
+  $STD apk add --no-cache bash curl ca-certificates openssl jq apache2-utils
   $STD apk add --no-cache newt
 else
-  $STD apt-get install -y curl ca-certificates openssl jq whiptail
+  $STD apt-get install -y curl ca-certificates openssl jq whiptail apache2-utils
 fi
 msg_ok "Installed dependencies"
 
@@ -58,12 +58,27 @@ yaml_quote() {
   printf '"%s"' "$s"
 }
 
+write_htpasswd() {
+  local user="$1"
+  local password="$2"
+  local dest="$3"
+  local line
+  if command -v htpasswd >/dev/null 2>&1; then
+    line="$(htpasswd -nbB "$user" "$password")"
+  else
+    line="${user}:$(openssl passwd -apr1 "$password")"
+  fi
+  printf '%s\n' "$line" >"$dest"
+  chmod 600 "$dest"
+}
+
 write_agentgateway_config() {
   local targets_csv="$1"
-  local mcp_port="$2"
+  local public_port="$2"
   local admin_addr="$3"
   local api_key="$4"
   local session_key="$5"
+  local htpasswd_file="$6"
   local pair name url count=0
   local tmp_targets
 
@@ -112,8 +127,21 @@ write_agentgateway_config() {
     echo "  readinessAddr: 127.0.0.1:15021"
     echo "  session:"
     echo "    key: $(yaml_quote "$session_key")"
+    echo "gateways:"
+    echo "  default:"
+    echo "    port: ${public_port}"
+    echo "ui:"
+    echo "  gateways:"
+    echo "    - default"
+    echo "  policies:"
+    echo "    basicAuth:"
+    echo "      mode: strict"
+    echo "      realm: Agent Gateway"
+    echo "      htpasswd:"
+    echo "        file: $(yaml_quote "$htpasswd_file")"
     echo "mcp:"
-    echo "  port: ${mcp_port}"
+    echo "  gateways:"
+    echo "    - default"
     echo "  prefixMode: always"
     echo "  failureMode: failOpen"
     echo "  policies:"
@@ -125,11 +153,20 @@ write_agentgateway_config() {
     echo "      exposeHeaders:"
     echo "        - \"Mcp-Session-Id\""
     echo "    apiKey:"
-    echo "      mode: strict"
+    echo "      mode: optional"
     echo "      keys:"
     echo "        - key: $(yaml_quote "$api_key")"
     echo "          metadata:"
     echo "            user: lan"
+    echo "    basicAuth:"
+    echo "      mode: optional"
+    echo "      realm: Agent Gateway"
+    echo "      htpasswd:"
+    echo "        file: $(yaml_quote "$htpasswd_file")"
+    echo "    authorization:"
+    echo "      rules:"
+    echo "        - allow: 'request.method == \"OPTIONS\"'"
+    echo "        - allow: 'has(apiKey.key) || has(basicAuth.username)'"
     if [[ "$count" -gt 0 ]]; then
       echo "  targets:"
       cat "$tmp_targets"
@@ -146,11 +183,17 @@ ARCH="$(agentgateway_arch)" || {
   exit 1
 }
 
-MCP_PORT="${var_mcp_port:-3000}"
+PUBLIC_PORT="${var_public_port:-${var_mcp_port:-8080}}"
 ADMIN_PORT="${var_admin_port:-15000}"
 ADMIN_BIND="${var_admin_bind:-127.0.0.1}"
-if [[ ! "$MCP_PORT" =~ ^[0-9]+$ ]] || [[ ! "$ADMIN_PORT" =~ ^[0-9]+$ ]]; then
-  msg_error "var_mcp_port and var_admin_port must be numeric"
+UI_USER="${var_ui_user:-admin}"
+HTPASSWD_FILE="${INSTALL_DIR}/htpasswd"
+if [[ ! "$PUBLIC_PORT" =~ ^[0-9]+$ ]] || [[ ! "$ADMIN_PORT" =~ ^[0-9]+$ ]]; then
+  msg_error "var_public_port (or var_mcp_port) and var_admin_port must be numeric"
+  exit 1
+fi
+if [[ ! "$UI_USER" =~ ^[A-Za-z0-9][-A-Za-z0-9._]*$ ]]; then
+  msg_error "var_ui_user must be letters, digits, dots, underscores, or hyphens"
   exit 1
 fi
 ADMIN_ADDR="${ADMIN_BIND}:${ADMIN_PORT}"
@@ -163,20 +206,41 @@ fetch_and_deploy_gh_release "agentgateway" "agentgateway/agentgateway" "singlefi
   "/usr/local/bin" "agentgateway-linux-${ARCH}"
 msg_ok "Installed agentgateway binary"
 
-API_KEY="$(openssl rand -hex 32)"
+if [[ -n "${var_api_key:-}" ]]; then
+  API_KEY="${var_api_key}"
+else
+  API_KEY="$(openssl rand -hex 32)"
+fi
+if [[ -z "$API_KEY" ]]; then
+  msg_error "API key must not be empty (set var_api_key or allow it to be generated)"
+  exit 1
+fi
+if [[ -n "${var_ui_password:-}" ]]; then
+  UI_PASSWORD="${var_ui_password}"
+else
+  UI_PASSWORD="$(openssl rand -hex 16)"
+fi
+if [[ -z "$UI_PASSWORD" ]]; then
+  msg_error "UI password must not be empty (set var_ui_password or allow it to be generated)"
+  exit 1
+fi
 SESSION_KEY="$(openssl rand -hex 32)"
 
-cat >"${INSTALL_DIR}/.env" <<EOF
-MCP_PORT=${MCP_PORT}
-ADMIN_PORT=${ADMIN_PORT}
-ADMIN_BIND=${ADMIN_BIND}
-AGENTGATEWAY_API_KEY=${API_KEY}
-SESSION_KEY=${SESSION_KEY}
-HOME=${INSTALL_DIR}
-EOF
+{
+  printf 'PUBLIC_PORT=%s\n' "$PUBLIC_PORT"
+  printf 'MCP_PORT=%s\n' "$PUBLIC_PORT"
+  printf 'ADMIN_PORT=%s\n' "$ADMIN_PORT"
+  printf 'ADMIN_BIND=%s\n' "$ADMIN_BIND"
+  printf 'UI_USER=%s\n' "$UI_USER"
+  printf 'UI_PASSWORD=%s\n' "$UI_PASSWORD"
+  printf 'AGENTGATEWAY_API_KEY=%s\n' "$API_KEY"
+  printf 'SESSION_KEY=%s\n' "$SESSION_KEY"
+  printf 'HOME=%s\n' "$INSTALL_DIR"
+} >"${INSTALL_DIR}/.env"
 chmod 600 "${INSTALL_DIR}/.env"
 
-write_agentgateway_config "${var_mcp_targets:-}" "${MCP_PORT}" "${ADMIN_ADDR}" "${API_KEY}" "${SESSION_KEY}"
+write_htpasswd "$UI_USER" "$UI_PASSWORD" "$HTPASSWD_FILE"
+write_agentgateway_config "${var_mcp_targets:-}" "${PUBLIC_PORT}" "${ADMIN_ADDR}" "${API_KEY}" "${SESSION_KEY}" "${HTPASSWD_FILE}"
 
 cat >"${INSTALL_DIR}/start.sh" <<EOF
 #!/bin/sh
@@ -222,7 +286,7 @@ depend() {
 }
 EOF
   chmod +x /etc/init.d/agentgateway
-  $STD rc-update add agentgateway default
+  rc-update add agentgateway default >/dev/null 2>&1
   $STD rc-service agentgateway start
 else
   cat >"/etc/systemd/system/agentgateway.service" <<EOF
@@ -247,8 +311,8 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-  $STD systemctl daemon-reload
-  $STD systemctl enable --now agentgateway
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl enable --now agentgateway >/dev/null 2>&1
 fi
 
 sleep 3
@@ -266,38 +330,23 @@ fi
 msg_ok "Installed ${APPLICATION:-agentgateway}"
 
 container_ip="${IP:-}"
-if [[ -z "$container_ip" || "$container_ip" == "127.0.0.1" || "$container_ip" == "Unknown" ]]; then
-  if declare -f get_current_ip >/dev/null 2>&1; then
-    container_ip="$(get_current_ip)"
-  fi
+if [[ ! "$container_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$container_ip" == "127.0.0.1" ]]; then
+  container_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
 fi
-if [[ -z "$container_ip" || "$container_ip" == "127.0.0.1" || "$container_ip" == "Unknown" ]]; then
-  container_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ ! "$container_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$container_ip" == "127.0.0.1" ]]; then
+  container_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)"
 fi
 [[ -n "$container_ip" ]] || container_ip="127.0.0.1"
 
-MCP_ENDPOINT="http://${container_ip}:${MCP_PORT}/mcp/http"
-if [[ "$ADMIN_BIND" == "127.0.0.1" || "$ADMIN_BIND" == "localhost" ]]; then
-  UI_URL="http://127.0.0.1:${ADMIN_PORT}/ui"
-else
-  UI_URL="http://${container_ip}:${ADMIN_PORT}/ui"
-fi
-echo "${MCP_ENDPOINT}" >"${INSTALL_DIR}/mcp_endpoint.txt"
-echo "${UI_URL}" >"${INSTALL_DIR}/ui_url.txt"
-cat >"${INSTALL_DIR}/mcp_client.json" <<EOF
-{
-  "mcpServers": {
-    "agentgateway": {
-      "url": "${MCP_ENDPOINT}",
-      "headers": {
-        "Authorization": "Bearer ${API_KEY}"
-      }
-    }
-  }
-}
-EOF
-chmod 600 "${INSTALL_DIR}/mcp_endpoint.txt" "${INSTALL_DIR}/ui_url.txt" "${INSTALL_DIR}/mcp_client.json"
-chown agentgateway:agentgateway "${INSTALL_DIR}/mcp_endpoint.txt" "${INSTALL_DIR}/ui_url.txt" "${INSTALL_DIR}/mcp_client.json" "${INSTALL_DIR}/.env" "${INSTALL_DIR}/config.yaml"
+MCP_ENDPOINT="http://${container_ip}:${PUBLIC_PORT}/mcp/http"
+UI_URL="http://${container_ip}:${PUBLIC_PORT}/ui"
+printf '%s\n' "${MCP_ENDPOINT}" >"${INSTALL_DIR}/mcp_endpoint.txt"
+printf '%s\n' "${UI_URL}" >"${INSTALL_DIR}/ui_url.txt"
+jq -n --arg url "$MCP_ENDPOINT" --arg token "$API_KEY" \
+  '{mcpServers:{agentgateway:{url:$url,headers:{Authorization:("Bearer " + $token)}}}}' \
+  >"${INSTALL_DIR}/mcp_client.json"
+chmod 600 "${INSTALL_DIR}/mcp_endpoint.txt" "${INSTALL_DIR}/ui_url.txt" "${INSTALL_DIR}/mcp_client.json" "${HTPASSWD_FILE}"
+chown agentgateway:agentgateway "${INSTALL_DIR}/mcp_endpoint.txt" "${INSTALL_DIR}/ui_url.txt" "${INSTALL_DIR}/mcp_client.json" "${INSTALL_DIR}/.env" "${INSTALL_DIR}/config.yaml" "${HTPASSWD_FILE}"
 
 motd_ssh
 customize
@@ -310,18 +359,5 @@ set +a
 bash -c "\$(curl -fsSL ${REPO_RAW}/ct/agentgateway.sh)"
 EOF
 chmod +x /usr/bin/update
-
-echo -e "${INFO}${YW} MCP endpoint:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}${MCP_ENDPOINT}${CL}"
-echo -e "${INFO}${YW} Authorization:${CL} Bearer ${API_KEY}"
-echo -e "${INFO}${YW} Add to Cursor (~/.cursor/mcp.json):${CL}"
-echo -e "${TAB}$(tr -d '\n' <"${INSTALL_DIR}/mcp_client.json")"
-echo -e "${INFO}${YW} Admin UI:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}${UI_URL}${CL}"
-if [[ "$ADMIN_BIND" == "127.0.0.1" || "$ADMIN_BIND" == "localhost" ]]; then
-  echo -e "${INFO}${YW} Admin UI is loopback-only. From the Proxmox host: \`ssh -L 15000:127.0.0.1:15000 root@${container_ip}\` then open http://127.0.0.1:15000/ui${CL}"
-  echo -e "${INFO}${YW} To bind the UI on the LAN (no auth): reinstall with var_admin_bind=0.0.0.0${CL}"
-fi
-echo -e "${INFO}${YW} Add Streamable HTTP backends in the Admin UI (MCP → Servers) or edit /opt/agentgateway/config.yaml.${CL}"
 
 cleanup_lxc

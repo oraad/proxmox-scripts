@@ -15,6 +15,7 @@ var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_unprivileged="${var_unprivileged:-1}"
+var_hostname="${var_hostname:-agent-gateway}"
 apply_debian13_lxc_defaults
 apply_alpine_lxc_defaults
 var_arm64="${var_arm64:-yes}"
@@ -23,6 +24,7 @@ header_info "$APP"
 variables
 NSAPP="agentgateway"
 var_install="agentgateway-install"
+var_hostname="${var_hostname:-agent-gateway}"
 color
 catch_errors
 
@@ -58,83 +60,138 @@ function agentgateway_start_service() {
   fi
 }
 
-function agentgateway_container_ip() {
+function agentgateway_primary_ipv4() {
   local ip="${IP:-}"
-  if [[ -z "$ip" || "$ip" == "127.0.0.1" || "$ip" == "Unknown" ]]; then
-    if declare -f get_current_ip >/dev/null 2>&1; then
-      ip="$(get_current_ip)"
-    else
-      ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" ]]; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
+  if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" ]]; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+  if declare -f get_current_ip >/dev/null 2>&1; then
+    ip="$(get_current_ip)"
+    ip="${ip%% *}"
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" && "$ip" != "Unknown" ]]; then
+      printf '%s\n' "$ip"
+      return 0
     fi
   fi
-  [[ -n "$ip" ]] || ip="127.0.0.1"
-  echo "$ip"
+  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  [[ -n "$ip" && "$ip" != "127.0.0.1" ]] || ip="127.0.0.1"
+  printf '%s\n' "$ip"
+}
+
+function agentgateway_container_ip() {
+  agentgateway_primary_ipv4
 }
 
 function agentgateway_ports() {
-  local mcp_port admin_port env_line
-  mcp_port="${MCP_PORT:-3000}"
-  admin_port="${ADMIN_PORT:-15000}"
+  local public_port env_line
+  public_port="${PUBLIC_PORT:-${MCP_PORT:-8080}}"
   if [[ -f /opt/agentgateway/.env ]]; then
     # shellcheck disable=SC1091
     set -a
     source /opt/agentgateway/.env
     set +a
-    mcp_port="${MCP_PORT:-3000}"
-    admin_port="${ADMIN_PORT:-15000}"
+    public_port="${PUBLIC_PORT:-${MCP_PORT:-8080}}"
   elif [[ -n "${CTID:-}" ]] && command -v pct >/dev/null 2>&1; then
-    env_line="$(pct exec "$CTID" -- bash -c 'set -a; . /opt/agentgateway/.env; printf "%s %s" "${MCP_PORT:-3000}" "${ADMIN_PORT:-15000}"' 2>/dev/null || true)"
+    env_line="$(pct exec "$CTID" -- bash -c 'set -a; . /opt/agentgateway/.env; printf "%s" "${PUBLIC_PORT:-${MCP_PORT:-8080}}"' 2>/dev/null || true)"
     if [[ -n "$env_line" ]]; then
-      mcp_port="${env_line%% *}"
-      admin_port="${env_line##* }"
+      public_port="$env_line"
     fi
   fi
-  echo "${mcp_port} ${admin_port}"
+  echo "${public_port}"
 }
 
 function agentgateway_env_value() {
-  local key="$1" line=""
+  local key="$1"
   if [[ ! "$key" =~ ^[A-Z_]+$ ]]; then
     return 0
   fi
   if [[ -f /opt/agentgateway/.env ]]; then
-    line="$(grep -m1 "^${key}=" /opt/agentgateway/.env || true)"
-    printf '%s' "${line#*=}"
+    (
+      set -a
+      # shellcheck disable=SC1091
+      source /opt/agentgateway/.env
+      set +a
+      eval "printf '%s' \"\${${key}:-}\""
+    )
   elif [[ -n "${CTID:-}" ]] && command -v pct >/dev/null 2>&1; then
-    line="$(pct exec "$CTID" -- grep -m1 "^${key}=" /opt/agentgateway/.env 2>/dev/null || true)"
-    printf '%s' "${line#*=}"
+    pct exec "$CTID" -- bash -c "set -a; . /opt/agentgateway/.env; printf '%s' \"\${${key}:-}\"" 2>/dev/null || true
   fi
 }
 
 function agentgateway_show_endpoints() {
-  local ip mcp_port admin_port admin_bind mcp_url ui_url api_key
+  local ip public_port mcp_url ui_url api_key ui_user ui_password
   ip="$(agentgateway_container_ip)"
-  read -r mcp_port admin_port <<<"$(agentgateway_ports)"
-  admin_bind="$(agentgateway_env_value ADMIN_BIND)"
-  [[ -n "$admin_bind" ]] || admin_bind="127.0.0.1"
+  public_port="$(agentgateway_ports)"
   api_key="$(agentgateway_env_value AGENTGATEWAY_API_KEY)"
-  mcp_url="http://${ip}:${mcp_port}/mcp/http"
-  if [[ "$admin_bind" == "127.0.0.1" || "$admin_bind" == "localhost" ]]; then
-    ui_url="http://127.0.0.1:${admin_port}/ui"
-  else
-    ui_url="http://${ip}:${admin_port}/ui"
-  fi
+  ui_user="$(agentgateway_env_value UI_USER)"
+  ui_password="$(agentgateway_env_value UI_PASSWORD)"
+  [[ -n "$ui_user" ]] || ui_user="admin"
+  mcp_url="http://${ip}:${public_port}/mcp/http"
+  ui_url="http://${ip}:${public_port}/ui"
   if [[ -n "${CTID:-}" ]] && command -v pct >/dev/null 2>&1 && [[ ! -f /opt/agentgateway/.env ]]; then
     pct exec "$CTID" -- bash -c "printf '%s\n' '$mcp_url' >/opt/agentgateway/mcp_endpoint.txt; printf '%s\n' '$ui_url' >/opt/agentgateway/ui_url.txt" 2>/dev/null || true
+    if [[ -n "$api_key" ]]; then
+      pct exec "$CTID" -- tee /opt/agentgateway/mcp_client.json >/dev/null <<EOF
+{
+  "mcpServers": {
+    "agentgateway": {
+      "url": "${mcp_url}",
+      "headers": {
+        "Authorization": "Bearer ${api_key}"
+      }
+    }
+  }
+}
+EOF
+      pct exec "$CTID" -- chown agentgateway:agentgateway /opt/agentgateway/mcp_endpoint.txt /opt/agentgateway/ui_url.txt /opt/agentgateway/mcp_client.json 2>/dev/null || true
+    fi
   elif [[ -d /opt/agentgateway ]]; then
     printf '%s\n' "$mcp_url" >/opt/agentgateway/mcp_endpoint.txt
     printf '%s\n' "$ui_url" >/opt/agentgateway/ui_url.txt
+    if [[ -n "$api_key" ]]; then
+      jq -n --arg url "$mcp_url" --arg token "$api_key" \
+        '{mcpServers:{agentgateway:{url:$url,headers:{Authorization:("Bearer " + $token)}}}}' \
+        >/opt/agentgateway/mcp_client.json 2>/dev/null || true
+    fi
   fi
-  echo -e "${INFO}${YW} MCP endpoint (Cursor):${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}${mcp_url}${CL}"
+  echo -e "${INFO}${YW} MCP:${CL} ${GATEWAY}${BGN}${mcp_url}${CL}"
   if [[ -n "$api_key" ]]; then
-    echo -e "${INFO}${YW} Authorization:${CL} Bearer ${api_key}"
+    echo -e "${INFO}${YW} API key:${CL} ${api_key}"
+  else
+    echo -e "${INFO}${YW} API key:${CL} \`pct exec ${CTID:-<CTID>} -- grep AGENTGATEWAY_API_KEY /opt/agentgateway/.env\`${CL}"
   fi
-  echo -e "${INFO}${YW} Admin UI:${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}${ui_url}${CL}"
-  if [[ "$admin_bind" == "127.0.0.1" || "$admin_bind" == "localhost" ]]; then
-    echo -e "${INFO}${YW} Admin UI is loopback-only. Tunnel: \`ssh -L 15000:127.0.0.1:15000 root@${ip}\`${CL}"
+  echo -e "${INFO}${YW} UI:${CL} ${GATEWAY}${BGN}${ui_url}${CL}"
+  echo -e "${INFO}${YW} UI user:${CL} ${ui_user}"
+  if [[ -n "$ui_password" ]]; then
+    echo -e "${INFO}${YW} UI password:${CL} ${ui_password}"
+  else
+    echo -e "${INFO}${YW} UI password:${CL} \`pct exec ${CTID:-<CTID>} -- grep UI_PASSWORD /opt/agentgateway/.env\`${CL}"
   fi
+  echo -e "${INFO}${YW} Auth:${CL} UI requires HTTP basic auth. MCP accepts Bearer API key or the same basic-auth credentials."
+  echo -e "${INFO}${YW} MCP client config:${CL}"
+  if [[ -n "$api_key" ]]; then
+    cat <<EOF
+{
+  "mcpServers": {
+    "agentgateway": {
+      "url": "${mcp_url}",
+      "headers": {
+        "Authorization": "Bearer ${api_key}"
+      }
+    }
+  }
+}
+EOF
+  else
+    echo -e "${TAB}See /opt/agentgateway/mcp_client.json inside the container."
+  fi
+  echo -e "${INFO}${YW} Add backends:${CL} UI → MCP → Servers, or /opt/agentgateway/config.yaml"
 }
 
 function update_script() {
@@ -197,12 +254,3 @@ description
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 agentgateway_show_endpoints
-api_key="$(agentgateway_env_value AGENTGATEWAY_API_KEY)"
-mcp_port="$(agentgateway_ports)"
-mcp_port="${mcp_port%% *}"
-echo -e "${INFO}${YW} Add to Cursor (~/.cursor/mcp.json):${CL}"
-if [[ -n "$api_key" ]]; then
-  echo -e "${TAB}{ \"mcpServers\": { \"agentgateway\": { \"url\": \"http://$(agentgateway_container_ip):${mcp_port}/mcp/http\", \"headers\": { \"Authorization\": \"Bearer ${api_key}\" } } } }"
-else
-  echo -e "${TAB}{ \"mcpServers\": { \"agentgateway\": { \"url\": \"http://$(agentgateway_container_ip):${mcp_port}/mcp/http\" } } }"
-fi
