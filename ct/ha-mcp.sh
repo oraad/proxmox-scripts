@@ -26,24 +26,43 @@ var_install="ha-mcp-install"
 color
 catch_errors
 
-function ha_mcp_show_endpoint() {
-  local port="8086"
-  local path="/mcp"
+function ha_mcp_endpoint_url() {
+  local ip="${IP:-}" path port env_line
   if [[ -f /opt/ha-mcp/.env ]]; then
-    set -a
     # shellcheck disable=SC1091
+    set -a
     source /opt/ha-mcp/.env
     set +a
-    port="${MCP_PORT:-8086}"
     path="${MCP_SECRET_PATH:-/mcp}"
+    port="${MCP_PORT:-8086}"
+    if [[ -z "$ip" || "$ip" == "127.0.0.1" || "$ip" == "Unknown" ]]; then
+      if declare -f get_current_ip >/dev/null 2>&1; then
+        ip="$(get_current_ip)"
+      else
+        ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+      fi
+    fi
+  elif [[ -n "${CTID:-}" ]] && command -v pct >/dev/null 2>&1; then
+    env_line="$(pct exec "$CTID" -- bash -c 'set -a; . /opt/ha-mcp/.env; printf "%s %s" "${MCP_SECRET_PATH:-/mcp}" "${MCP_PORT:-8086}"' 2>/dev/null || true)"
+    path="${env_line%% *}"
+    port="${env_line##* }"
   fi
-  if [[ -f /opt/ha-mcp/mcp_endpoint.txt ]]; then
-    echo -e "${INFO}${YW} HA MCP endpoint:${CL}"
-    echo -e "${TAB}${GATEWAY}${BGN}$(cat /opt/ha-mcp/mcp_endpoint.txt)${CL}"
-    return
+  [[ -n "$ip" ]] || ip="127.0.0.1"
+  [[ -n "$path" ]] || path="/mcp"
+  [[ -n "$port" ]] || port="8086"
+  echo "http://${ip}:${port}${path}"
+}
+
+function ha_mcp_show_endpoint() {
+  local endpoint
+  endpoint="$(ha_mcp_endpoint_url)"
+  if [[ -n "${CTID:-}" ]] && command -v pct >/dev/null 2>&1 && [[ ! -f /opt/ha-mcp/.env ]]; then
+    pct exec "$CTID" -- bash -c "printf '%s\n' '$endpoint' >/opt/ha-mcp/mcp_endpoint.txt" 2>/dev/null || true
+  elif [[ -f /opt/ha-mcp/.env ]]; then
+    printf '%s\n' "$endpoint" >/opt/ha-mcp/mcp_endpoint.txt
   fi
   echo -e "${INFO}${YW} HA MCP endpoint:${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:${port}${path}/mcp${CL}"
+  echo -e "${TAB}${GATEWAY}${BGN}${endpoint}${CL}"
 }
 
 function update_script() {
@@ -83,20 +102,96 @@ EOF
   fi
   msg_ok "Updated ${APP}"
 
-  if [[ -f /opt/ha-mcp/.env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source /opt/ha-mcp/.env
-    set +a
-    echo "http://${IP:-127.0.0.1}:${MCP_PORT:-8086}${MCP_SECRET_PATH:-/mcp}/mcp" >/opt/ha-mcp/mcp_endpoint.txt
-  fi
-
   msg_ok "Updated successfully!"
   ha_mcp_show_endpoint
   exit
 }
 
+function prompt_ha_credentials() {
+  if [[ -n "${var_ha_url:-}" && -n "${var_ha_token:-}" ]]; then
+    export var_ha_url var_ha_token
+    return 0
+  fi
+
+  local silent=0
+  [[ "${PHS_SILENT:-0}" == "1" ]] && silent=1
+  [[ "${var_unattended:-}" =~ ^(yes|true|1)$ ]] && silent=1
+  [[ "${UNATTENDED:-}" =~ ^(yes|true|1)$ ]] && silent=1
+  [[ ! -t 0 ]] && silent=1
+
+  if [[ "$silent" -eq 1 ]]; then
+    msg_error "Unattended install requires var_ha_url and var_ha_token"
+    exit 1
+  fi
+
+  command -v stop_spinner >/dev/null 2>&1 && stop_spinner
+
+  if ! command -v whiptail >/dev/null 2>&1; then
+    var_ha_url="${var_ha_url:-$(prompt_input "${TAB3}Home Assistant URL [http://homeassistant.local:8123]:" "http://homeassistant.local:8123" 120)}"
+    var_ha_token="${var_ha_token:-$(prompt_password "${TAB3}Home Assistant long-lived access token:" "" 120)}"
+    if [[ -z "${var_ha_token}" ]]; then
+      msg_error "HOMEASSISTANT_TOKEN is required"
+      exit 1
+    fi
+    export var_ha_url var_ha_token
+    return 0
+  fi
+
+  local result
+  while true; do
+    if ! result=$(whiptail --backtitle "Proxmox Custom Scripts" \
+      --title "HOME ASSISTANT URL" \
+      --ok-button "Next" --cancel-button "Exit" \
+      --inputbox "\nHome Assistant URL\n(e.g. http://192.168.1.10:8123)" 12 70 \
+      "${var_ha_url:-http://homeassistant.local:8123}" \
+      3>&1 1>&2 2>&3); then
+      if declare -f exit_script >/dev/null 2>&1; then
+        exit_script
+      fi
+      exit 1
+    fi
+    result="${result%"${result##*[![:space:]]}"}"
+    result="${result#"${result%%[![:space:]]*}"}"
+    if [[ "$result" =~ ^https?://[^[:space:]]+$ ]]; then
+      var_ha_url="$result"
+      break
+    fi
+    whiptail --msgbox "Enter a valid http:// or https:// URL.\nExample: http://192.168.1.10:8123" 10 58
+  done
+
+  while true; do
+    if ! result=$(whiptail --backtitle "Proxmox Custom Scripts" \
+      --title "HOME ASSISTANT TOKEN" \
+      --ok-button "Next" --cancel-button "Exit" \
+      --passwordbox "\nLong-lived access token\n(HA Profile → Security → Create Token)" 12 70 \
+      3>&1 1>&2 2>&3); then
+      if declare -f exit_script >/dev/null 2>&1; then
+        exit_script
+      fi
+      exit 1
+    fi
+    if [[ -n "$result" ]]; then
+      var_ha_token="$result"
+      break
+    fi
+    whiptail --msgbox "A Home Assistant long-lived access token is required." 8 58
+  done
+
+  export var_ha_url var_ha_token
+}
+
+# Ensure Silent/Verbose/Cancel menu works (start() requires whiptail)
+if ! command -v pveversion &>/dev/null && ! command -v whiptail &>/dev/null; then
+  if [[ -f /etc/alpine-release ]]; then
+    apk add --no-cache newt >/dev/null 2>&1 || true
+  else
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq whiptail >/dev/null 2>&1 || true
+  fi
+fi
+
 start
+prompt_ha_credentials
 build_container
 description
 

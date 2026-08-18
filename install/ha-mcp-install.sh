@@ -32,8 +32,12 @@ fi
 msg_ok "Installed uv (${UVX_PATH})"
 
 stop_spinner
-ha_url="${var_ha_url:-$(prompt_input "${TAB3}Home Assistant URL [http://homeassistant.local:8123]:" "http://homeassistant.local:8123" 120)}"
-ha_token="${var_ha_token:-$(prompt_password "${TAB3}Home Assistant long-lived access token:" "" 120)}"
+ha_url="${var_ha_url:-}"
+ha_token="${var_ha_token:-}"
+if [[ -z "$ha_url" || -z "$ha_token" ]]; then
+  ha_url="${ha_url:-$(prompt_input "${TAB3}Home Assistant URL [http://homeassistant.local:8123]:" "http://homeassistant.local:8123" 120)}"
+  ha_token="${ha_token:-$(prompt_password "${TAB3}Home Assistant long-lived access token:" "" 120)}"
+fi
 if [[ -z "${ha_token}" ]]; then
   msg_error "HOMEASSISTANT_TOKEN is required"
   exit 1
@@ -127,7 +131,18 @@ else
   fi
 fi
 
-MCP_ENDPOINT="http://${IP:-127.0.0.1}:8086${MCP_SECRET_PATH}/mcp"
+container_ip="${IP:-}"
+if [[ -z "$container_ip" || "$container_ip" == "127.0.0.1" || "$container_ip" == "Unknown" ]]; then
+  if declare -f get_current_ip >/dev/null 2>&1; then
+    container_ip="$(get_current_ip)"
+  fi
+fi
+if [[ -z "$container_ip" || "$container_ip" == "127.0.0.1" || "$container_ip" == "Unknown" ]]; then
+  container_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+[[ -n "$container_ip" ]] || container_ip="127.0.0.1"
+
+MCP_ENDPOINT="http://${container_ip}:${MCP_PORT:-8086}${MCP_SECRET_PATH}"
 echo "${MCP_ENDPOINT}" >"${INSTALL_DIR}/mcp_endpoint.txt"
 chmod 600 "${INSTALL_DIR}/mcp_endpoint.txt"
 msg_ok "Installed ${APPLICATION:-HA MCP}"
