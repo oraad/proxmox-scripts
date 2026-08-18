@@ -133,6 +133,8 @@ write_agentgateway_config() {
     if [[ "$count" -gt 0 ]]; then
       echo "  targets:"
       cat "$tmp_targets"
+    else
+      echo "  targets: []"
     fi
   } >"${INSTALL_DIR}/config.yaml"
   rm -f "$tmp_targets"
@@ -152,19 +154,6 @@ if [[ ! "$MCP_PORT" =~ ^[0-9]+$ ]] || [[ ! "$ADMIN_PORT" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 ADMIN_ADDR="${ADMIN_BIND}:${ADMIN_PORT}"
-
-stop_spinner
-mcp_targets="${var_mcp_targets:-}"
-if [[ -z "${mcp_targets}" ]]; then
-  silent=0
-  [[ "${PHS_SILENT:-0}" == "1" ]] && silent=1
-  [[ "${var_unattended:-}" =~ ^(yes|true|1)$ ]] && silent=1
-  [[ "${UNATTENDED:-}" =~ ^(yes|true|1)$ ]] && silent=1
-  [[ ! -t 0 ]] && silent=1
-  if [[ "$silent" -eq 0 ]]; then
-    mcp_targets="$(prompt_input "${TAB3}MCP backends (name=url, comma-separated, optional):" "" 180)"
-  fi
-fi
 
 install -d -m 0750 "${INSTALL_DIR}"
 ensure_agentgateway_user
@@ -187,7 +176,7 @@ HOME=${INSTALL_DIR}
 EOF
 chmod 600 "${INSTALL_DIR}/.env"
 
-write_agentgateway_config "${mcp_targets}" "${MCP_PORT}" "${ADMIN_ADDR}" "${API_KEY}" "${SESSION_KEY}"
+write_agentgateway_config "${var_mcp_targets:-}" "${MCP_PORT}" "${ADMIN_ADDR}" "${API_KEY}" "${SESSION_KEY}"
 
 cat >"${INSTALL_DIR}/start.sh" <<EOF
 #!/bin/sh
@@ -203,7 +192,9 @@ chmod 700 "${INSTALL_DIR}/start.sh"
 chown -R agentgateway:agentgateway "${INSTALL_DIR}"
 
 msg_info "Validating config"
-if ! /usr/local/bin/agentgateway -f "${INSTALL_DIR}/config.yaml" --validate-only; then
+validate_out=""
+if ! validate_out="$(HOME="${INSTALL_DIR}" /usr/local/bin/agentgateway -f "${INSTALL_DIR}/config.yaml" --validate-only 2>&1)"; then
+  echo "${validate_out}"
   msg_error "agentgateway config failed validation"
   exit 1
 fi
@@ -331,8 +322,6 @@ if [[ "$ADMIN_BIND" == "127.0.0.1" || "$ADMIN_BIND" == "localhost" ]]; then
   echo -e "${INFO}${YW} Admin UI is loopback-only. From the Proxmox host: \`ssh -L 15000:127.0.0.1:15000 root@${container_ip}\` then open http://127.0.0.1:15000/ui${CL}"
   echo -e "${INFO}${YW} To bind the UI on the LAN (no auth): reinstall with var_admin_bind=0.0.0.0${CL}"
 fi
-if [[ -z "${mcp_targets}" ]]; then
-  echo -e "${INFO}${YW} No backends yet — add Streamable HTTP servers in the Admin UI (MCP → Servers) or edit /opt/agentgateway/config.yaml.${CL}"
-fi
+echo -e "${INFO}${YW} Add Streamable HTTP backends in the Admin UI (MCP → Servers) or edit /opt/agentgateway/config.yaml.${CL}"
 
 cleanup_lxc

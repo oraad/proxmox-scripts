@@ -106,9 +106,32 @@ apply_extra_nics() {
     if ! whiptail --backtitle "Proxmox Custom Scripts" \
       --title "ADDITIONAL NETWORK ADAPTER" \
       --yes-button "Add adapter" --no-button "Continue" --defaultno \
-      --yesno "Add another network adapter (net${idx} / eth${idx})?\n\nnet0 is already configured. Extra adapters are optional (IoT VLAN, management, etc.)." 12 70; then
+      --yesno "Add another network adapter (net${idx})?\n\nnet0 is already configured. Extra adapters are optional (IoT VLAN, management, etc.)." 12 70; then
       return 0
     fi
+
+    local default_name="eth${idx}" ifname name_input
+    while true; do
+      if ! name_input=$(whiptail --backtitle "Proxmox Custom Scripts" \
+        --title "ADAPTER NAME FOR net${idx}" \
+        --ok-button "Next" --cancel-button "Skip" \
+        --inputbox "\nInterface name inside the container.\nLeave blank for default: ${default_name}" 12 58 "$default_name" \
+        3>&1 1>&2 2>&3); then
+        continue 2
+      fi
+      name_input="${name_input%"${name_input##*[![:space:]]}"}"
+      name_input="${name_input#"${name_input%%[![:space:]]*}"}"
+      ifname="${name_input:-$default_name}"
+      if [[ ! "$ifname" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,14}$ ]]; then
+        whiptail --msgbox "Invalid adapter name.\nUse 1–15 characters starting with a letter (e.g. eth1, mesh0)." 10 58
+        continue
+      fi
+      if pct config "$CTID" 2>/dev/null | grep -E "^net[0-9]+:" | grep -qE "(^|,)name=${ifname}(,|$)"; then
+        whiptail --msgbox "Adapter '${ifname}' is already used on this container." 8 58
+        continue
+      fi
+      break
+    done
 
     local bridge
     bridge="$(_extra_nic_bridge_menu)" || continue
@@ -121,9 +144,9 @@ apply_extra_nics() {
 
     local ip_mode
     ip_mode=$(whiptail --backtitle "Proxmox Custom Scripts" \
-      --title "IPv4 FOR eth${idx}" \
+      --title "IPv4 FOR ${ifname}" \
       --ok-button "Next" --cancel-button "Skip" \
-      --menu "\nSelect IPv4 assignment for eth${idx}:" 14 58 2 \
+      --menu "\nSelect IPv4 assignment for ${ifname}:" 14 58 2 \
       "dhcp" "Automatic (DHCP)" \
       "static" "Static CIDR (gateway optional)" \
       3>&1 1>&2 2>&3) || continue
@@ -133,7 +156,7 @@ apply_extra_nics() {
     if [[ "$ip_mode" == "static" ]]; then
       local cidr
       cidr=$(whiptail --backtitle "Proxmox Custom Scripts" \
-        --title "STATIC IPv4 FOR eth${idx}" \
+        --title "STATIC IPv4 FOR ${ifname}" \
         --ok-button "Next" --cancel-button "Skip" \
         --inputbox "\nEnter IPv4 CIDR (e.g. 192.168.10.50/24)" 10 58 "" \
         3>&1 1>&2 2>&3) || continue
@@ -143,7 +166,7 @@ apply_extra_nics() {
       fi
       ip="$cidr"
       gw=$(whiptail --backtitle "Proxmox Custom Scripts" \
-        --title "GATEWAY FOR eth${idx}" \
+        --title "GATEWAY FOR ${ifname}" \
         --ok-button "Next" --cancel-button "Skip" \
         --inputbox "\nEnter gateway IPv4, or leave blank (typical for extra NICs)" 10 58 "" \
         3>&1 1>&2 2>&3) || continue
@@ -155,7 +178,7 @@ apply_extra_nics() {
 
     local vlan
     vlan=$(whiptail --backtitle "Proxmox Custom Scripts" \
-      --title "VLAN TAG FOR eth${idx}" \
+      --title "VLAN TAG FOR ${ifname}" \
       --ok-button "Add" --cancel-button "Skip" \
       --inputbox "\nVLAN tag 1–4094, or leave blank for none" 10 58 "" \
       3>&1 1>&2 2>&3) || continue
@@ -164,7 +187,7 @@ apply_extra_nics() {
       continue
     fi
 
-    local net_spec="name=eth${idx},bridge=${bridge},ip=${ip}"
+    local net_spec="name=${ifname},bridge=${bridge},ip=${ip}"
     [[ -n "$gw" ]] && net_spec+=",gw=${gw}"
     [[ -n "$vlan" ]] && net_spec+=",tag=${vlan}"
 
@@ -173,7 +196,7 @@ apply_extra_nics() {
       msg_warn "Failed to add net${idx} — add manually: pct set ${CTID} -net${idx} ${net_spec}"
       return 0
     fi
-    msg_ok "Added net${idx} on ${bridge} (eth${idx})"
+    msg_ok "Added net${idx} on ${bridge} (${ifname})"
   done
 }
 

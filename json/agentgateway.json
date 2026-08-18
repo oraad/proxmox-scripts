@@ -50,11 +50,11 @@
       "type": "warning"
     },
     {
-      "text": "During install you can paste backends as name=url pairs, comma-separated — e.g. home=http://192.168.1.21:8086/mcp-<secret>,cabin=http://192.168.1.22:8086/mcp-<secret>. Get each ha-mcp URL with `pct exec <CTID> -- cat /opt/ha-mcp/mcp_endpoint.txt`. Leave empty to add servers later in the Admin UI (MCP → Servers, Streamable HTTP) or in /opt/agentgateway/config.yaml. Target names: letters, digits, hyphens only (no underscores).",
+      "text": "Install does not prompt for backends. After install, add Streamable HTTP servers in the Admin UI (MCP → Servers) or in /opt/agentgateway/config.yaml under mcp.targets. Example: name home, URL from `pct exec <CTID> -- cat /opt/ha-mcp/mcp_endpoint.txt`. Target names: letters, digits, hyphens only (no underscores). mcp.targets must be present even if empty (`targets: []`).",
       "type": "info"
     },
     {
-      "text": "Unattended: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-secret,cabin=http://192.168.1.22:8086/mcp-secret' bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/agentgateway.sh)\"`. Optional: `var_mcp_port=3000 var_admin_port=15000 var_admin_bind=127.0.0.1`.",
+      "text": "Unattended: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/agentgateway.sh)\"`. Optional backends: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-secret'`. Optional ports: `var_mcp_port=3000 var_admin_port=15000 var_admin_bind=127.0.0.1`.",
       "type": "info"
     },
     {
