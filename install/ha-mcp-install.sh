@@ -43,7 +43,10 @@ if [[ -z "${ha_token}" ]]; then
   exit 1
 fi
 
+# Streamable HTTP is served at this path as-is.
+# (http://ip:8086/mcp-<secret>/mcp 404s; http://ip:8086/mcp-<secret> is correct).
 MCP_SECRET_PATH="/mcp-$(openssl rand -hex 16)"
+
 mkdir -p "${INSTALL_DIR}"
 chmod 700 "${INSTALL_DIR}"
 

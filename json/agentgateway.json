@@ -58,7 +58,7 @@
       "type": "info"
     },
     {
-      "text": "Unattended: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/agentgateway.sh)\"`. Optional backends: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-secret'`. Optional: `var_public_port=8080` (alias `var_mcp_port`), `var_ui_user=admin`, `var_ui_password=...`, `var_api_key=...`. Loopback admin: `var_admin_port=15000 var_admin_bind=127.0.0.1`.",
+      "text": "Unattended: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/agentgateway.sh)\"`. Optional backends: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-<secret>'` (exact URL from `pct exec <ha-mcp-CTID> -- cat /opt/ha-mcp/mcp_endpoint.txt`). Optional: `var_public_port=8080` (alias `var_mcp_port`), `var_ui_user=admin`, `var_ui_password=...`, `var_api_key=...`. Loopback admin: `var_admin_port=15000 var_admin_bind=127.0.0.1`.",
       "type": "info"
     },
     {

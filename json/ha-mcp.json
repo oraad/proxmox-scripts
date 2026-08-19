@@ -54,7 +54,7 @@
       "type": "info"
     },
     {
-      "text": "Add the MCP URL printed at install to your MCP client's config — e.g. {\"mcpServers\":{\"home-assistant\":{\"url\":\"http://<container-ip>:8086/mcp-<secret>\"}}}. The URL is MCP_SECRET_PATH itself (default /mcp), not /mcp/mcp. A browser GET may return 405; that is expected. Settings UI: http://<container-ip>:8086/<secret>/settings. See https://github.com/homeassistant-ai/ha-mcp for details. To federate several ha-mcp LXCs behind one MCP URL, install the agentgateway script.",
+      "text": "Add the MCP URL printed at install to your MCP client's config — e.g. {\"mcpServers\":{\"home-assistant\":{\"url\":\"http://<container-ip>:8086/mcp-<secret>\"}}}. That path is MCP_SECRET_PATH itself. A browser GET may return 405; that is expected. Settings UI: http://<container-ip>:8086/mcp-<secret>/settings. See https://github.com/homeassistant-ai/ha-mcp for details. To federate several ha-mcp LXCs behind one MCP URL, install the agentgateway script.",
       "type": "info"
     },
     {

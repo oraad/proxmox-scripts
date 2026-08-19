@@ -50,6 +50,17 @@ function ha_mcp_primary_ipv4() {
   printf '%s\n' "$ip"
 }
 
+function ha_mcp_publish_path() {
+  local path="$1"
+  path="${path:-/mcp}"
+  [[ "$path" == /* ]] || path="/${path}"
+  # Secret is /mcp-<token>. A duplicated trailing /mcp 404s on ha-mcp.
+  if [[ "$path" == */mcp && "$path" != /mcp ]]; then
+    path="${path%/mcp}"
+  fi
+  printf '%s' "$path"
+}
+
 function ha_mcp_endpoint_url() {
   local ip path port env_line
   ip="$(ha_mcp_primary_ipv4)"
@@ -69,7 +80,7 @@ function ha_mcp_endpoint_url() {
       port="${env_line##* }"
     fi
   fi
-  [[ -n "$path" ]] || path="/mcp"
+  path="$(ha_mcp_publish_path "$path")"
   [[ -n "$port" ]] || port="8086"
   echo "http://${ip}:${port}${path}"
 }
