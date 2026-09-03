@@ -9,7 +9,7 @@
   "interface_port": 8080,
   "documentation": "https://agentgateway.dev/docs/standalone/latest/",
   "website": "https://agentgateway.dev/",
-  "logo": "https://agentgateway.dev/favicon.ico",
+  "logo": "https://agentgateway.dev/favicon.svg",
   "config_path": "/opt/agentgateway",
   "description": "Deploys the official agentgateway binary as an MCP federation proxy. One public HTTP listener on port 8080 serves the UI (HTTP basic auth) and a Streamable HTTP MCP endpoint (Bearer API key or the same basic-auth credentials) that multiplexes tools from backends such as ha-mcp LXCs.",
   "install_methods": [
