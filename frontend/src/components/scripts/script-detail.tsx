@@ -3,13 +3,17 @@
 import {
   ArrowLeft,
   BookOpenText,
-  Code2,
+  Bot,
   Cpu,
   ExternalLink,
   Globe,
   HardDrive,
+  Info,
   MemoryStick,
   Network,
+  TerminalSquare,
+  TriangleAlert,
+  XCircle,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -28,16 +32,25 @@ import { buildInstallCommand, methodLabel } from "@/lib/install-command";
 import type { Category, Script } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-const noteStyles = {
-  info: "border-blue-500/30 bg-blue-500/10 text-blue-900 dark:text-blue-100",
-  warning: "border-amber-500/30 bg-amber-500/10 text-amber-950 dark:text-amber-100",
-  error: "border-red-500/30 bg-red-500/10 text-red-950 dark:text-red-100",
-};
-
-const noteTitles = {
-  info: "Info",
-  warning: "Warnings",
-  error: "Errors",
+const noteConfig: Record<
+  "info" | "warning" | "error",
+  { className: string; icon: React.ReactNode; title: string }
+> = {
+  info: {
+    className: "border-blue-500/30 bg-blue-500/10 text-blue-900 dark:text-blue-100",
+    icon: <Info className="mt-0.5 h-4 w-4 shrink-0" />,
+    title: "Info",
+  },
+  warning: {
+    className: "border-amber-500/30 bg-amber-500/10 text-amber-950 dark:text-amber-100",
+    icon: <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />,
+    title: "Warnings",
+  },
+  error: {
+    className: "border-red-500/30 bg-red-500/10 text-red-950 dark:text-red-100",
+    icon: <XCircle className="mt-0.5 h-4 w-4 shrink-0" />,
+    title: "Errors",
+  },
 };
 
 export function ScriptDetail({
@@ -74,91 +87,76 @@ export function ScriptDetail({
     script.default_credentials.password !== null;
 
   return (
-    <div className="space-y-8">
-      <div>
-        <Link
-          href="/scripts"
-          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          All scripts
-        </Link>
-      </div>
+    <div className="space-y-10">
+      <Link
+        href="/scripts"
+        className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        All scripts
+      </Link>
 
-      <div className="flex flex-col gap-6 sm:flex-row sm:items-start">
-        {script.logo ? (
-          <Image
-            src={script.logo}
-            alt=""
-            width={72}
-            height={72}
-            className="rounded-xl border border-border bg-card p-2"
-            unoptimized
-          />
-        ) : (
-          <div className="flex h-[72px] w-[72px] items-center justify-center rounded-xl border border-border bg-muted text-xl font-semibold">
-            {script.name.slice(0, 2)}
-          </div>
-        )}
-        <div className="min-w-0 flex-1 space-y-3">
-          <div className="space-y-2">
-            <h1 className="text-3xl font-semibold tracking-tight">{script.name}</h1>
-            <p className="text-sm text-muted-foreground">
-              Date added: {formatDate(script.date_created)}
-            </p>
-          </div>
-          <ScriptBadges script={script} />
-          <div className="flex flex-wrap gap-2">
-            {script.website ? (
-              <LinkButton href={script.website} icon={<Globe className="h-4 w-4" />} label="Website" />
-            ) : null}
-            {script.documentation ? (
-              <LinkButton
-                href={script.documentation}
-                icon={<BookOpenText className="h-4 w-4" />}
-                label="Documentation"
-              />
-            ) : null}
-            {sourceUrl ? (
-              <LinkButton href={sourceUrl} icon={<Code2 className="h-4 w-4" />} label="Source" />
-            ) : null}
+      <section className="relative overflow-hidden rounded-2xl border border-border bg-card">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_100%_at_top_right,hsl(var(--primary)/0.08),transparent_60%)]" />
+        <div className="relative flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:p-8">
+          {script.logo ? (
+            <Image
+              src={script.logo}
+              alt=""
+              width={72}
+              height={72}
+              className="rounded-xl border border-border bg-background p-2"
+              unoptimized
+            />
+          ) : (
+            <div className="flex h-[72px] w-[72px] items-center justify-center rounded-xl border border-border bg-muted text-xl font-semibold text-muted-foreground">
+              {script.name.slice(0, 2)}
+            </div>
+          )}
+          <div className="min-w-0 flex-1 space-y-3">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="text-3xl font-semibold tracking-tight">{script.name}</h1>
+              {script.updateable ? <Badge variant="success">Updateable</Badge> : null}
+            </div>
+            <ScriptBadges script={script} />
+            <div className="text-sm text-muted-foreground">
+              Date added:{" "}
+              <span className="font-medium text-foreground">{formatDate(script.date_created)}</span>
+              {script.config_path ? (
+                <>
+                  {" "}
+                  · Config:{" "}
+                  <code className="rounded bg-muted px-1.5 py-0.5">{script.config_path}</code>
+                </>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {script.website ? (
+                <LinkButton href={script.website} icon={<Globe className="h-4 w-4" />} label="Website" />
+              ) : null}
+              {script.documentation ? (
+                <LinkButton
+                  href={script.documentation}
+                  icon={<BookOpenText className="h-4 w-4" />}
+                  label="Documentation"
+                />
+              ) : null}
+              {sourceUrl ? (
+                <LinkButton href={sourceUrl} icon={<TerminalSquare className="h-4 w-4" />} label="Source" />
+              ) : null}
+            </div>
           </div>
         </div>
-      </div>
+      </section>
 
       <section className="space-y-3">
         <h2 className="text-xl font-semibold tracking-tight">About</h2>
         <p className="max-w-3xl text-sm leading-7 text-muted-foreground">{script.description}</p>
       </section>
 
-      {script.notes.length > 0 ? (
-        <section className="space-y-4">
-          <h2 className="text-xl font-semibold tracking-tight">Notes</h2>
-          {(["warning", "error", "info"] as const).map((type) =>
-            notesByType[type].length > 0 ? (
-              <div key={type} className="space-y-2">
-                <h3 className="text-sm font-medium">{noteTitles[type]}</h3>
-                {notesByType[type].map((note, index) => (
-                  <div
-                    key={`${type}-${index}`}
-                    className={cn("rounded-lg border px-4 py-3 text-sm leading-6", noteStyles[type])}
-                  >
-                    {note.text}
-                  </div>
-                ))}
-              </div>
-            ) : null,
-          )}
-        </section>
-      ) : null}
-
       {method ? (
         <section className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <h2 className="text-xl font-semibold tracking-tight">Install</h2>
-            {script.updateable ? <Badge variant="success">Updateable</Badge> : null}
-          </div>
-
+          <h2 className="text-xl font-semibold tracking-tight">Install</h2>
           {script.install_methods.length > 1 ? (
             <Tabs
               defaultValue="0"
@@ -188,42 +186,67 @@ export function ScriptDetail({
         </section>
       ) : null}
 
-      <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <ResourceCard
-          icon={<Cpu className="h-4 w-4" />}
-          label="CPU"
-          value={method?.resources.cpu != null ? `${method.resources.cpu} cores` : "—"}
-        />
-        <ResourceCard
-          icon={<MemoryStick className="h-4 w-4" />}
-          label="RAM"
-          value={method?.resources.ram != null ? `${method.resources.ram} MB` : "—"}
-        />
-        <ResourceCard
-          icon={<HardDrive className="h-4 w-4" />}
-          label="Disk"
-          value={method?.resources.hdd != null ? `${method.resources.hdd} GB` : "—"}
-        />
-        <ResourceCard
-          icon={<Network className="h-4 w-4" />}
-          label="Port"
-          value={script.interface_port != null ? String(script.interface_port) : "—"}
-        />
+      <section>
+        <h2 className="mb-4 text-xl font-semibold tracking-tight">Resources</h2>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <ResourceCard
+            icon={<Cpu className="h-4 w-4" />}
+            label="CPU"
+            value={method?.resources.cpu != null ? `${method.resources.cpu} cores` : "—"}
+          />
+          <ResourceCard
+            icon={<MemoryStick className="h-4 w-4" />}
+            label="RAM"
+            value={method?.resources.ram != null ? `${method.resources.ram} MB` : "—"}
+          />
+          <ResourceCard
+            icon={<HardDrive className="h-4 w-4" />}
+            label="Disk"
+            value={method?.resources.hdd != null ? `${method.resources.hdd} GB` : "—"}
+          />
+          <ResourceCard
+            icon={<Network className="h-4 w-4" />}
+            label="Port"
+            value={script.interface_port != null ? String(script.interface_port) : "—"}
+          />
+        </div>
+        {method?.resources.os || method?.resources.version ? (
+          <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+            <Bot className="h-4 w-4" />
+            Default OS:{" "}
+            <span className="font-medium text-foreground">
+              {[method.resources.os, method.resources.version].filter(Boolean).join(" ")}
+            </span>
+          </p>
+        ) : null}
       </section>
 
-      {method?.resources.os || method?.resources.version ? (
-        <p className="text-sm text-muted-foreground">
-          Default OS:{" "}
-          <span className="font-medium text-foreground">
-            {[method.resources.os, method.resources.version].filter(Boolean).join(" ")}
-          </span>
-          {script.config_path ? (
-            <>
-              {" "}
-              · Config path: <code className="rounded bg-muted px-1.5 py-0.5">{script.config_path}</code>
-            </>
-          ) : null}
-        </p>
+      {script.notes.length > 0 ? (
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold tracking-tight">Notes</h2>
+          {(["warning", "info", "error"] as const).map((type) =>
+            notesByType[type].length > 0 ? (
+              <div key={type} className="space-y-2">
+                <h3 className="flex items-center gap-2 text-sm font-medium">
+                  {noteConfig[type].icon}
+                  {noteConfig[type].title}
+                </h3>
+                {notesByType[type].map((note, index) => (
+                  <div
+                    key={`${type}-${index}`}
+                    className={cn(
+                      "flex gap-2 rounded-lg border px-4 py-3 text-sm leading-6",
+                      noteConfig[type].className,
+                    )}
+                  >
+                    {noteConfig[type].icon}
+                    <span>{note.text}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null,
+          )}
+        </section>
       ) : null}
 
       {hasCredentials ? (
@@ -323,7 +346,7 @@ function LinkButton({
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+      className="focus-surface inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
     >
       {icon}
       {label}

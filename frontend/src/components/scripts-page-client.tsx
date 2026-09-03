@@ -11,6 +11,7 @@ import type { Category } from "@/lib/types";
 export function ScriptsPageClient({ categories }: { categories: Category[] }) {
   const searchParams = useSearchParams();
   const selectedSlug = searchParams.get("id");
+  const categoryParam = searchParams.get("category");
 
   const selectedScript = useMemo(() => {
     if (!selectedSlug) return null;
@@ -34,10 +35,10 @@ export function ScriptsPageClient({ categories }: { categories: Category[] }) {
           Script <code className="rounded bg-muted px-1.5 py-0.5">{selectedSlug}</code> was not
           found.
         </div>
-        <ScriptsBrowser categories={categories} />
+        <ScriptsBrowser categories={categories} categoryParam={categoryParam} />
       </div>
     );
   }
 
-  return <ScriptsBrowser categories={categories} />;
+  return <ScriptsBrowser categories={categories} categoryParam={categoryParam} />;
 }

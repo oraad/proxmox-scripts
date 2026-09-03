@@ -1,7 +1,8 @@
-import { ArrowRight, Container, Github } from "lucide-react";
+import { ArrowRight, Github, TerminalSquare } from "lucide-react";
 import Link from "next/link";
 
 import { ScriptCard } from "@/components/scripts/script-card";
+import { CategoryIcon } from "@/components/ui/category-icon";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   communityScriptsUrl,
@@ -66,14 +67,46 @@ export default async function HomePage() {
       </section>
 
       <section className="grid gap-4 sm:grid-cols-3">
-        <StatCard label="Scripts" value={String(scripts.length)} />
-        <StatCard label="Categories" value={String(categories.length)} />
-        <StatCard label="Install style" value="One command" />
+        <StatCard label="Scripts" value={String(scripts.length)} hint="ready to install" />
+        <StatCard label="Categories" value={String(categories.length)} hint="and growing" />
+        <StatCard label="Install style" value="One command" hint="paste &amp; run" />
+      </section>
+
+      <section className="space-y-6">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Browse by category</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Jump straight to the tools that fit your setup.
+          </p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {categories.map((category) => (
+            <Link
+              key={category.id}
+              href={`/scripts?category=${category.id}`}
+              className="group rounded-2xl border border-border bg-card p-5 transition-shadow hover:shadow-lg"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="mb-3 inline-flex rounded-lg bg-primary/10 p-2 text-primary">
+                  <CategoryIcon icon={category.icon} className="h-5 w-5" />
+                </div>
+                <ArrowRight className="mt-1 h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+              </div>
+              <h3 className="font-medium">{category.name}</h3>
+              <p className="mt-1 line-clamp-2 text-sm leading-6 text-muted-foreground">
+                {category.description}
+              </p>
+              <p className="mt-3 text-xs font-medium text-primary">
+                {category.scripts.length} script{category.scripts.length === 1 ? "" : "s"}
+              </p>
+            </Link>
+          ))}
+        </div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
         <FeatureCard
-          icon={<Container className="h-5 w-5" />}
+          icon={<TerminalSquare className="h-5 w-5" />}
           title="Community-scripts compatible"
           description="Uses upstream build.func with the same var_* defaults, wizard flow, and update pattern."
         />
@@ -85,7 +118,7 @@ export default async function HomePage() {
         <FeatureCard
           icon={<Github className="h-5 w-5" />}
           title="Self-hosted catalog"
-          description="JSON-driven script metadata powers this GitHub Pages site and stays in sync with the repo."
+          description="JSON-driven script metadata powers this site and stays in sync with the repo."
         />
       </section>
 
@@ -117,12 +150,14 @@ export default async function HomePage() {
   );
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function StatCard({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
     <Card>
       <CardContent className="p-6">
         <div className="text-3xl font-semibold tracking-tight">{value}</div>
-        <div className="mt-1 text-sm text-muted-foreground">{label}</div>
+        <div className="mt-1 text-sm text-muted-foreground">
+          {label} · <span className="text-muted-foreground/70">{hint}</span>
+        </div>
       </CardContent>
     </Card>
   );

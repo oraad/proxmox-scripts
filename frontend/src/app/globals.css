@@ -28,59 +28,99 @@
 }
 
 :root {
-  --background: 0 0% 100%;
-  --foreground: 224 71% 4%;
+  --background: 210 33% 99%;
+  --foreground: 222 47% 11%;
   --card: 0 0% 100%;
-  --card-foreground: 224 71% 4%;
+  --card-foreground: 222 47% 11%;
   --popover: 0 0% 100%;
-  --popover-foreground: 224 71% 4%;
-  --muted: 220 14% 96%;
-  --muted-foreground: 220 9% 46%;
-  --border: 220 13% 91%;
-  --input: 220 13% 91%;
-  --accent: 220 14% 96%;
-  --accent-foreground: 224 71% 4%;
-  --primary: 221 83% 53%;
+  --popover-foreground: 222 47% 11%;
+  --muted: 214 32% 95%;
+  --muted-foreground: 215 16% 45%;
+  --border: 214 24% 91%;
+  --input: 214 24% 91%;
+  --accent: 214 32% 95%;
+  --accent-foreground: 222 47% 11%;
+  --primary: 217 91% 50%;
   --primary-foreground: 210 40% 98%;
-  --secondary: 220 14% 96%;
-  --secondary-foreground: 224 71% 4%;
-  --destructive: 0 84% 60%;
+  --secondary: 214 32% 95%;
+  --secondary-foreground: 222 47% 11%;
+  --destructive: 0 72% 48%;
   --destructive-foreground: 0 0% 98%;
-  --ring: 221 83% 53%;
-  --radius: 0.75rem;
+  --ring: 217 91% 50%;
+  --radius: 0.8rem;
 }
 
 .dark {
-  --background: 224 71% 4%;
+  --background: 230 34% 6%;
   --foreground: 213 31% 91%;
-  --card: 224 50% 8%;
+  --card: 228 26% 9%;
   --card-foreground: 213 31% 91%;
-  --popover: 224 50% 8%;
+  --popover: 228 26% 9%;
   --popover-foreground: 213 31% 91%;
-  --muted: 223 30% 14%;
-  --muted-foreground: 215 20% 65%;
-  --border: 223 30% 16%;
-  --input: 223 30% 16%;
-  --accent: 223 30% 14%;
+  --muted: 226 22% 14%;
+  --muted-foreground: 217 16% 64%;
+  --border: 226 22% 16%;
+  --input: 226 22% 16%;
+  --accent: 226 22% 15%;
   --accent-foreground: 213 31% 91%;
-  --primary: 217 91% 60%;
-  --primary-foreground: 222 47% 11%;
-  --secondary: 223 30% 14%;
+  --primary: 217 91% 62%;
+  --primary-foreground: 222 47% 8%;
+  --secondary: 226 22% 14%;
   --secondary-foreground: 213 31% 91%;
-  --destructive: 0 63% 45%;
+  --destructive: 0 66% 52%;
   --destructive-foreground: 0 0% 98%;
-  --ring: 217 91% 60%;
+  --ring: 217 91% 62%;
 }
 
 * {
   @apply border-border;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   @apply bg-background text-foreground antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+::selection {
+  background-color: hsl(var(--primary) / 0.18);
+  color: hsl(var(--foreground));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 code,
 pre {
   @apply font-mono text-sm;
+}
+
+/* Soft layered shadow for elevated surfaces (popovers, modals). */
+.shadow-surface {
+  box-shadow:
+    0 1px 2px rgb(15 23 42 / 0.06),
+    0 8px 24px -8px rgb(15 23 42 / 0.18);
+}
+
+.dark .shadow-surface {
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.4),
+    0 12px 32px -12px rgb(0 0 0 / 0.6);
+}
+
+/* Subtle, keyboard-friendly focus ring used by interactive surfaces. */
+.focus-surface {
+  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background;
 }

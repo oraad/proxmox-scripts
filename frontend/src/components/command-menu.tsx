@@ -6,18 +6,22 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { CategoryIcon } from "@/components/ui/category-icon";
 import { Input } from "@/components/ui/input";
 import { typeLabel } from "@/lib/scripts";
-import type { Script } from "@/lib/types";
+import type { Category, Script } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type CommandMenuProps = {
   scripts: Script[];
+  categories: Category[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
 };
 
-export function CommandMenu({ scripts, open, onOpenChange }: CommandMenuProps) {
+const MAX_RESULTS = 8;
+
+export function CommandMenu({ scripts, categories, open, onOpenChange }: CommandMenuProps) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -34,16 +38,16 @@ export function CommandMenu({ scripts, open, onOpenChange }: CommandMenuProps) {
 
   if (!open) return null;
 
-  return (
-    <CommandMenuDialog scripts={scripts} onOpenChange={onOpenChange} />
-  );
+  return <CommandMenuDialog scripts={scripts} categories={categories} onOpenChange={onOpenChange} />;
 }
 
 function CommandMenuDialog({
   scripts,
+  categories,
   onOpenChange,
 }: {
   scripts: Script[];
+  categories: Category[];
   onOpenChange: (open: boolean) => void;
 }) {
   const router = useRouter();
@@ -54,18 +58,44 @@ function CommandMenuDialog({
   const fuse = useMemo(
     () =>
       new Fuse(scripts, {
-        keys: ["name", "slug", "description"],
+        keys: [
+          { name: "name", weight: 0.6 },
+          { name: "slug", weight: 0.3 },
+          { name: "description", weight: 0.1 },
+        ],
         threshold: 0.35,
+        ignoreLocation: true,
       }),
     [scripts],
   );
 
   const results = useMemo(() => {
-    if (!query.trim()) return scripts.slice(0, 8);
-    return fuse.search(query.trim()).map((result) => result.item).slice(0, 8);
+    if (!query.trim()) return scripts.slice(0, MAX_RESULTS);
+    return fuse
+      .search(query.trim())
+      .map((result) => result.item)
+      .slice(0, MAX_RESULTS);
   }, [fuse, query, scripts]);
 
-  const safeActiveIndex = Math.min(activeIndex, Math.max(results.length - 1, 0));
+  const grouped = useMemo(() => {
+    const groups = new Map<number, Script[]>();
+    const order: number[] = [];
+    for (const script of results) {
+      const firstCategoryId = script.categories[0];
+      if (!groups.has(firstCategoryId)) {
+        groups.set(firstCategoryId, []);
+        order.push(firstCategoryId);
+      }
+      groups.get(firstCategoryId)!.push(script);
+    }
+    return order.map((id) => ({
+      category: categories.find((c) => c.id === id),
+      scripts: groups.get(id)!,
+    }));
+  }, [results, categories]);
+
+  const totalCount = results.length;
+  const safeActiveIndex = Math.min(activeIndex, Math.max(totalCount - 1, 0));
 
   useEffect(() => {
     const timer = window.setTimeout(() => inputRef.current?.focus(), 0);
@@ -103,7 +133,7 @@ function CommandMenuDialog({
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
-                  setActiveIndex((index) => Math.min(index + 1, results.length - 1));
+                  setActiveIndex((index) => Math.min(index + 1, totalCount - 1));
                 } else if (event.key === "ArrowUp") {
                   event.preventDefault();
                   setActiveIndex((index) => Math.max(index - 1, 0));
@@ -122,50 +152,70 @@ function CommandMenuDialog({
               <X className="h-4 w-4" />
             </button>
           </div>
-          <ul className="max-h-80 overflow-y-auto p-2">
-            {results.length === 0 ? (
-              <li className="px-3 py-6 text-center text-sm text-muted-foreground">
-                No scripts found.
-              </li>
-            ) : (
-              results.map((script, index) => (
-                <li key={script.slug}>
-                  <button
-                    type="button"
-                    onClick={() => selectScript(script)}
-                    onMouseEnter={() => setActiveIndex(index)}
-                    className={cn(
-                      "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left",
-                      index === safeActiveIndex
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/60",
-                    )}
-                  >
-                    {script.logo ? (
-                      <Image
-                        src={script.logo}
-                        alt=""
-                        width={28}
-                        height={28}
-                        className="rounded-md"
-                        unoptimized
-                      />
-                    ) : (
-                      <div className="flex h-7 w-7 items-center justify-center rounded-md bg-muted text-xs font-semibold">
-                        {script.name.slice(0, 2)}
+          {results.length === 0 ? (
+            <div className="px-3 py-10 text-center text-sm text-muted-foreground">
+              No scripts found.
+            </div>
+          ) : (
+            <ul className="max-h-80 overflow-y-auto p-2">
+              {grouped.map(({ category, scripts: groupScripts }) => {
+                return (
+                  <li key={category?.id ?? "uncategorized"}>
+                    {category ? (
+                      <div className="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        <CategoryIcon icon={category.icon} className="h-3.5 w-3.5" />
+                        {category.name}
                       </div>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium">{script.name}</div>
-                      <div className="truncate text-xs text-muted-foreground">
-                        {typeLabel(script.type)} · {script.slug}
-                      </div>
-                    </div>
-                  </button>
-                </li>
-              ))
-            )}
-          </ul>
+                    ) : null}
+                    <ul>
+                      {groupScripts.map((script) => {
+                        const index = results.indexOf(script);
+                        return (
+                          <li key={script.slug}>
+                            <button
+                              type="button"
+                              onClick={() => selectScript(script)}
+                              onMouseEnter={() => setActiveIndex(index)}
+                              className={cn(
+                                "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left",
+                                index === safeActiveIndex
+                                  ? "bg-accent text-accent-foreground"
+                                  : "hover:bg-accent/60",
+                              )}
+                            >
+                              {script.logo ? (
+                                <Image
+                                  src={script.logo}
+                                  alt=""
+                                  width={28}
+                                  height={28}
+                                  className="rounded-md"
+                                  unoptimized
+                                />
+                              ) : (
+                                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-semibold">
+                                  {script.name.slice(0, 2)}
+                                </div>
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate font-medium">{script.name}</div>
+                                <div className="truncate text-xs text-muted-foreground">
+                                  {script.slug}
+                                </div>
+                              </div>
+                              <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                {typeLabel(script.type)}
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       </div>
     </div>

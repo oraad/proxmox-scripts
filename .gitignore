@@ -6,6 +6,7 @@ frontend/out/
 
 # Build output
 frontend/public/categories.json
+*.tsbuildinfo
 
 # OS / editor
 .DS_Store

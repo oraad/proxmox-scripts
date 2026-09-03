@@ -21,7 +21,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
-        <Providers scripts={scripts}>{children}</Providers>
+        <Providers scripts={scripts} categories={categories}>
+          {children}
+        </Providers>
       </body>
     </html>
   );

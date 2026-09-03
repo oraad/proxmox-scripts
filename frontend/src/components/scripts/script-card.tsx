@@ -8,7 +8,7 @@ import type { Script } from "@/lib/types";
 export function ScriptCard({ script }: { script: Script }) {
   return (
     <Link href={`/scripts?id=${encodeURIComponent(script.slug)}`} className="group block h-full">
-      <Card className="h-full transition group-hover:border-primary/40 group-hover:shadow-md">
+      <Card className="h-full transition-[border-color,box-shadow,transform] duration-200 group-hover:-translate-y-0.5 group-hover:border-primary/40 group-hover:shadow-md">
         <CardContent className="flex h-full flex-col gap-3 p-5">
           <div className="flex items-start gap-3">
             {script.logo ? (
@@ -17,11 +17,11 @@ export function ScriptCard({ script }: { script: Script }) {
                 alt=""
                 width={40}
                 height={40}
-                className="rounded-lg border border-border bg-background p-1"
+                className="rounded-lg border border-border bg-background p-1 transition-colors group-hover:border-primary/30"
                 unoptimized
               />
             ) : (
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-muted text-sm font-semibold">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-sm font-semibold text-muted-foreground transition-colors group-hover:border-primary/30 group-hover:text-primary">
                 {script.name.slice(0, 2)}
               </div>
             )}

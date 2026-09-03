@@ -6,14 +6,16 @@ import { useState } from "react";
 import { CommandMenu } from "@/components/command-menu";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
-import type { Script } from "@/lib/types";
+import type { Category, Script } from "@/lib/types";
 
 export function Providers({
   children,
   scripts,
+  categories,
 }: {
   children: React.ReactNode;
   scripts: Script[];
+  categories: Category[];
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -24,7 +26,12 @@ export function Providers({
         <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6">{children}</main>
         <SiteFooter />
       </div>
-      <CommandMenu scripts={scripts} open={searchOpen} onOpenChange={setSearchOpen} />
+      <CommandMenu
+        scripts={scripts}
+        categories={categories}
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+      />
     </ThemeProvider>
   );
 }
