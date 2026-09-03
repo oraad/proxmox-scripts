@@ -1,0 +1,58 @@
+{
+  "name": "Coder Code Server",
+  "slug": "code-server",
+  "categories": [5],
+  "date_created": "2026-09-03",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 8680,
+  "documentation": "https://coder.com/docs/code-server/latest",
+  "website": "https://coder.com/",
+  "logo": "https://coder.com/favicon.svg",
+  "config_path": "/root/.config/code-server/config.yaml",
+  "description": "code-server is a self-hosted Visual Studio Code served over the web, so you can use it from any browser on any device. This script installs the official Debian package natively in an LXC (no Docker) and runs it as a systemd user service on port 8680.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/code-server.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 4096,
+        "hdd": 16,
+        "os": "debian",
+        "version": "13"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "The web UI is exposed without a password by default (`auth: none`) and binds to 0.0.0.0:8680. For anything reachable beyond a trusted LAN, set a password — edit /root/.config/code-server/config.yaml to add `password: <your-password>` (or `auth: password`), then `systemctl restart code-server@root`. Consider fronting it with an authenticating reverse proxy.",
+      "type": "warning"
+    },
+    {
+      "text": "code-server ships Debian/Ubuntu .deb packages only, so this install uses the Debian 13 template (unprivileged LXC by default). The Alpine template is not available for this app.",
+      "type": "info"
+    },
+    {
+      "text": "Web UI: http://<container-ip>:8680",
+      "type": "info"
+    },
+    {
+      "text": "Workspaces live in the logging-in user's home directory. Add a non-root user inside the LXC and log in as them to sandbox projects, or copy your dotfiles into /root.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update, Remove Unused Packages, or Restart. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update.",
+      "type": "info"
+    },
+    {
+      "text": "Config file: /root/.config/code-server/config.yaml. Upstream project: https://github.com/coder/code-server",
+      "type": "info"
+    }
+  ]
+}

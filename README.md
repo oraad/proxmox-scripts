@@ -17,6 +17,7 @@ Current scripts:
 - [HA MCP](https://oraad.github.io/proxmox-scripts/scripts) — ha-mcp HTTP endpoint for MCP clients
 - [agentgateway](https://oraad.github.io/proxmox-scripts/scripts) — MCP federation proxy in front of multiple mcp (or other Streamable HTTP) backends
 - [NetAlertX](https://oraad.github.io/proxmox-scripts/scripts) — network visibility via Docker with host networking (privileged LXC)
+- [Coder Code Server](https://oraad.github.io/proxmox-scripts/scripts) — VS Code in the browser, native Debian package in an LXC
 - [Pangolin Newt](https://oraad.github.io/proxmox-scripts/scripts) — dedicated LXC for the Pangolin tunnel agent
 - [Pangolin Newt Addon](https://oraad.github.io/proxmox-scripts/scripts) — install Newt on the Proxmox host or an existing LXC
 - [Pangolin CLI Addon](https://oraad.github.io/proxmox-scripts/scripts) — install the Pangolin machine VPN client on the host or an existing LXC
