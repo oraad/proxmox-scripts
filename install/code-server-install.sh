@@ -51,6 +51,49 @@ cert: false
 EOF
 fi
 
+if [[ "${var_hass_ingress:-no}" =~ ^(yes|y|true|1)$ ]]; then
+  sed -i 's/^auth: .*/auth: none/' "$HOME/.config/code-server/config.yaml"
+  cat <<'EOF' >/opt/code-server-ha-ingress.md
+code-server exposed as a Home Assistant Ingress panel
+=====================================================
+
+code-server itself runs with its own authentication DISABLED (auth: none).
+Access control is provided entirely by Home Assistant via the hass_ingress
+HACS integration, so no separate login is needed and no extra port is exposed.
+
+1. Install HACS, then install the "Ingress" integration from
+   https://github.com/lovelylain/hass_ingress (Settings > Add-ons > HACS >
+   Integrations, add the custom repository, download, restart HA).
+
+2. Add code-server as an ingress panel in HA configuration.yaml. Replace
+   <code-server-ip> with this container's IP (http://<code-server-ip>:8680):
+
+   ingress:
+     code_server:
+       work_mode: ingress
+       ui_mode: toolbar
+       title: "Code Server"
+       icon: "mdi:microsoft-visual-studio-code"
+       url: "http://<code-server-ip>:8680/"
+       require_admin: true
+
+3. Restart HA (or reload Ingress via Developer Tools > YAML). The panel then
+   appears in the sidebar and only authenticated HA admins can open it.
+
+Notes:
+- Served at <ha-base-url>/api/ingress/code_server/. All traffic stays inside
+  your normal HA reverse proxy; port 8680 is NOT exposed to the internet.
+- If <code-server-ip> is not reachable from the HA host, give this LXC a
+  static IP and a trusted_proxies entry instead of relying on DHCP.
+- require_admin: true is strongly recommended — the editor can read/write the
+  container filesystem and run a terminal.
+- To instead require a password when NOT using ingress, set `auth: password`
+  and add `password: <value>` in /root/.config/code-server/config.yaml, then
+  restart code-server.
+EOF
+  msg_ok "Configured for Home Assistant Ingress — see /opt/code-server-ha-ingress.md"
+fi
+
 systemctl enable -q --now "code-server@${USER:-root}" 2>/dev/null || systemctl enable -q --now code-server@root || true
 systemctl restart "code-server@${USER:-root}" 2>/dev/null || systemctl restart code-server@root 2>/dev/null || true
 

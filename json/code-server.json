@@ -47,6 +47,10 @@
       "type": "info"
     },
     {
+      "text": "Optional Home Assistant Ingress: expose code-server inside the HA sidebar with HA-session auth (no separate login, no exposed port). Requires the hass_ingress HACS integration (https://github.com/lovelylain/hass_ingress). Enable at install with `var_hass_ingress=yes bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/code-server.sh)\"` (or answer yes to the prompt). This disables code-server's own auth (HA becomes the auth boundary) and writes a ready-to-paste configuration.yaml snippet to /opt/code-server-ha-ingress.md inside the container.",
+      "type": "info"
+    },
+    {
       "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update, Remove Unused Packages, or Restart. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update.",
       "type": "info"
     },

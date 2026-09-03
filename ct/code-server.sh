@@ -119,6 +119,21 @@ function update_script() {
   fi
 }
 
+function prompt_hass_ingress() {
+  [[ -n "${var_hass_ingress+x}" ]] && return 0
+  is_unattended && return 0
+
+  stop_spinner
+  local ingress
+  ingress="$(prompt_input "${TAB3}Expose code-server as a Home Assistant Ingress panel? (requires the hass_ingress HACS integration in HA) yes/no:" "no" 60)"
+  ingress="${ingress,,}"
+  case "$ingress" in
+    y | yes | 1) var_hass_ingress="yes" ;;
+    *) var_hass_ingress="no" ;;
+  esac
+  export var_hass_ingress
+}
+
 # Ensure Silent/Verbose/Cancel menu works (start() requires whiptail)
 if ! command -v pveversion &>/dev/null && ! command -v whiptail &>/dev/null; then
   if [[ -f /etc/alpine-release ]]; then
@@ -130,6 +145,7 @@ if ! command -v pveversion &>/dev/null && ! command -v whiptail &>/dev/null; the
 fi
 
 start
+prompt_hass_ingress
 build_container
 description
 
