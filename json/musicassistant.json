@@ -50,6 +50,14 @@
       "type": "info"
     },
     {
+      "text": "Authentication: Music Assistant (schema 28+) requires a login. On first use you create an admin account at http://<container-ip>:8095/setup (via the admin wizard; do not lose these credentials — they cannot be recovered). Users can have admin or user role. Exposing the UI through Home Assistant's hass_ingress integration gates reachability behind the HA login, but MA still requires its own account login — it does not inherit the add-on's 'no password, auto-login from HA' behaviour (that is a Supervisor-internal feature unavailable to a standalone Docker LXC).",
+      "type": "info"
+    },
+    {
+      "text": "'Sign in with Home Assistant' option: MA shows this login button automatically when you configure the Home Assistant provider inside MA (Settings > Providers > Home Assistant) with your HA URL. Note this also imports your HA media players into MA as players (a side effect to be aware of), and it is configured from the MA UI, not the install script.",
+      "type": "info"
+    },
+    {
       "text": "Web UI: http://<container-ip>:8095. Music Assistant requires layer-2 network access — MA, players, and Home Assistant should be on the same flat network or VLAN. Host networking is mandatory for the Docker container.",
       "type": "info"
     },
