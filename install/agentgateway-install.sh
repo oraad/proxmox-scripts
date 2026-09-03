@@ -329,7 +329,7 @@ else
 fi
 msg_ok "Installed ${APPLICATION:-agentgateway}"
 
-container_ip="${IP:-}"
+container_ip="${LOCAL_IP:-${IP:-}}"
 if [[ ! "$container_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$container_ip" == "127.0.0.1" ]]; then
   container_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
 fi

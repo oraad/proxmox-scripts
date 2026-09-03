@@ -23,6 +23,37 @@ variables
 color
 catch_errors
 
+function musicassistant_primary_ipv4() {
+  local ip="${LOCAL_IP:-${IP:-}}"
+  if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" ]]; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
+  if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" ]]; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+  if declare -f get_current_ip >/dev/null 2>&1; then
+    ip="$(get_current_ip)"
+    ip="${ip%% *}"
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" && "$ip" != "Unknown" ]]; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  fi
+  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  [[ -n "$ip" && "$ip" != "127.0.0.1" ]] || ip="127.0.0.1"
+  printf '%s\n' "$ip"
+}
+
+function musicassistant_show_url() {
+  local ip
+  ip="$(musicassistant_primary_ipv4)"
+  echo -e "${INFO}${YW} Access Music Assistant at:${CL}"
+  echo -e "${TAB}${GATEWAY}${BGN}http://${ip}:8095${CL}"
+}
+
 function update_script() {
   header_info
   check_container_storage
@@ -56,8 +87,7 @@ function update_script() {
     msg_ok "Updated ${APP}"
 
     msg_ok "Updated successfully!"
-    echo -e "${INFO}${YW} Access Music Assistant at:${CL}"
-    echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:8095${CL}"
+    musicassistant_show_url
     exit
   fi
 
@@ -99,5 +129,4 @@ description
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW} Access Music Assistant at:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:8095${CL}"
+musicassistant_show_url

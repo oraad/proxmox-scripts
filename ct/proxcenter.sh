@@ -29,7 +29,7 @@ color
 catch_errors
 
 function proxcenter_primary_ipv4() {
-  local ip="${IP:-}"
+  local ip="${LOCAL_IP:-${IP:-}}"
   if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" ]]; then
     printf '%s\n' "$ip"
     return 0

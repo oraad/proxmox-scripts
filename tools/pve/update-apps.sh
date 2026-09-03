@@ -10,6 +10,15 @@
 CS_RAW="${CS_RAW:-https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main}"
 
 source <(curl -fsSL "${CS_RAW}/misc/core.func")
+# Upstream core.func no longer initializes colors/formatting/icons at source
+# time — load_functions() must be called to set GN/CL/YW, msg_* helpers, etc.
+if declare -f load_functions >/dev/null 2>&1; then
+  load_functions
+elif declare -f color >/dev/null 2>&1; then
+  color
+  formatting
+  icons
+fi
 source <(curl -fsSL "${CS_RAW}/misc/api.func") 2>/dev/null || true
 declare -f init_tool_telemetry &>/dev/null && init_tool_telemetry "update-apps" "pve"
 
