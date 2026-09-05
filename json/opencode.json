@@ -1,0 +1,73 @@
+{
+  "name": "OpenCode Server",
+  "slug": "opencode",
+  "categories": [5],
+  "date_created": "2026-09-05",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 4096,
+  "documentation": "https://opencode.ai/docs/",
+  "website": "https://opencode.ai/",
+  "logo": "https://opencode.ai/apple-touch-icon.png",
+  "config_path": "/root/.config/opencode/config.json",
+  "description": "OpenCode is a privacy-first AI coding agent that runs locally with full control over your data, models, and permissions. This script installs the official binary natively in an LXC (no Docker) and runs it as an always-on `opencode web` server (Debian: systemd, Alpine: OpenRC) with HTTP basic auth on port 4096.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/opencode.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 2048,
+        "hdd": 10,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/opencode.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 2048,
+        "hdd": 10,
+        "os": "alpine",
+        "version": "3.24"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": "opencode",
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "The web UI binds to 0.0.0.0:4096 with HTTP basic auth enabled by default (username `opencode`). A password is auto-generated at install, shown once on screen, and saved to /etc/opencode/opencode.env (mode 0600). Recover/change it there and restart the service (`systemctl restart opencode` on Debian, `rc-service opencode restart` on Alpine).",
+      "type": "warning"
+    },
+    {
+      "text": "Web UI: http://<container-ip>:4096. OpenAPI spec for API access: http://<container-ip>:4096/doc. Attach the CLI/TUI: `opencode attach http://<container-ip>:4096`, or run non-interactively with `opencode run --attach http://<container-ip>:4096 \"<prompt>\"` (both honor OPENCODE_SERVER_USERNAME/OPENCODE_SERVER_PASSWORD).",
+      "type": "info"
+    },
+    {
+      "text": "Config file: /root/.config/opencode/config.json (port, hostname, autoupdate, default model). Configure provider API keys inside the container with `opencode auth login` — stored at /root/.local/share/opencode/auth.json. Use a per-model firewall/proxy or a single deploy key; keys live in the container only.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update (runs `opencode upgrade --method curl` + base system upgrade + service restart), Remove Unused Packages, or Restart.",
+      "type": "info"
+    },
+    {
+      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.24`. Download if missing: `pveam download local alpine-3.24-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.24 is not listed on an older Proxmox host.",
+      "type": "info"
+    },
+    {
+      "text": "Unattended install with a custom password: `var_opencode_password=\"your-secret\" bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/opencode.sh)\"`.",
+      "type": "info"
+    },
+    {
+      "text": "Service logs: Debian `journalctl -u opencode`; Alpine /var/log/opencode.log. Upstream project: https://github.com/anomalyco/opencode",
+      "type": "info"
+    }
+  ]
+}
