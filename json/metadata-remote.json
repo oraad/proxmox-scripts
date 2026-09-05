@@ -1,0 +1,73 @@
+{
+  "name": "Metadata Remote",
+  "slug": "metadata-remote",
+  "categories": [13],
+  "date_created": "2026-09-05",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 8338,
+  "documentation": "https://github.com/wow-signal-dev/metadata-remote",
+  "website": "https://github.com/wow-signal-dev/metadata-remote",
+  "logo": "https://raw.githubusercontent.com/wow-signal-dev/metadata-remote/main/screenshots/mdrm-icon-for-light-bg.svg",
+  "config_path": "/opt/metadata-remote/compose.yaml",
+  "description": "Metadata Remote (mdrm) is a web-based audio metadata editor for headless servers — edit tags, album art, and filenames for MP3, FLAC, OGG, OPUS, M4A, M4B, WMA, WAV, and WavPack directly in a browser, with full undo history and MusicBrainz suggestions. This script deploys the official Docker container in an LXC with host networking on port 8338.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/metadata-remote.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 1024,
+        "hdd": 8,
+        "os": "debian",
+        "version": "13"
+      }
+    },
+    {
+      "type": "alpine",
+      "script": "ct/metadata-remote.sh",
+      "resources": {
+        "cpu": 1,
+        "ram": 1024,
+        "hdd": 8,
+        "os": "alpine",
+        "version": "3.24"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Metadata Remote has NO authentication — it is designed for internal LAN use. Do not expose http://<container-ip>:8338 to the internet without a reverse proxy with HTTPS and authentication.",
+      "type": "warning"
+    },
+    {
+      "text": "Requires Docker with host networking inside the LXC. Enable nesting and keyctl (defaults in this script). If host-network Docker fails on an unprivileged LXC, try privileged mode: `var_unprivileged=0 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/metadata-remote.sh)\"`.",
+      "type": "info"
+    },
+    {
+      "text": "Web UI: http://<container-ip>:8338",
+      "type": "info"
+    },
+    {
+      "text": "Music library: during Advanced install you can enter a host path (bind-mounted to /media in the LXC, then /music in the container). Unattended: `var_media_path=/path/on/host bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/metadata-remote.sh)\"`. Container runs with PUID=1000/PGID=1000 by default — edit these in /opt/metadata-remote/compose.yaml if your files have different ownership. Unprivileged bind mounts may require correct host directory ownership or `var_unprivileged=0`.",
+      "type": "info"
+    },
+    {
+      "text": "Undo/redo history is stored in memory and clears when the container restarts (by design in the upstream project). Metadata changes are written directly to your audio files on the mounted library.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update Metadata Remote or Remove Unused Images.",
+      "type": "info"
+    },
+    {
+      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.24`. Download if missing: `pveam download local alpine-3.24-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.24 is not listed on an older Proxmox host.",
+      "type": "info"
+    }
+  ]
+}
