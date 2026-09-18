@@ -162,6 +162,15 @@ UNIT
     systemctl restart pangolin-site
   fi
 
+  cat >/usr/bin/update <<EOF
+#!/usr/bin/env bash
+set -a
+[ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
+set +a
+bash -c "\$(curl -fsSL ${REPO_RAW}/ct/pangolin-site.sh)"
+EOF
+  chmod +x /usr/bin/update
+
   rm -f /usr/local/bin/newt /usr/local/bin/newt-start \
     /etc/newt/newt.env /usr/bin/update-newt /root/.newt
   rmdir /etc/newt >/dev/null 2>&1 || true
