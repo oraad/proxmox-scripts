@@ -162,24 +162,34 @@ UNIT
     systemctl restart pangolin-site
   fi
 
-  cat >/usr/bin/update <<EOF
+  rm -f /usr/local/bin/newt /usr/local/bin/newt-start \
+    /etc/newt/newt.env /usr/bin/update-newt /root/.newt
+  rmdir /etc/newt >/dev/null 2>&1 || true
+}
+
+function ensure_update_script() {
+  # Point the container's update command at this script so the legacy
+  # ct/newt.sh URL can eventually be removed. The running file is truncated
+  # first so a shell executing a stale /usr/bin/update hits EOF instead of
+  # re-reading garbage from the file being replaced underneath it.
+  cat >/usr/bin/update.new <<EOF
 #!/usr/bin/env bash
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
 bash -c "\$(curl -fsSL ${REPO_RAW}/ct/pangolin-site.sh)"
 EOF
-  chmod +x /usr/bin/update
-
-  rm -f /usr/local/bin/newt /usr/local/bin/newt-start \
-    /etc/newt/newt.env /usr/bin/update-newt /root/.newt
-  rmdir /etc/newt >/dev/null 2>&1 || true
+  : >/usr/bin/update
+  chmod +x /usr/bin/update.new
+  mv -f /usr/bin/update.new /usr/bin/update
 }
 
 function update_script() {
   header_info
   check_container_storage
   check_container_resources
+
+  ensure_update_script
 
   local has_legacy_newt=0
   if [[ -f /etc/newt/newt.env && ! -f /etc/pangolin/pangolin-site.env ]]; then
