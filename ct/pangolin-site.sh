@@ -104,7 +104,7 @@ fi
 export NEWT_ID="${SITE_ID:-${NEWT_ID:-}}"
 export NEWT_SECRET="${SITE_SECRET:-${NEWT_SECRET:-}}"
 set +a
-exec /usr/local/bin/pangolin up site
+exec /usr/local/bin/pangolin-cli up site
 START
   chmod 700 /usr/local/bin/pangolin-site-start
 
@@ -184,12 +184,31 @@ EOF
   mv -f /usr/bin/update.new /usr/bin/update
 }
 
+function ensure_pangolin_site_wrapper() {
+  # fetch_and_deploy_gh_release installs the CLI binary as $1 (pangolin-cli).
+  # Keep the service wrapper pointing at that name; rehealing here repairs
+  # containers that were migrated before this was fixed.
+  cat >/usr/local/bin/pangolin-site-start <<'START'
+#!/bin/sh
+set -a
+if [ -f /etc/pangolin/pangolin-site.env ]; then
+  . /etc/pangolin/pangolin-site.env
+fi
+export NEWT_ID="${SITE_ID:-${NEWT_ID:-}}"
+export NEWT_SECRET="${SITE_SECRET:-${NEWT_SECRET:-}}"
+set +a
+exec /usr/local/bin/pangolin-cli up site
+START
+  chmod 700 /usr/local/bin/pangolin-site-start
+}
+
 function update_script() {
   header_info
   check_container_storage
   check_container_resources
 
   ensure_update_script
+  ensure_pangolin_site_wrapper
 
   local has_legacy_newt=0
   if [[ -f /etc/newt/newt.env && ! -f /etc/pangolin/pangolin-site.env ]]; then

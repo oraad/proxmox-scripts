@@ -120,7 +120,7 @@ fi
 export NEWT_ID="${SITE_ID:-${NEWT_ID:-}}"
 export NEWT_SECRET="${SITE_SECRET:-${NEWT_SECRET:-}}"
 set +a
-exec /usr/local/bin/pangolin up site
+exec /usr/local/bin/pangolin-cli up site
 EOF
 chmod 700 /usr/local/bin/pangolin-site-start
 
