@@ -1,0 +1,82 @@
+{
+  "name": "Pangolin Addon (CLI)",
+  "slug": "add-pangolin",
+  "categories": [0, 4],
+  "date_created": "2026-07-04",
+  "type": "addon",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": null,
+  "documentation": "https://docs.pangolin.net/manage/clients/install-client",
+  "website": "https://pangolin.net/",
+  "logo": "https://pangolin.net/favicon.ico",
+  "config_path": "/etc/pangolin",
+  "description": "Installs the official Pangolin CLI on the Proxmox host or into an existing LXC and enables Site mode (`pangolin up site` — the Newt replacement), Machine Client mode (`pangolin up` — VPN), or both. One binary, two components. Existing standalone Newt installs are detected and migrated in place, reusing the same site credentials.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "tools/addon/add-pangolin.sh",
+      "resources": {
+        "cpu": null,
+        "ram": null,
+        "hdd": null,
+        "os": null,
+        "version": null
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Components: Site tunnel (expose private resources to Pangolin, userspace WireGuard, no TUN) and/or Machine client (join the host/LXC into the Pangolin network as a device, needs /dev/net/tun). The CLI binary installs once and both components can run side by side as separate services.",
+      "type": "info"
+    },
+    {
+      "text": "Site mode: create a site in the Pangolin dashboard first, then copy the Site ID, secret, and endpoint. Existing standalone Newt installs (with /etc/newt/newt.env) are detected and migrated in place — no new credentials needed.",
+      "type": "info"
+    },
+    {
+      "text": "Client mode: create a machine client in the Pangolin dashboard first, then copy the client ID, secret, and endpoint.",
+      "type": "info"
+    },
+    {
+      "text": "Run on the Proxmox host (not inside a container). Choose Proxmox host or an existing LXC, then select which components and enter credentials.",
+      "type": "warning"
+    },
+    {
+      "text": "Host install: the host is directly connected to Pangolin (site can expose everything the host can reach; client joins the whole host to the VPN). Prefer an existing LXC for isolation. LXC targets must be Debian, Ubuntu, or Alpine.",
+      "type": "warning"
+    },
+    {
+      "text": "Client mode in an LXC adds /dev/net/tun passthrough to the container config and restarts the CT if needed.",
+      "type": "info"
+    },
+    {
+      "text": "Manual update — host: `update-pangolin-site` / `update-pangolin-cli`. Existing LXC: `pct exec <CTID> -- update-pangolin-site` (or `update-pangolin-cli`). Does not overwrite an app's `/usr/bin/update`.",
+      "type": "info"
+    },
+    {
+      "text": "Interactive: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended (site, host): `var_mode=site var_target=host var_pangolin_endpoint=https://pangolin.example.com var_site_id=ID var_site_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended (client, LXC): `var_mode=client var_target=101 var_pangolin_endpoint=https://pangolin.example.com var_client_id=ID var_client_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin.sh)\"`",
+      "type": "info"
+    },
+    {
+      "text": "Unattended (both, LXC): add `var_site_id`/`var_site_secret` and `var_client_id`/`var_client_secret` with `var_mode=both`.",
+      "type": "info"
+    },
+    {
+      "text": "Legacy aliases still accepted (site mode): `var_newt_id` / `var_newt_secret`. The old addon URLs `tools/addon/add-pangolin-site.sh` and `tools/addon/add-pangolin-cli.sh` remain as wrappers that force site or client mode.",
+      "type": "info"
+    }
+  ]
+}

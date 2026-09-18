@@ -18,9 +18,8 @@ Current scripts:
 - [agentgateway](https://oraad.github.io/proxmox-scripts/scripts) — MCP federation proxy in front of multiple mcp (or other Streamable HTTP) backends
 - [NetAlertX](https://oraad.github.io/proxmox-scripts/scripts) — network visibility via Docker with host networking (privileged LXC)
 - [Coder Code Server](https://oraad.github.io/proxmox-scripts/scripts) — VS Code in the browser, native Debian package in an LXC
-- [Pangolin Newt](https://oraad.github.io/proxmox-scripts/scripts) — dedicated LXC for the Pangolin tunnel agent
-- [Pangolin Newt Addon](https://oraad.github.io/proxmox-scripts/scripts) — install Newt on the Proxmox host or an existing LXC
-- [Pangolin CLI Addon](https://oraad.github.io/proxmox-scripts/scripts) — install the Pangolin machine VPN client on the host or an existing LXC
+- [Pangolin Site](https://oraad.github.io/proxmox-scripts/scripts) — dedicated LXC for the Pangolin tunnel agent (CLI site mode, the Newt replacement)
+- [Pangolin Addon](https://oraad.github.io/proxmox-scripts/scripts) — install the Pangolin CLI (Site tunnel and/or Machine client) on the Proxmox host or an existing LXC
 - [PVE LXC Apps Updater](https://oraad.github.io/proxmox-scripts/scripts) — batch-update community-scripts and custom LXCs
 
 ## Getting started
@@ -54,7 +53,7 @@ After installation, each container includes an **`update`** command (also via `p
 
 ### Batch update (community-scripts + custom)
 
-On the Proxmox host, update all tagged helper-script LXCs in one pass — including apps from this repo (musicassistant, proxcenter, ha-mcp, newt) and from community-scripts. The tool reads each container’s `/usr/bin/update` URL and loads `ct/<service>.sh` from the matching repository.
+On the Proxmox host, update all tagged helper-script LXCs in one pass — including apps from this repo (musicassistant, proxcenter, ha-mcp, pangolin-site) and from community-scripts. The tool reads each container’s `/usr/bin/update` URL and loads `ct/<service>.sh` from the matching repository.
 
 Interactive:
 
