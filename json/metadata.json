@@ -29,6 +29,13 @@
       "icon": "code"
     },
     {
+      "id": 7,
+      "name": "Business & Productivity",
+      "sort_order": 7,
+      "description": "Inventory, ERP, and business productivity applications",
+      "icon": "briefcase"
+    },
+    {
       "id": 13,
       "name": "Media & Streaming",
       "sort_order": 13,

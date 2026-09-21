@@ -1,4 +1,5 @@
 import {
+  Briefcase,
   Code2,
   Container,
   Home,
@@ -15,6 +16,7 @@ const iconMap: Record<string, LucideIcon> = {
   music: Music,
   home: Home,
   code: Code2,
+  briefcase: Briefcase,
 };
 
 export function CategoryIcon({
