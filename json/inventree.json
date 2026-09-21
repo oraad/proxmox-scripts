@@ -10,8 +10,8 @@
   "documentation": "https://docs.inventree.org/",
   "website": "https://inventree.org/",
   "logo": "https://raw.githubusercontent.com/inventree/InvenTree/master/docs/docs/assets/logo.png",
-  "config_path": "/opt/inventree/.env",
-  "description": "InvenTree is an open-source inventory management system for tracking parts, stock, suppliers, manufacturers, and bills of materials, with a modern web interface and full REST API. This script deploys the official production Docker stack (PostgreSQL, Redis, gunicorn web server, background worker, and Caddy reverse proxy) in an LXC. The database is initialized (`invoke update`) and an admin account is auto-created (`invoke superuser`) during first setup; the web UI is served on port 80 via Caddy.",
+  "config_path": "/etc/inventree/config.yaml",
+  "description": "InvenTree is an open-source inventory management system for tracking parts, stock, suppliers, manufacturers, and bills of materials, with a modern web interface and full REST API. This script installs the official InvenTree native apt package (packager.io) on a Debian 13 LXC — no Docker needed. The package provides systemd services (inventree-web, inventree-worker), a nginx reverse proxy on port 80, an auto-created admin account, and runs database migrations during setup.",
   "install_methods": [
     {
       "type": "default",
@@ -23,17 +23,6 @@
         "os": "debian",
         "version": "13"
       }
-    },
-    {
-      "type": "alpine",
-      "script": "ct/inventree.sh",
-      "resources": {
-        "cpu": 2,
-        "ram": 4096,
-        "hdd": 20,
-        "os": "alpine",
-        "version": "3.24"
-      }
     }
   ],
   "default_credentials": {
@@ -42,23 +31,27 @@
   },
   "notes": [
     {
-      "text": "The admin password is auto-generated at install, shown once on screen, and saved to /opt/inventree/credentials.txt (mode 0600). The PostgreSQL password is stored in /opt/inventree/.env. Per upstream guidance, the INVENTREE_ADMIN_* variables are removed from .env after the admin account is created.",
+      "text": "The admin password is auto-generated at install, shown once on screen, and saved to /etc/inventree/credentials.txt (mode 0600). If the package ever creates its own (it only does so when the password is auto-generated), it is stored in /etc/inventree/admin_password.txt.",
       "type": "warning"
     },
     {
-      "text": "The value of INVENTREE_SITE_URL in /opt/inventree/.env defaults to http://<container-ip> (LAN access only). For public HTTPS, set INVENTREE_SITE_URL to https://your-domain (Caddy auto-provisions certificates, but ports 80/443 must be reachable). If InvenTree sits behind another reverse proxy, terminate SSL there instead. Unattended override: `var_site_url=\"http://192.168.1.10\" bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/inventree.sh)\"`.",
+      "text": "Native apt install requires a Debian 13 (trixie) LXC — the upstream installer supports Debian 13 and Ubuntu 24.04/26.04 only, so there is no Alpine install method for this script. If `var_version` is set below 13 the installer aborts.",
       "type": "info"
     },
     {
-      "text": "Web UI: http://<container-ip> (port 80 via Caddy). REST API: http://<container-ip>/api/. First setup pulls the inventree/inventree:stable image and runs database migrations, which takes several minutes.",
+      "text": "Web UI: http://<container-ip> (nginx on port 80 proxying to gunicorn on localhost:6000). Site URL defaults to the container IP; override with `var_site_url=[...]` at install or later with `inventree config:set INVENTREE_SITE_URL=http://...`. The nginx site is /etc/nginx/sites-enabled/inventree.conf (HTTP only) — use a separate HTTPS site or terminate SSL at an external proxy.",
       "type": "info"
     },
     {
-      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update`. Options: Update InvenTree (base upgrade + docker compose down/pull, then `invoke update` for migrations — note it backs up the database by default — and up), Remove Unused Images, or Restart InvenTree Stack. To track the unstable dev build, set INVENTREE_TAG=latest in /opt/inventree/.env.",
+      "text": "Default database backend is SQLite (/opt/inventree/data/database.sqlite3) — well suited to small/medium deployments and single-file backups. For PostgreSQL, set INVENTREE_DB_ENGINE=postgresql plus INVENTREE_DB_NAME/USER/PASSWORD/HOST/PORT before a fresh install. Media/static/backups live under /opt/inventree/data.",
       "type": "info"
     },
     {
-      "text": "Persistent data lives under /opt/inventree/data (INVENTREE_EXT_VOLUME in .env): PostgreSQL files, media, static files, and Caddy certificates. Back up this directory and the .env file regularly; see https://docs.inventree.org/en/latest/start/backup/.",
+      "text": "Services: `inventree` (main), `inventree-web`, `inventree-worker`, plus `nginx`. Control with `systemctl restart inventree` / `inventree restart`, follow logs with `inventree logs`, and run invoke tasks with `inventree run invoke <command>`.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update`. Options: Update InvenTree (dist-upgrade then `apt-get install --only-upgrade inventree`, which runs migrations and backs up the database by default — log history in /opt/inventree/log), Remove Unused Packages, or Restart. To track the dev build, replace `stable` with `master` in /etc/apt/sources.list.d/inventree.list.",
       "type": "info"
     },
     {
@@ -66,11 +59,7 @@
       "type": "info"
     },
     {
-      "text": "Requires Docker with nesting/keyctl inside the LXC (defaults in this script). The stack uses a Docker bridge network, so if an unprivileged LXC fails, try privileged mode: `var_unprivileged=0 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/inventree.sh)\"`.",
-      "type": "info"
-    },
-    {
-      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.24`. Download if missing: `pveam download local alpine-3.24-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.24 is not listed on an older Proxmox host.",
+      "text": "Template: Debian 13 standard template from the Proxmox repository — run `pveam update`, then `pveam available --section system | grep debian-13` and `pveam download local <template>` if missing.",
       "type": "info"
     }
   ]
