@@ -8,18 +8,36 @@
 # container's /usr/bin/update (community-scripts or oraad/proxmox-scripts).
 
 CS_RAW="${CS_RAW:-https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main}"
+CS_CORE_RAW="${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}"
 
-source <(curl -fsSL "${CS_RAW}/misc/core.func")
-# Upstream core.func no longer initializes colors/formatting/icons at source
-# time — load_functions() must be called to set GN/CL/YW, msg_* helpers, etc.
+# Fetch-then-source: `source <(curl ...)` hides the download exit code and a 404
+# would silently source an empty stream.
+_cs_fetch_source() {
+  local _content
+  _content="$(curl -fsSL --max-time 20 "$1")" || return 1
+  [[ -n "$_content" ]] || return 1
+  source /dev/stdin <<<"$_content"
+}
+
+# Upstream split the engine into community-scripts/core (core/core.func,
+# api/api.func). Fall back to the legacy ProxmoxVE/misc locations so older pins
+# and forks of the split still work.
+if ! _cs_fetch_source "${CS_CORE_RAW}/core/core.func"; then
+  _cs_fetch_source "${CS_RAW}/misc/core.func" || {
+    echo "ERROR: failed to load community-scripts core functions" >&2
+    exit 1
+  }
+fi
+# Legacy misc/core.func needs load_functions() to init colors/formatting/icons
+# and the msg_* helpers; the core-repo engine initializes itself at source time.
 if declare -f load_functions >/dev/null 2>&1; then
   load_functions
-elif declare -f color >/dev/null 2>&1; then
+elif declare -f color >/dev/null 2>&1 && [[ -z "${GN:-}" ]]; then
   color
-  formatting
-  icons
+  declare -f formatting >/dev/null 2>&1 && formatting
+  declare -f icons >/dev/null 2>&1 && icons
 fi
-source <(curl -fsSL "${CS_RAW}/misc/api.func") 2>/dev/null || true
+_cs_fetch_source "${CS_CORE_RAW}/api/api.func" || _cs_fetch_source "${CS_RAW}/misc/api.func" || true
 declare -f init_tool_telemetry &>/dev/null && init_tool_telemetry "update-apps" "pve"
 
 # =============================================================================
@@ -170,34 +188,94 @@ function sanitize_service_name() {
   return 0
 }
 
-function validate_service_script() {
+function script_exists() {
   local name="$1"
-  local base="${service_raw:-${CS_RAW}}"
+  local base="${2:-${service_raw:-${CS_RAW}}}"
   sanitize_service_name "$name" || return 1
   curl -fsSL --max-time 10 -o /dev/null \
     "${base}/ct/${name}.sh" 2>/dev/null
 }
 
+# A container keeps the slug it was built with, so a renamed ct/ script leaves it
+# pointing at a name that no longer exists. Try the successors against the repo
+# the container was built from, but only accept one that is really there —
+# guessing wrong would run a foreign app's updater.
+function resolve_service_script() {
+  local n="$1" c
+  local base="${service_raw:-${CS_RAW}}"
+  script_exists "$n" "$base" && { printf '%s' "$n"; return 0; }
+  # The 2026-08-18 Alpine merge retired the alpine-* names; versioned slugs
+  # (e.g. app-v3) move in the same way.
+  for c in "${n#alpine-}" "$(printf '%s' "$n" | sed -E 's/-v[0-9]+$//')"; do
+    [[ -n "$c" && "$c" != "$n" ]] || continue
+    script_exists "$c" "$base" && { printf '%s' "$c"; return 0; }
+  done
+  if [[ "$base" == "$CS_RAW" ]]; then
+    case "$n" in
+    pbs) script_exists proxmox-backup-server "$base" && { printf '%s' proxmox-backup-server; return 0; } ;;
+    esac
+  fi
+  return 1
+}
+
+# The retired Gitea mirror. Old entrypoints pull ct/<app>.sh straight from
+# git.community-scripts.org and never reach the update helper that would repair
+# itself, so rewrite them here. Only the host and /raw/<kind>/ change; owner,
+# repo and ref are kept, which keeps multi-repo bases intact.
+function repair_update_url() {
+  local container="$1"
+  pct exec "$container" -- sh -c '
+    [ -f /usr/bin/update ] || exit 1
+    grep -q git.community-scripts.org /usr/bin/update || exit 1
+    sed -i \
+      -e "s|https://git[.]community-scripts[.]org/|https://raw.githubusercontent.com/|g" \
+      -e "s|/raw/branch/|/|g" -e "s|/raw/tag/|/|g" -e "s|/raw/commit/|/|g" \
+      /usr/bin/update
+  ' >/dev/null 2>&1 || return 1
+
+  echo -e "${BL}[INFO]${CL} Repaired update URL (Gitea -> GitHub) in container $container"
+  log_write "Container $container: rewrote the retired Gitea base in /usr/bin/update"
+}
+
 function detect_service() {
   local container="$1"
-  local tmpdir update_file script_url
+  local tmpdir update_file script_url declared_raw
   service=""
   service_raw="${CS_RAW}"
-  tmpdir=$(mktemp -d)
+  detect_reason=""
+  tmpdir=$(mktemp -d) || {
+    detect_reason="mktemp -d failed on the host"
+    return 1
+  }
   update_file="$tmpdir/update"
-  pct pull "$container" /usr/bin/update "$update_file" 2>/dev/null || true
+  # pct pull only works on a running container; fall back to pct exec so a
+  # template or a container that is still booting is not silently skipped.
+  pct pull "$container" /usr/bin/update "$update_file" 2>/dev/null ||
+    pct exec "$container" -- cat /usr/bin/update >"$update_file" 2>/dev/null || true
   if [[ ! -s "$update_file" ]]; then
+    detect_reason="/usr/bin/update is missing or empty"
     rm -rf "$tmpdir"
     return 1
   fi
-  # Prefer full URL so custom repos (oraad/proxmox-scripts) resolve correctly
-  script_url=$(grep -oE 'https?://[^[:space:]"'\'']+/ct/[a-zA-Z0-9._-]+\.sh' "$update_file" 2>/dev/null | head -n1)
-  if [[ -n "$script_url" ]]; then
-    service="${script_url##*/ct/}"
-    service="${service%.sh}"
-    service_raw="${script_url%/ct/*}"
-  else
-    service=$(grep -oE '/ct/[a-zA-Z0-9._-]+\.sh' "$update_file" 2>/dev/null | head -n1 | sed 's|.*/ct/||; s|\.sh$||')
+  # Honour an explicit base repo when the entrypoint exports one.
+  declared_raw=$(sed -n -E 's/^[[:space:]]*export[[:space:]]+COMMUNITY_SCRIPTS_URL=["'"'"']?([^"'"'"'[:space:]]+).*/\1/p' "$update_file" | head -n1)
+  [[ -n "$declared_raw" ]] && service_raw="$declared_raw"
+  # Current community-scripts entrypoints assemble the URL from variables
+  # ("${COMMUNITY_SCRIPTS_URL}/ct/${UPDATE_SCRIPT_NAME}.sh"), so no literal
+  # /ct/<name>.sh exists to grep - read the exported name instead.
+  service=$(sed -n -E 's/^[[:space:]]*export[[:space:]]+UPDATE_SCRIPT_NAME=["'"'"']?([a-zA-Z0-9._-]+).*/\1/p' "$update_file" | head -n1)
+  [[ -z "$service" ]] && service=$(sed -n -E 's/^[[:space:]]*export[[:space:]]+SCRIPT_SLUG=["'"'"']?([a-zA-Z0-9._-]+).*/\1/p' "$update_file" | head -n1)
+  if [[ -z "$service" ]]; then
+    # Prefer full URL so custom repos (oraad/proxmox-scripts) resolve correctly
+    script_url=$(grep -oE 'https?://[^[:space:]<>"'"'"'`()]+/ct/[a-zA-Z0-9._-]+\.sh' "$update_file" 2>/dev/null | head -n1)
+    if [[ -n "$script_url" ]]; then
+      service="${script_url##*/ct/}"
+      service="${service%.sh}"
+      service_raw="${script_url%/ct/*}"
+    else
+      service=$(grep -oE '/ct/[a-zA-Z0-9._-]+\.sh' "$update_file" 2>/dev/null | head -n1 | sed 's|.*/ct/||; s|\.sh$||')
+      [[ -z "$service" ]] && detect_reason="no update script name found in /usr/bin/update"
+    fi
   fi
   rm -rf "$tmpdir"
 }
@@ -329,7 +407,6 @@ fi
 
 tags_formatted="${var_tags//|/, }"
 msg_info "Loading all possible LXC containers from Proxmox VE with tags: ${tags_formatted}. This may take a few seconds..."
-NODE=$(hostname)
 containers=$(pct list | tail -n +2 | awk '{print $0 " " $4}')
 
 if [ -z "$containers" ]; then
@@ -480,10 +557,6 @@ for container in $CHOICE; do
   echo -e "${BL}[INFO]${CL} Updating container $container"
   log_write "Container $container: starting"
 
-  if [ "$BACKUP_CHOICE" == "yes" ]; then
-    backup_container $container
-  fi
-
   os=$(pct config "$container" | awk '/^ostype/ {print $2}')
   status=$(pct status $container)
   template=$(pct config $container | grep -q "template:" && echo "true" || echo "false")
@@ -491,8 +564,16 @@ for container in $CHOICE; do
     echo -e "${BL}[Info]${GN} Starting${BL} $container ${CL} \n"
     pct start $container
     echo -e "${BL}[Info]${GN} Waiting For${BL} $container${CL}${GN} To Start ${CL} \n"
-    sleep 5
+    # pct pull/pct exec only work once the container is actually reachable,
+    # so poll instead of sleeping a fixed amount.
+    for _ in $(seq 1 30); do
+      pct exec "$container" -- true 2>/dev/null && break
+      sleep 2
+    done
   fi
+
+  #0.5) Rewrite a retired Gitea base before anything reads it.
+  repair_update_url "$container"
 
   #1) Detect service using the service name in the update command
   detect_service $container
@@ -500,26 +581,35 @@ for container in $CHOICE; do
   #1.1) If update script not detected or service name is invalid, skip
   if [ -z "${service}" ] || ! sanitize_service_name "${service}"; then
     echo -e "${RD}[ERROR]${CL} Could not detect a valid service name for container $container"
+    echo -e "${RD}       ${CL} Reason: ${detect_reason:-unrecognised /usr/bin/update format}"
     log_result "$container" "(unknown)" "ERROR" "Invalid or missing service name in /usr/bin/update"
-    log_write "Container $container: ERROR — invalid or missing service name"
+    log_write "Container $container: ERROR — ${detect_reason:-unrecognised /usr/bin/update format}"
     continue
   fi
 
-  if ! validate_service_script "${service}"; then
+  resolved_service="$(resolve_service_script "${service}")"
+  if [ -z "${resolved_service}" ]; then
     echo -e "${RD}[ERROR]${CL} Service '${service}' does not resolve to ${service_raw}/ct/${service}.sh"
     log_result "$container" "${service}" "ERROR" "No matching ct/${service}.sh at ${service_raw}"
     log_write "Container $container: ERROR — ${service_raw}/ct/${service}.sh not found"
     continue
+  fi
+  if [ "${resolved_service}" != "${service}" ]; then
+    echo -e "${BL}[INFO]${CL} Script was renamed: ${service} -> ${GN}${resolved_service}${CL}"
+    log_write "Container $container: slug ${service} resolved to ${resolved_service}"
+    service="${resolved_service}"
   fi
 
   echo -e "${BL}[INFO]${CL} Detected service: ${GN}${service}${CL} (${service_raw})"
   log_write "Container $container: detected service '${service}' from ${service_raw}"
 
   #2) Extract service build/update resource requirements from config/installation file
-  script=$(curl -fsSL "${service_raw}/ct/${service}.sh")
+  if ! script=$(curl -fsSL --max-time 30 "${service_raw}/ct/${service}.sh"); then
+    script=""
+  fi
 
   #2.1) Check if the script downloaded successfully
-  if [ $? -ne 0 ] || [ -z "${script}" ]; then
+  if [ -z "${script}" ]; then
     echo -e "${RD}[ERROR]${CL} Failed to download ${service_raw}/ct/${service}.sh"
     log_result "$container" "${service}" "ERROR" "Failed to download ct/${service}.sh from ${service_raw}"
     log_write "Container $container (${service}): ERROR — failed to download install script from ${service_raw}"
@@ -533,6 +623,12 @@ for container in $CHOICE; do
   run_ram=$(echo "$script" | { grep -m 1 "pct set \$CTID -memory" || test $? = 1; } | sed 's|.*memory ||g')
   current_cpu=$(echo "$config" | grep -m 1 "cores:" | sed 's|cores: ||g')
   current_ram=$(echo "$config" | grep -m 1 "memory:" | sed 's|memory: ||g')
+
+  # Scraped from a remote script: normalize to integers so the -le/-gt tests
+  # below can't trip "integer expression expected" on garbage.
+  for _v in build_cpu build_ram run_cpu run_ram current_cpu current_ram; do
+    [[ "${!_v}" =~ ^[0-9]+$ ]] || printf -v "$_v" '%s' ""
+  done
 
   #Test if all values are valid (>0)
   if [ -z "${run_cpu}" ] || [ "$run_cpu" -le 0 ]; then
@@ -562,7 +658,10 @@ for container in $CHOICE; do
 
   #3) if build resources are different than run resources, then:
   if [ "$UPDATE_BUILD_RESOURCES" -eq "1" ] && [[ "$var_dry_run" != "yes" ]]; then
-    pct set "$container" --cores "$build_cpu" --memory "$build_ram"
+    if ! pct set "$container" --cores "$build_cpu" --memory "$build_ram"; then
+      msg_warn "Failed to raise build resources on $container — update runs at current CPU/RAM"
+      UPDATE_BUILD_RESOURCES=0
+    fi
   fi
 
   #3.5) Dry-run: report update availability without applying
@@ -571,7 +670,18 @@ for container in $CHOICE; do
     dry_run_container "$container" "$service"
     log_result "$container" "$service" "DRY-RUN" "${DRY_RUN_RESULT:-version check only}"
     log_write "Container $container ($service): DRY-RUN — ${DRY_RUN_RESULT:-version check only}"
+    # Re-shutdown containers we started ourselves — dry-run must not alter state
+    if [ "$template" == "false" ] && [ "$status" == "status: stopped" ]; then
+      echo -e "${BL}[Info]${GN} Shutting down${BL} $container ${CL} \n"
+      pct shutdown "$container" &>/dev/null &
+    fi
     continue
+  fi
+
+  #3.7) Backup only now — after detection succeeded, so templates and
+  # unresolvable containers never abort the batch inside vzdump.
+  if [ "$BACKUP_CHOICE" == "yes" ]; then
+    backup_container "$container"
   fi
 
   #4) Update service, using the update command
@@ -584,6 +694,22 @@ for container in $CHOICE; do
   fedora | rocky | centos | alma) pct exec "$container" -- bash -c "${SETUP_CMD}${UPDATE_CMD}" ;;
   ubuntu | debian | devuan) pct exec "$container" -- bash -c "${SETUP_CMD}${UPDATE_CMD}" ;;
   opensuse) pct exec "$container" -- bash -c "${SETUP_CMD}${UPDATE_CMD}" ;;
+  *)
+    # Without this, an empty/unknown ostype exits the case with status 0 and
+    # the container would be reported "Updated successfully" — nothing ran.
+    echo -e "${RD}[ERROR]${CL} Unsupported or unknown ostype '${os:-unknown}' for container $container"
+    log_result "$container" "$service" "ERROR" "Unsupported ostype '${os:-unknown}'"
+    log_write "Container $container ($service): ERROR — unsupported ostype '${os:-unknown}'"
+    # Undo what this iteration changed before moving on: build-resource bump
+    # and the start of a previously-stopped container.
+    if [ "$UPDATE_BUILD_RESOURCES" -eq "1" ]; then
+      pct set "$container" --cores "$run_cpu" --memory "$run_ram"
+    fi
+    if [ "$template" == "false" ] && [ "$status" == "status: stopped" ]; then
+      pct shutdown "$container" &>/dev/null &
+    fi
+    continue
+    ;;
   esac
   exit_code=$?
 
@@ -624,7 +750,7 @@ for container in $CHOICE; do
     log_write "Container $container ($service): FAILED (exit $exit_code) — attempting restore"
     msg_info "Restoring LXC $container from backup ($STORAGE_CHOICE)"
     pct stop $container
-    LXC_STORAGE=$(pct config $container | awk -F '[:,]' '/rootfs/ {print $2}')
+    LXC_STORAGE=$(pct config "$container" | awk -F '[:,]' '/^rootfs/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')
     BACKUP_ENTRY=$(pvesm list "$STORAGE_CHOICE" 2>/dev/null | awk -v ctid="$container" '$1 ~ "vzdump-lxc-"ctid"-" || $1 ~ "/ct/"ctid"/" {print $1}' | sort -r | head -n1)
     if [ -z "$BACKUP_ENTRY" ]; then
       msg_error "No backup found in storage $STORAGE_CHOICE for container $container"
@@ -633,7 +759,7 @@ for container in $CHOICE; do
       exit 235
     fi
     msg_info "Restoring from: $BACKUP_ENTRY"
-    pct restore $container "$BACKUP_ENTRY" --storage $LXC_STORAGE --force >/dev/null 2>&1
+    pct restore "$container" "$BACKUP_ENTRY" --storage "$LXC_STORAGE" --force >/dev/null 2>&1
     restorestatus=$?
     if [ $restorestatus -eq 0 ]; then
       pct start $container
@@ -683,7 +809,7 @@ if [ "${#UPDATE_RESULTS[@]}" -gt 0 ]; then
     IFS='|' read -r _ctid _svc _status _details <<<"$entry"
     case "$_status" in
     OK) _color="${GN}" ;;
-    FAILED) _color="${RD}" ;;
+    FAILED | ERROR) _color="${RD}" ;;
     RESTORED) _color="${YW}" ;;
     *) _color="${YW}" ;;
     esac

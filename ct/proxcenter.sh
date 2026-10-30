@@ -109,8 +109,13 @@ function update_script() {
     [[ -n "$image_tag" ]] || image_tag="latest"
     $STD docker compose pull
     $STD docker compose up -d
-    docker inspect "ghcr.io/adminsyspro/proxcenter-frontend:${image_tag}" --format='{{index .RepoDigests 0}}' 2>/dev/null \
-      | awk -F@ '{print $2}' >/opt/proxcenter/proxcenter_version.txt || true
+    local digest
+    digest="$(docker inspect "ghcr.io/adminsyspro/proxcenter-frontend:${image_tag}" --format='{{index .RepoDigests 0}}' 2>/dev/null | awk -F@ '{print $2}')"
+    if [[ -n "$digest" ]]; then
+      echo "$digest" >/opt/proxcenter/proxcenter_version.txt
+    else
+      msg_warn "Could not read image digest — version file left unchanged"
+    fi
     msg_ok "Updated ${APP}"
 
     msg_ok "Updated successfully!"

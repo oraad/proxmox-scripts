@@ -86,6 +86,8 @@ function migrate_legacy_newt() {
   msg_ok "Installed Pangolin CLI binary"
 
   install -d -m 0755 /etc/pangolin
+  # Pre-create with 600 so the secret never sits on disk world-readable
+  install -m 0600 /dev/null /etc/pangolin/pangolin-site.env
   cat >/etc/pangolin/pangolin-site.env <<EOF
 SITE_ID=${old_id}
 SITE_SECRET=${old_secret}
@@ -174,10 +176,14 @@ function ensure_update_script() {
   # re-reading garbage from the file being replaced underneath it.
   cat >/usr/bin/update.new <<EOF
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="pangolin-site"
+export UPDATE_SCRIPT_NAME="pangolin-site"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/pangolin-site.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/pangolin-site.sh")"
 EOF
   : >/usr/bin/update
   chmod +x /usr/bin/update.new
@@ -242,16 +248,18 @@ function update_script() {
   fi
 
   if check_for_gh_release "pangolin-cli" "fosrl/cli"; then
-    msg_info "Stopping ${APP}"
-    pangolin_site_stop_service
-    msg_ok "Stopped ${APP}"
-
+    # Fetch before stopping: a failed download must not leave the tunnel down
+    local tmp_bin
+    tmp_bin="$(mktemp -d)"
     fetch_and_deploy_gh_release "pangolin-cli" "fosrl/cli" "singlefile" "latest" \
-      "/usr/local/bin" "pangolin-cli_linux_${arch}"
+      "$tmp_bin" "pangolin-cli_linux_${arch}"
 
-    msg_info "Starting ${APP}"
+    msg_info "Restarting ${APP}"
+    pangolin_site_stop_service
+    install -m 0755 "$tmp_bin/pangolin-cli" /usr/local/bin/pangolin-cli
+    rm -rf "$tmp_bin"
     pangolin_site_start_service
-    msg_ok "Started ${APP}"
+    msg_ok "Restarted ${APP}"
     msg_ok "Updated successfully!"
   fi
 

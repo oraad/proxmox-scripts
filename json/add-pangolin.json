@@ -1,7 +1,10 @@
 {
   "name": "Pangolin Addon (CLI)",
   "slug": "add-pangolin",
-  "categories": [0, 4],
+  "categories": [
+    0,
+    4
+  ],
   "date_created": "2026-07-04",
   "type": "addon",
   "updateable": true,
@@ -10,8 +13,8 @@
   "documentation": "https://docs.pangolin.net/manage/clients/install-client",
   "website": "https://pangolin.net/",
   "logo": "https://pangolin.net/favicon.ico",
-  "config_path": "/etc/pangolin",
-  "description": "Installs the official Pangolin CLI on the Proxmox host or into an existing LXC and enables Site mode (`pangolin up site` — the Newt replacement), Machine Client mode (`pangolin up` — VPN), or both. One binary, two components. Existing standalone Newt installs are detected and migrated in place, reusing the same site credentials.",
+  "config_path": "/etc/pangolin (site), /etc/pangolin-cli (client)",
+  "description": "Installs the official Pangolin CLI on the Proxmox host or into an existing LXC and enables Site mode (`pangolin up site` \u2014 the Newt replacement), Machine Client mode (`pangolin up` \u2014 VPN), or both. One binary, two components. Existing standalone Newt installs are detected and migrated in place, reusing the same site credentials.",
   "install_methods": [
     {
       "type": "default",
@@ -35,7 +38,7 @@
       "type": "info"
     },
     {
-      "text": "Site mode: create a site in the Pangolin dashboard first, then copy the Site ID, secret, and endpoint. Existing standalone Newt installs (with /etc/newt/newt.env) are detected and migrated in place — no new credentials needed.",
+      "text": "Site mode: create a site in the Pangolin dashboard first, then copy the Site ID, secret, and endpoint. Existing standalone Newt installs (with /etc/newt/newt.env) are detected and migrated in place \u2014 no new credentials needed.",
       "type": "info"
     },
     {
@@ -55,7 +58,7 @@
       "type": "info"
     },
     {
-      "text": "Manual update — host: `update-pangolin-site` / `update-pangolin-cli`. Existing LXC: `pct exec <CTID> -- update-pangolin-site` (or `update-pangolin-cli`). Does not overwrite an app's `/usr/bin/update`.",
+      "text": "Manual update \u2014 host: `update-pangolin-site` / `update-pangolin-cli`. Existing LXC: `pct exec <CTID> -- update-pangolin-site` (or `update-pangolin-cli`). Does not overwrite an app's `/usr/bin/update`.",
       "type": "info"
     },
     {
@@ -75,7 +78,7 @@
       "type": "info"
     },
     {
-      "text": "Legacy aliases still accepted (site mode): `var_newt_id` / `var_newt_secret`. The old addon URLs `tools/addon/add-pangolin-site.sh` and `tools/addon/add-pangolin-cli.sh` remain as wrappers that force site or client mode.",
+      "text": "Legacy aliases still accepted (site mode): `var_newt_id` / `var_newt_secret`. The old addon URLs `tools/addon/add-pangolin-site.sh` and `tools/addon/add-pangolin-cli.sh` remain as wrappers, and `tools/addon/add-newt.sh` is a deprecated alias for site mode that force site or client mode.",
       "type": "info"
     }
   ]

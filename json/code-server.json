@@ -1,7 +1,9 @@
 {
   "name": "Coder Code Server",
   "slug": "code-server",
-  "categories": [5],
+  "categories": [
+    5
+  ],
   "date_created": "2026-09-03",
   "type": "ct",
   "updateable": true,
@@ -31,7 +33,7 @@
   },
   "notes": [
     {
-      "text": "The web UI is exposed without a password by default (`auth: none`) and binds to 0.0.0.0:8680. For anything reachable beyond a trusted LAN, set a password — edit /root/.config/code-server/config.yaml to add `password: <your-password>` (or `auth: password`), then `systemctl restart code-server@root`. Consider fronting it with an authenticating reverse proxy.",
+      "text": "The web UI binds to 0.0.0.0:8680 with a generated random password (`auth: password`), printed once at the end of the install and stored in /root/.config/code-server/config.yaml. Set your own with `var_code_server_password=<pw>` at install, or edit the config and `systemctl restart code-server@root`. `auth: none` is only used when Home Assistant Ingress is enabled.",
       "type": "warning"
     },
     {

@@ -7,6 +7,7 @@ REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/ma
 source <(curl -fsSL "${REPO_RAW}/misc/build.func")
 
 APP="NetAlertX"
+NSAPP="netalertx"
 var_tags="${var_tags:-network;monitoring;netalertx}"
 var_cpu="${var_cpu:-2}"
 var_ram="${var_ram:-2048}"
@@ -20,6 +21,8 @@ var_arm64="${var_arm64:-yes}"
 
 header_info "$APP"
 variables
+NSAPP="netalertx"
+var_install="netalertx-install"
 color
 catch_errors
 
@@ -79,11 +82,16 @@ function update_script() {
     msg_ok "Base system updated"
 
     msg_info "Updating ${APP}"
-    cd /opt/netalertx
+    cd /opt/netalertx || exit
     $STD docker compose pull
     $STD docker compose up -d
-    docker inspect ghcr.io/netalertx/netalertx:latest --format='{{index .RepoDigests 0}}' 2>/dev/null \
-      | awk -F@ '{print $2}' > /opt/netalertx/netalertx_version.txt || true
+    local digest
+    digest="$(docker inspect ghcr.io/netalertx/netalertx:latest --format='{{index .RepoDigests 0}}' 2>/dev/null | awk -F@ '{print $2}')"
+    if [[ -n "$digest" ]]; then
+      echo "$digest" >/opt/netalertx/netalertx_version.txt
+    else
+      msg_warn "Could not read image digest — version file left unchanged"
+    fi
     msg_ok "Updated ${APP}"
 
     msg_ok "Updated successfully!"
@@ -111,8 +119,19 @@ function prompt_scan_subnets() {
     export var_scan_subnets
     return 0
   fi
+  # Validate before embedding into the SCAN_SUBNETS list literal
+  if [[ ! "$subnet" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+    msg_warn "Invalid CIDR '${subnet}' — skipping; configure subnets in the NetAlertX UI"
+    var_scan_subnets=""
+    export var_scan_subnets
+    return 0
+  fi
   iface="$(prompt_input "${TAB3}Network interface for scanning (e.g. eth0):" "eth0" 60)"
   iface="${iface:-eth0}"
+  if [[ ! "$iface" =~ ^[a-z][a-z0-9]{0,14}$ ]]; then
+    msg_warn "Invalid interface name '${iface}' — falling back to eth0"
+    iface="eth0"
+  fi
   var_scan_subnets="['${subnet} --interface=${iface}']"
   export var_scan_subnets
 }
