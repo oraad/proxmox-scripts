@@ -7,6 +7,7 @@ REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/ma
 source <(curl -fsSL "${REPO_RAW}/misc/build.func")
 
 APP="Coder Code Server"
+NSAPP="code-server"
 var_tags="${var_tags:-code;vscode;dev;coder;codeserver}"
 var_cpu="${var_cpu:-2}"
 var_ram="${var_ram:-4096}"
@@ -20,6 +21,8 @@ var_arm64="${var_arm64:-yes}"
 
 header_info "$APP"
 variables
+NSAPP="code-server"
+var_install="code-server-install"
 color
 catch_errors
 
@@ -87,10 +90,14 @@ function update_script() {
       arm64 | aarch64) arch="arm64" ;;
       *) arch="amd64" ;;
     esac
-    curl -fOL "https://github.com/coder/code-server/releases/download/v${version}/code-server_${version}_${arch}.deb" \
-      && dpkg -i code-server_"${version}"_"${arch}".deb >/dev/null 2>&1 \
-      && rm -f code-server_"${version}"_"${arch}".deb
-    systemctl restart "code-server@${SUDO_USER:-${USER:-root}}" 2>/dev/null || systemctl restart code-server@root 2>/dev/null || true
+    # coder publishes no checksums — integrity rests on GitHub TLS (accepted risk)
+    local deb_tmp
+    deb_tmp="$(mktemp -d)"
+    curl -fsSL -o "${deb_tmp}/code-server_${version}_${arch}.deb" \
+      "https://github.com/coder/code-server/releases/download/v${version}/code-server_${version}_${arch}.deb" \
+      && dpkg -i "${deb_tmp}/code-server_${version}_${arch}.deb" >/dev/null 2>&1
+    rm -rf "$deb_tmp"
+    systemctl restart "code-server@${SUDO_USER:-${USER:-root}}" 2>/dev/null || systemctl restart code-server@root
     msg_ok "Updated ${APP} to v${version}"
 
     msg_ok "Updated successfully!"
@@ -112,7 +119,7 @@ function update_script() {
 
   if [[ "$UPD" == "3" ]]; then
     msg_info "Restarting ${APP}"
-    systemctl restart "code-server@${SUDO_USER:-${USER:-root}}" 2>/dev/null || systemctl restart code-server@root 2>/dev/null || true
+    systemctl restart "code-server@${SUDO_USER:-${USER:-root}}" 2>/dev/null || systemctl restart code-server@root
     msg_ok "Restarted ${APP}"
     code_server_show_url
     exit

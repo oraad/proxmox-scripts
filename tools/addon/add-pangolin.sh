@@ -123,9 +123,13 @@ install_cli_binary() {
     return 0
   fi
   msg_info "Installing Pangolin CLI ${version}"
+  # Download to a temp file first — a dropped connection must not truncate the live binary
+  local tmp_dl
+  tmp_dl="$(mktemp)"
   curl -fsSL "https://github.com/fosrl/cli/releases/download/${version}/pangolin-cli_linux_${arch}" \
-    -o /usr/local/bin/pangolin
-  chmod 755 /usr/local/bin/pangolin
+    -o "$tmp_dl"
+  chmod 755 "$tmp_dl"
+  mv -f "$tmp_dl" /usr/local/bin/pangolin
   echo "${version#v}" >/root/.pangolin-cli
 }
 
@@ -235,9 +239,11 @@ if [[ -f /etc/alpine-release ]]; then
 else
   systemctl stop pangolin-site 2>/dev/null || true
 fi
+tmp_dl="$(mktemp)"
 curl -fsSL "https://github.com/fosrl/cli/releases/download/${version}/pangolin-cli_linux_${arch}" \
-  -o /usr/local/bin/pangolin
-chmod 755 /usr/local/bin/pangolin
+  -o "$tmp_dl"
+chmod 755 "$tmp_dl"
+mv -f "$tmp_dl" /usr/local/bin/pangolin
 echo "${version#v}" >/root/.pangolin-cli
 if [[ -f /etc/alpine-release ]]; then
   rc-service pangolin-site start
@@ -350,9 +356,11 @@ if [[ -f /etc/alpine-release ]]; then
 else
   systemctl stop pangolin-cli 2>/dev/null || true
 fi
+tmp_dl="$(mktemp)"
 curl -fsSL "https://github.com/fosrl/cli/releases/download/${version}/pangolin-cli_linux_${arch}" \
-  -o /usr/local/bin/pangolin
-chmod 755 /usr/local/bin/pangolin
+  -o "$tmp_dl"
+chmod 755 "$tmp_dl"
+mv -f "$tmp_dl" /usr/local/bin/pangolin
 echo "${version#v}" >/root/.pangolin-cli
 if [[ -f /etc/alpine-release ]]; then
   rc-service pangolin-cli start
@@ -378,7 +386,6 @@ select_mode() {
       exit 1
       ;;
     esac
-    MODE="$var_mode"
     return 0
   fi
 
@@ -456,6 +463,7 @@ prompt_site_credentials() {
   if [[ -n "$var_id" && -n "$var_secret" ]]; then
     SITE_ID="$var_id"
     SITE_SECRET="$var_secret"
+    prompt_endpoint # no-op when set; supplies the default endpoint otherwise
     return 0
   fi
 
@@ -481,6 +489,7 @@ prompt_client_credentials() {
   if [[ -n "${var_client_id:-}" && -n "${var_client_secret:-}" ]]; then
     CLIENT_ID="$var_client_id"
     CLIENT_SECRET="$var_client_secret"
+    prompt_endpoint # no-op when set; supplies the default endpoint otherwise
     return 0
   fi
 
@@ -643,6 +652,14 @@ tags_add() {
   fi
 }
 
+# Stock Alpine templates ship busybox/ash only — the remote payload is bash
+if [[ "$DISTRO" == "alpine" ]]; then
+  pct exec "$CTID" -- sh -c 'command -v bash >/dev/null 2>&1 || apk add --no-cache bash' || {
+    msg_error "Failed to install bash in CT $CTID (required for the install payload)"
+    exit 1
+  }
+fi
+
 if ! pct exec "$CTID" -- env \
   SITE_ENABLED="$SITE_ENABLED" \
   CLIENT_ENABLED="$CLIENT_ENABLED" \
@@ -719,9 +736,12 @@ install_cli_binary() {
     return 0
   fi
   echo "Installing Pangolin CLI ${version}"
+  # Download to a temp file first — a dropped connection must not truncate the live binary
+  tmp_dl="$(mktemp)"
   curl -fsSL "https://github.com/fosrl/cli/releases/download/${version}/pangolin-cli_linux_${arch}" \
-    -o /usr/local/bin/pangolin
-  chmod 755 /usr/local/bin/pangolin
+    -o "$tmp_dl"
+  chmod 755 "$tmp_dl"
+  mv -f "$tmp_dl" /usr/local/bin/pangolin
   echo "${version#v}" >/root/.pangolin-cli
 }
 
@@ -827,9 +847,11 @@ if [[ -f /etc/alpine-release ]]; then
 else
   systemctl stop pangolin-site 2>/dev/null || true
 fi
+tmp_dl="$(mktemp)"
 curl -fsSL "https://github.com/fosrl/cli/releases/download/${version}/pangolin-cli_linux_${arch}" \
-  -o /usr/local/bin/pangolin
-chmod 755 /usr/local/bin/pangolin
+  -o "$tmp_dl"
+chmod 755 "$tmp_dl"
+mv -f "$tmp_dl" /usr/local/bin/pangolin
 echo "${version#v}" >/root/.pangolin-cli
 if [[ -f /etc/alpine-release ]]; then
   rc-service pangolin-site start
@@ -940,9 +962,11 @@ if [[ -f /etc/alpine-release ]]; then
 else
   systemctl stop pangolin-cli 2>/dev/null || true
 fi
+tmp_dl="$(mktemp)"
 curl -fsSL "https://github.com/fosrl/cli/releases/download/${version}/pangolin-cli_linux_${arch}" \
-  -o /usr/local/bin/pangolin
-chmod 755 /usr/local/bin/pangolin
+  -o "$tmp_dl"
+chmod 755 "$tmp_dl"
+mv -f "$tmp_dl" /usr/local/bin/pangolin
 echo "${version#v}" >/root/.pangolin-cli
 if [[ -f /etc/alpine-release ]]; then
   rc-service pangolin-cli start

@@ -121,8 +121,17 @@ function prompt_admin_details() {
   stop_spinner
   var_admin_user="$(prompt_input "InvenTree admin username:" "admin" 40)"
   var_admin_user="${var_admin_user:-admin}"
+  # Username is consumed by `inventree createsuperuser` — keep it shell/Django-safe
+  if [[ ! "$var_admin_user" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    msg_warn "Invalid username '${var_admin_user}' — falling back to 'admin'"
+    var_admin_user="admin"
+  fi
   var_admin_email="$(prompt_input "InvenTree admin email:" "admin@inventree.local" 60)"
   var_admin_email="${var_admin_email:-admin@inventree.local}"
+  if [[ ! "$var_admin_email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+    msg_warn "Invalid email '${var_admin_email}' — falling back to admin@inventree.local"
+    var_admin_email="admin@inventree.local"
+  fi
   export var_admin_user var_admin_email
 }
 

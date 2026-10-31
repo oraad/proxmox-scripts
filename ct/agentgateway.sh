@@ -92,11 +92,14 @@ function agentgateway_ports() {
   local public_port env_line
   public_port="${PUBLIC_PORT:-${MCP_PORT:-8080}}"
   if [[ -f /opt/agentgateway/.env ]]; then
-    # shellcheck disable=SC1091
-    set -a
-    source /opt/agentgateway/.env
-    set +a
-    public_port="${PUBLIC_PORT:-${MCP_PORT:-8080}}"
+    # Subshell: don't leak the whole .env (secrets) into this script's environment
+    public_port="$(
+      set -a
+      # shellcheck disable=SC1091
+      source /opt/agentgateway/.env
+      set +a
+      printf '%s' "${PUBLIC_PORT:-${MCP_PORT:-8080}}"
+    )"
   elif [[ -n "${CTID:-}" ]] && command -v pct >/dev/null 2>&1; then
     env_line="$(pct exec "$CTID" -- bash -c 'set -a; . /opt/agentgateway/.env; printf "%s" "${PUBLIC_PORT:-${MCP_PORT:-8080}}"' 2>/dev/null || true)"
     if [[ -n "$env_line" ]]; then
@@ -124,7 +127,10 @@ function agentgateway_env_value() {
   fi
 }
 
+# $1: "secrets" (default, used at install) prints credentials;
+#     anything else only prints where to find them (used on every update).
 function agentgateway_show_endpoints() {
+  local show_secrets="${1:-secrets}"
   local ip public_port mcp_url ui_url api_key ui_user ui_password
   ip="$(agentgateway_container_ip)"
   public_port="$(agentgateway_ports)"
@@ -137,52 +143,58 @@ function agentgateway_show_endpoints() {
   if [[ -n "${CTID:-}" ]] && command -v pct >/dev/null 2>&1 && [[ ! -f /opt/agentgateway/.env ]]; then
     pct exec "$CTID" -- bash -c "printf '%s\n' '$mcp_url' >/opt/agentgateway/mcp_endpoint.txt; printf '%s\n' '$ui_url' >/opt/agentgateway/ui_url.txt" 2>/dev/null || true
     if [[ -n "$api_key" ]]; then
+      # Escape for JSON string context — a key containing '"' would silently corrupt the file
+      local api_key_json="${api_key//\\/\\\\}"
+      api_key_json="${api_key_json//\"/\\\"}"
       pct exec "$CTID" -- tee /opt/agentgateway/mcp_client.json >/dev/null <<EOF
 {
   "mcpServers": {
     "agentgateway": {
       "url": "${mcp_url}",
       "headers": {
-        "Authorization": "Bearer ${api_key}"
+        "Authorization": "Bearer ${api_key_json}"
       }
     }
   }
 }
 EOF
       pct exec "$CTID" -- chown agentgateway:agentgateway /opt/agentgateway/mcp_endpoint.txt /opt/agentgateway/ui_url.txt /opt/agentgateway/mcp_client.json 2>/dev/null || true
+      pct exec "$CTID" -- chmod 600 /opt/agentgateway/mcp_client.json 2>/dev/null || true
     fi
   elif [[ -d /opt/agentgateway ]]; then
     printf '%s\n' "$mcp_url" >/opt/agentgateway/mcp_endpoint.txt
     printf '%s\n' "$ui_url" >/opt/agentgateway/ui_url.txt
     if [[ -n "$api_key" ]]; then
-      jq -n --arg url "$mcp_url" --arg token "$api_key" \
+      if jq -n --arg url "$mcp_url" --arg token "$api_key" \
         '{mcpServers:{agentgateway:{url:$url,headers:{Authorization:("Bearer " + $token)}}}}' \
-        >/opt/agentgateway/mcp_client.json 2>/dev/null || true
+        >/opt/agentgateway/mcp_client.json 2>/dev/null; then
+        chmod 600 /opt/agentgateway/mcp_client.json
+      fi
     fi
   fi
   echo -e "${INFO}${YW} MCP:${CL} ${GATEWAY}${BGN}${mcp_url}${CL}"
-  if [[ -n "$api_key" ]]; then
+  if [[ -n "$api_key" && "$show_secrets" == "secrets" ]]; then
     echo -e "${INFO}${YW} API key:${CL} ${api_key}"
   else
     echo -e "${INFO}${YW} API key:${CL} \`pct exec ${CTID:-<CTID>} -- grep AGENTGATEWAY_API_KEY /opt/agentgateway/.env\`${CL}"
   fi
   echo -e "${INFO}${YW} UI:${CL} ${GATEWAY}${BGN}${ui_url}${CL}"
   echo -e "${INFO}${YW} UI user:${CL} ${ui_user}"
-  if [[ -n "$ui_password" ]]; then
+  if [[ -n "$ui_password" && "$show_secrets" == "secrets" ]]; then
     echo -e "${INFO}${YW} UI password:${CL} ${ui_password}"
   else
     echo -e "${INFO}${YW} UI password:${CL} \`pct exec ${CTID:-<CTID>} -- grep UI_PASSWORD /opt/agentgateway/.env\`${CL}"
   fi
   echo -e "${INFO}${YW} Auth:${CL} UI requires HTTP basic auth. MCP accepts Bearer API key or the same basic-auth credentials."
   echo -e "${INFO}${YW} MCP client config:${CL}"
-  if [[ -n "$api_key" ]]; then
+  if [[ -n "$api_key" && "$show_secrets" == "secrets" ]]; then
     cat <<EOF
 {
   "mcpServers": {
     "agentgateway": {
       "url": "${mcp_url}",
       "headers": {
-        "Authorization": "Bearer ${api_key}"
+        "Authorization": "Bearer ${api_key_json:-$api_key}"
       }
     }
   }
@@ -220,20 +232,22 @@ function update_script() {
   fi
 
   if check_for_gh_release "agentgateway" "agentgateway/agentgateway"; then
-    msg_info "Stopping ${APP}"
-    agentgateway_stop_service
-    msg_ok "Stopped ${APP}"
-
+    # Fetch before stopping: a failed download must not leave the gateway down
+    local tmp_bin
+    tmp_bin="$(mktemp -d)"
     fetch_and_deploy_gh_release "agentgateway" "agentgateway/agentgateway" "singlefile" "latest" \
-      "/usr/local/bin" "agentgateway-linux-${arch}"
+      "$tmp_bin" "agentgateway-linux-${arch}"
 
-    msg_info "Starting ${APP}"
+    msg_info "Restarting ${APP}"
+    agentgateway_stop_service
+    install -m 0755 "$tmp_bin/agentgateway" /usr/local/bin/agentgateway
+    rm -rf "$tmp_bin"
     agentgateway_start_service
-    msg_ok "Started ${APP}"
+    msg_ok "Restarted ${APP}"
     msg_ok "Updated successfully!"
   fi
 
-  agentgateway_show_endpoints
+  agentgateway_show_endpoints update
   exit
 }
 

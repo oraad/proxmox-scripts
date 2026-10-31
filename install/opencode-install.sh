@@ -7,6 +7,11 @@
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
 OPENCODE_BIN="${OPENCODE_BIN:-/root/.opencode/bin/opencode}"
 OPENCODE_PORT="${OPENCODE_PORT:-4096}"
+# Written into config.json — a non-numeric override would emit invalid JSON
+if [[ ! "$OPENCODE_PORT" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: OPENCODE_PORT must be numeric (got: ${OPENCODE_PORT})" >&2
+  exit 1
+fi
 OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-/root/.config/opencode}"
 OPENCODE_ENV_FILE="${OPENCODE_ENV_FILE:-/etc/opencode/opencode.env}"
 
@@ -37,7 +42,7 @@ msg_ok "Installed dependencies"
 # Add the opencode binary dir to PATH for logins (installer ran with
 # --no-modify-path so it does not touch per-user shell configs).
 cat >/etc/profile.d/opencode.sh <<EOF
-export PATH="/root/.opencode/bin:\$PATH"
+export PATH="$(dirname "${OPENCODE_BIN}"):\$PATH"
 EOF
 
 stop_spinner
@@ -77,13 +82,13 @@ msg_ok "Configured ${APPLICATION:-OpenCode Server}"
 
 msg_info "Setting up OpenCode service"
 if [[ -f /etc/alpine-release ]]; then
-  cat >/usr/local/bin/opencode-start <<'EOF'
+  cat >/usr/local/bin/opencode-start <<EOF
 #!/bin/sh
 set -a
 # shellcheck disable=SC1091
 . /etc/opencode/opencode.env
 set +a
-exec /root/.opencode/bin/opencode web --hostname 0.0.0.0 --port 4096
+exec ${OPENCODE_BIN} web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
 EOF
   chmod 700 /usr/local/bin/opencode-start
 
@@ -107,7 +112,7 @@ EOF
   $STD rc-update add opencode default
   $STD rc-service opencode start
 else
-  cat >/etc/systemd/system/opencode.service <<'EOF'
+  cat >/etc/systemd/system/opencode.service <<EOF
 [Unit]
 Description=OpenCode server (web UI)
 Wants=network-online.target
@@ -118,7 +123,7 @@ Type=simple
 User=root
 Group=root
 EnvironmentFile=/etc/opencode/opencode.env
-ExecStart=/root/.opencode/bin/opencode web --hostname 0.0.0.0 --port 4096
+ExecStart=${OPENCODE_BIN} web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
 Restart=always
 RestartSec=3
 WorkingDirectory=/root
@@ -155,10 +160,14 @@ customize
 
 cat <<EOF >/usr/bin/update
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="opencode"
+export UPDATE_SCRIPT_NAME="opencode"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/opencode.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/opencode.sh")"
 EOF
 chmod +x /usr/bin/update
 

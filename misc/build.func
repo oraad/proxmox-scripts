@@ -8,7 +8,25 @@
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
 CS_RAW="${CS_RAW:-https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main}"
 
-_build_func_content="$(curl -fsSL "${CS_RAW}/misc/build.func")"
+_build_func_content="$(curl -fsSL --max-time 30 "${CS_RAW}/misc/build.func")"
+
+if [[ -z "$_build_func_content" ]]; then
+  echo "ERROR: failed to download upstream misc/build.func from ${CS_RAW} (network/repo unavailable?)" >&2
+  exit 1
+fi
+
+# Fail loudly if upstream drifted away from our patch anchors — otherwise the
+# substitutions silently no-op, install scripts are fetched from the upstream
+# repo (404 for custom apps), and the extra-NIC / bind-mount hooks never run.
+if [[ "$_build_func_content" != *"raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install"* ]]; then
+  echo "ERROR: upstream misc/build.func changed — install-URL patch anchor not found" >&2
+  exit 1
+fi
+if [[ "$_build_func_content" != *'create_lxc_container || exit $?'* ]]; then
+  echo "ERROR: upstream misc/build.func changed — hook injection anchor (create_lxc_container) not found" >&2
+  exit 1
+fi
+
 _build_func_content="${_build_func_content//https:\/\/raw.githubusercontent.com\/community-scripts\/ProxmoxVE\/main\/install/${REPO_RAW}\/install}"
 _build_func_content="${_build_func_content//create_lxc_container || exit \$?/create_lxc_container || exit \$?
   apply_extra_nics || true
@@ -207,6 +225,10 @@ apply_app_bind_mounts() {
     msg_warn "var_media_path '${var_media_path}' not found on host — skipping bind mount"
     return 0
   fi
+  if pct config "$CTID" 2>/dev/null | grep -q '^mp0:'; then
+    msg_warn "mp0 already configured on CT ${CTID} — not overwriting with the media bind mount"
+    return 0
+  fi
 
   msg_info "Binding ${var_media_path} → /media in CT ${CTID}"
   if ! pct set "$CTID" -mp0 "${var_media_path},mp=/media" >>"${BUILD_LOG:-/dev/null}" 2>&1; then
@@ -220,7 +242,7 @@ apply_app_bind_mounts() {
     pct exec "$CTID" -- true 2>/dev/null && break
     sleep 2
   done
-  msg_ok "Bound music library at /media"
+  msg_ok "Bound ${var_media_path} at /media"
 }
 
 apply_debian13_lxc_defaults() {
@@ -252,7 +274,9 @@ get_header() {
   mkdir -p "$(dirname "$local_header_path")"
 
   if [[ ! -s "$local_header_path" ]]; then
-    if ! curl -fsSL "$header_url" -o "$local_header_path" 2>/dev/null; then
+    # A partial download must not be cached as valid — remove it like upstream does
+    if ! curl -fsSL --max-time 15 "$header_url" -o "$local_header_path" 2>/dev/null; then
+      rm -f "$local_header_path"
       command -v msg_warn >/dev/null 2>&1 && msg_warn "Failed to download header: $header_url"
       return 1
     fi

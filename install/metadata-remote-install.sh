@@ -71,12 +71,28 @@ EOF
   fi
 } >"${INSTALL_DIR}/compose.yaml"
 
-cd "${INSTALL_DIR}"
+cd "${INSTALL_DIR}" || exit 1
 $STD docker compose pull
 $STD docker compose up -d
 
-docker inspect ghcr.io/wow-signal-dev/metadata-remote:latest --format='{{index .RepoDigests 0}}' 2>/dev/null \
-  | awk -F@ '{print $2}' > "${INSTALL_DIR}/metadata_remote_version.txt" || echo "latest" > "${INSTALL_DIR}/metadata_remote_version.txt"
+msg_info "Waiting for Metadata Remote to start"
+running=0
+for _ in $(seq 1 30); do
+  if [[ "$(docker inspect --format='{{.State.Running}}' metadata-remote 2>/dev/null)" == "true" ]] && curl -sf http://127.0.0.1:8338 >/dev/null 2>&1; then
+    running=1
+    break
+  fi
+  sleep 2
+done
+if [[ "$running" -ne 1 ]]; then
+  msg_error "Metadata Remote failed to start — check: docker compose -f ${INSTALL_DIR}/compose.yaml logs"
+  exit 1
+fi
+msg_ok "Metadata Remote is running"
+
+digest="$(docker inspect ghcr.io/wow-signal-dev/metadata-remote:latest --format='{{index .RepoDigests 0}}' 2>/dev/null | awk -F@ '{print $2}')"
+: "${digest:=latest}"
+echo "$digest" >"${INSTALL_DIR}/metadata_remote_version.txt"
 msg_ok "Installed ${APPLICATION:-Metadata Remote}"
 
 motd_ssh
@@ -84,10 +100,14 @@ customize
 
 cat <<EOF >/usr/bin/update
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="metadata-remote"
+export UPDATE_SCRIPT_NAME="metadata-remote"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/metadata-remote.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/metadata-remote.sh")"
 EOF
 chmod +x /usr/bin/update
 

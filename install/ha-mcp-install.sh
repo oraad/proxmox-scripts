@@ -157,10 +157,14 @@ customize
 
 cat <<EOF >/usr/bin/update
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="ha-mcp"
+export UPDATE_SCRIPT_NAME="ha-mcp"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/ha-mcp.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/ha-mcp.sh")"
 EOF
 chmod +x /usr/bin/update
 

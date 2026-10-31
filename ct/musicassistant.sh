@@ -7,6 +7,7 @@ REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/ma
 source <(curl -fsSL "${REPO_RAW}/misc/build.func")
 
 APP="Music Assistant"
+NSAPP="musicassistant"
 var_tags="${var_tags:-music;media;musicassistant;homeassistant}"
 var_cpu="${var_cpu:-2}"
 var_ram="${var_ram:-4096}"
@@ -20,6 +21,8 @@ var_arm64="${var_arm64:-yes}"
 
 header_info "$APP"
 variables
+NSAPP="musicassistant"
+var_install="musicassistant-install"
 color
 catch_errors
 
@@ -79,11 +82,16 @@ function update_script() {
     msg_ok "Base system updated"
 
     msg_info "Updating ${APP}"
-    cd /opt/musicassistant
+    cd /opt/musicassistant || exit
     $STD docker compose pull
     $STD docker compose up -d
-    docker inspect ghcr.io/music-assistant/server:latest --format='{{index .RepoDigests 0}}' 2>/dev/null \
-      | awk -F@ '{print $2}' > /opt/musicassistant/musicassistant_version.txt || true
+    local digest
+    digest="$(docker inspect ghcr.io/music-assistant/server:latest --format='{{index .RepoDigests 0}}' 2>/dev/null | awk -F@ '{print $2}')"
+    if [[ -n "$digest" ]]; then
+      echo "$digest" >/opt/musicassistant/musicassistant_version.txt
+    else
+      msg_warn "Could not read image digest — version file left unchanged"
+    fi
     msg_ok "Updated ${APP}"
 
     msg_ok "Updated successfully!"

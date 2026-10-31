@@ -231,7 +231,8 @@ logging:
   level: info
   format: json
 EOF
-  chmod 644 "${INSTALL_DIR}/config/orchestrator.yaml"
+  # Contains Postgres DSN (with password), license key, and app secret
+  chmod 600 "${INSTALL_DIR}/config/orchestrator.yaml"
 else
   cat >"${INSTALL_DIR}/.env" <<EOF
 # ProxCenter Community Edition
@@ -311,10 +312,14 @@ customize
 
 cat <<EOF >/usr/bin/update
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="proxcenter"
+export UPDATE_SCRIPT_NAME="proxcenter"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/proxcenter.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/proxcenter.sh")"
 EOF
 chmod +x /usr/bin/update
 

@@ -29,26 +29,45 @@ msg_ok "Installed Dependencies"
 
 msg_info "Installing ${APPLICATION:-Coder Code Server}"
 
-VERSION=$(curl -fsSL https://api.github.com/repos/coder/code-server/releases/latest | grep '"tag_name"' | awk -F'"' '{print $4}')
+VERSION=$(curl -fsSL https://api.github.com/repos/coder/code-server/releases/latest | jq -r '.tag_name')
 VERSION="${VERSION#v}"
 
-ARCH="amd64"
 case "$(dpkg --print-architecture 2>/dev/null)" in
+  amd64 | x86_64) ARCH="amd64" ;;
   arm64 | aarch64) ARCH="arm64" ;;
+  *)
+    msg_error "Unsupported architecture: $(dpkg --print-architecture 2>/dev/null || uname -m)"
+    exit 1
+    ;;
 esac
 
 mkdir -p "$HOME/.config/code-server/"
 
-curl -fOL "https://github.com/coder/code-server/releases/download/v${VERSION}/code-server_${VERSION}_${ARCH}.deb"
-$STD dpkg -i "code-server_${VERSION}_${ARCH}.deb"
-rm -f "code-server_${VERSION}_${ARCH}.deb"
+deb_tmp="$(mktemp -d)"
+curl -fsSL -o "${deb_tmp}/code-server_${VERSION}_${ARCH}.deb" \
+  "https://github.com/coder/code-server/releases/download/v${VERSION}/code-server_${VERSION}_${ARCH}.deb"
+$STD dpkg -i "${deb_tmp}/code-server_${VERSION}_${ARCH}.deb"
+rm -rf "$deb_tmp"
 
+# auth: none only when Home Assistant ingress takes over access control;
+# otherwise secure the web UI with a generated password.
+if [[ "${var_hass_ingress:-no}" =~ ^(yes|y|true|1)$ ]]; then
+  AUTH_MODE="none"
+else
+  AUTH_MODE="password"
+fi
+CODE_SERVER_PASSWORD="${var_code_server_password:-$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)}"
+
+CONFIG_CREATED=0
 if [[ ! -f "$HOME/.config/code-server/config.yaml" ]]; then
+  CONFIG_CREATED=1
   cat <<EOF >"$HOME/.config/code-server/config.yaml"
 bind-addr: 0.0.0.0:8680
-auth: none
+auth: ${AUTH_MODE}
+password: ${CODE_SERVER_PASSWORD}
 cert: false
 EOF
+  chmod 600 "$HOME/.config/code-server/config.yaml"
 fi
 
 if [[ "${var_hass_ingress:-no}" =~ ^(yes|y|true|1)$ ]]; then
@@ -100,20 +119,30 @@ systemctl restart "code-server@${USER:-root}" 2>/dev/null || systemctl restart c
 if ! systemctl is-active --quiet "code-server@${USER:-root}" 2>/dev/null \
   && ! systemctl is-active --quiet code-server@root 2>/dev/null; then
   msg_error "code-server service failed to start."
-  exit 150
+  exit 1
 fi
 
 msg_ok "Installed ${APPLICATION:-Coder Code Server} v${VERSION}"
+# Only echo the generated password when we actually wrote the config — on a
+# re-install the existing (possibly different) password stays in effect.
+if [[ "$AUTH_MODE" == "password" && "$CONFIG_CREATED" == "1" ]]; then
+  echo -e "${TAB}${GATEWAY}${BGN}code-server password: ${CODE_SERVER_PASSWORD}${CL}"
+  echo -e "${TAB}${YW}(stored in ~/.config/code-server/config.yaml — override with var_code_server_password)${CL}"
+fi
 
 motd_ssh
 customize
 
 cat <<EOF >/usr/bin/update
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="code-server"
+export UPDATE_SCRIPT_NAME="code-server"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/code-server.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/code-server.sh")"
 EOF
 chmod +x /usr/bin/update
 

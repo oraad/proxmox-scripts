@@ -22,7 +22,7 @@ if [[ -f /etc/alpine-release ]]; then
 else
   $STD apt-get install -y curl ca-certificates whiptail
 fi
-msg_ok "Installed dependencies"
+msg_ok "Installed update menu dependencies"
 
 configure_pangolin_routing() {
   msg_info "Configuring IPv4 forwarding and NAT masquerade"
@@ -190,10 +190,14 @@ customize
 
 cat <<EOF >/usr/bin/update
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="pangolin-site"
+export UPDATE_SCRIPT_NAME="pangolin-site"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/pangolin-site.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/pangolin-site.sh")"
 EOF
 chmod +x /usr/bin/update
 

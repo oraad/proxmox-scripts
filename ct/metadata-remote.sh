@@ -82,11 +82,16 @@ function update_script() {
     msg_ok "Base system updated"
 
     msg_info "Updating ${APP}"
-    cd /opt/metadata-remote
+    cd /opt/metadata-remote || exit
     $STD docker compose pull
     $STD docker compose up -d
-    docker inspect ghcr.io/wow-signal-dev/metadata-remote:latest --format='{{index .RepoDigests 0}}' 2>/dev/null \
-      | awk -F@ '{print $2}' > /opt/metadata-remote/metadata_remote_version.txt || true
+    local digest
+    digest="$(docker inspect ghcr.io/wow-signal-dev/metadata-remote:latest --format='{{index .RepoDigests 0}}' 2>/dev/null | awk -F@ '{print $2}')"
+    if [[ -n "$digest" ]]; then
+      echo "$digest" >/opt/metadata-remote/metadata_remote_version.txt
+    else
+      msg_warn "Could not read image digest — version file left unchanged"
+    fi
     msg_ok "Updated ${APP}"
 
     msg_ok "Updated successfully!"

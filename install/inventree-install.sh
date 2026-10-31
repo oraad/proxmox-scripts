@@ -80,6 +80,8 @@ sleep 3
 if systemctl is-active --quiet inventree-web && systemctl is-active --quiet nginx; then
   msg_ok "InvenTree web server and nginx are running"
 else
+  # close the msg_info block explicitly so the engine's block stack stays balanced
+  msg_ok "InvenTree verification skipped"
   msg_warn "InvenTree services did not start cleanly — check: journalctl -u inventree-web / -u nginx"
 fi
 
@@ -100,7 +102,6 @@ EOF
 chmod 600 /etc/inventree/credentials.txt
 
 echo "${INVENTREE_VERSION}" >/etc/inventree/inventree_version.txt
-msg_ok "Installed ${APPLICATION:-InvenTree}"
 
 echo -e "${INFO}${YW} Web UI:${CL} ${site_url} (nginx on port 80)"
 echo -e "${INFO}${YW} Admin username:${CL} ${admin_user}"
@@ -112,10 +113,14 @@ customize
 
 cat <<EOF >/usr/bin/update
 #!/usr/bin/env bash
+# Update entrypoint (generated) — resolves this app's ct script from its source repo.
+export SCRIPT_SLUG="inventree"
+export UPDATE_SCRIPT_NAME="inventree"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
 set -a
 [ -f /etc/profile.d/90-http-proxy.sh ] && . /etc/profile.d/90-http-proxy.sh
 set +a
-bash -c "\$(curl -fsSL ${REPO_RAW}/ct/inventree.sh)"
+bash -c "\$(curl -fsSL "\${COMMUNITY_SCRIPTS_URL}/ct/inventree.sh")"
 EOF
 chmod +x /usr/bin/update
 

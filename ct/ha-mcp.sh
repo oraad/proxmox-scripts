@@ -136,6 +136,10 @@ function update_script() {
   msg_ok "Base system updated"
 
   UVX_PATH="$(command -v uvx 2>/dev/null || echo /usr/local/bin/uvx)"
+  if [[ ! -x "$UVX_PATH" ]]; then
+    msg_error "uvx not found (looked for: $UVX_PATH) — is uv installed?"
+    exit 1
+  fi
   msg_info "Updating ${APP}"
   cat >"/opt/ha-mcp/start.sh" <<EOF
 #!/bin/sh
