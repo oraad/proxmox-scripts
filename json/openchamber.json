@@ -53,7 +53,7 @@
       "type": "info"
     },
     {
-      "text": "Debian only: OpenChamber requires Node.js >= 24.14.0, provided by the NodeSource APT-based setup_nodejs helper \u2014 there is no Alpine path. Service logs: `journalctl -u openchamber`.",
+      "text": "Debian only: OpenChamber needs Node.js >= 24.14.0 and this script installs the current LTS (Node.js 26 \"Lithium\") via the NodeSource APT-based setup_nodejs helper \u2014 there is no Alpine path. Pin a different major with NODE_VERSION=24 at install time if needed. Service logs: `journalctl -u openchamber`.",
       "type": "info"
     },
     {

@@ -14,6 +14,9 @@ if [[ ! "$OPENCHAMBER_PORT" =~ ^[0-9]+$ ]]; then
 fi
 OPENCHAMBER_ENV_FILE="${OPENCHAMBER_ENV_FILE:-/etc/openchamber/openchamber.env}"
 OPENCODE_BIN="${OPENCODE_BIN:-/root/.opencode/bin/opencode}"
+# Current Node.js LTS (26 "Lithium"). Override with NODE_VERSION=24 to pin the
+# package's declared minimum instead (the engine's setup_nodejs default is 24).
+NODE_VERSION="${NODE_VERSION:-26}"
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
@@ -24,7 +27,7 @@ network_check
 update_os
 
 if [[ -f /etc/alpine-release ]]; then
-  msg_error "OpenChamber requires Node.js 24 (installed via the NodeSource APT repo) — use the default (Debian 13) template."
+  msg_error "OpenChamber requires Node.js (installed via the NodeSource APT repo) — use the default (Debian 13) template."
   exit 1
 fi
 
@@ -32,18 +35,19 @@ msg_info "Installing dependencies"
 $STD apt-get install -y curl ca-certificates openssl jq
 msg_ok "Installed dependencies"
 
-msg_info "Installing Node.js 24"
-NODE_VERSION=24 setup_nodejs
+NODE_MAJOR_TARGET="${NODE_VERSION%%.*}"
+msg_info "Installing Node.js ${NODE_VERSION}"
+NODE_VERSION="$NODE_VERSION" setup_nodejs
 if ! command -v node >/dev/null 2>&1; then
   msg_error "Node.js binary not found after setup_nodejs"
   exit 1
 fi
 NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
-if [[ ! "$NODE_MAJOR" =~ ^[0-9]+$ || "$NODE_MAJOR" -lt 24 ]]; then
-  msg_error "OpenChamber requires Node.js >= 24.14.0 (found: $(node -v 2>/dev/null || echo none))"
+if [[ ! "$NODE_MAJOR" =~ ^[0-9]+$ || "$NODE_MAJOR" -lt "$NODE_MAJOR_TARGET" ]]; then
+  msg_error "Expected Node.js ${NODE_VERSION} (OpenChamber needs >= 24.14.0) — found: $(node -v 2>/dev/null || echo none)"
   exit 1
 fi
-msg_ok "Installed Node.js 24 ($(node -v))"
+msg_ok "Installed Node.js ${NODE_VERSION} ($(node -v))"
 
 # Add the opencode binary dir to PATH for logins (installer ran with
 # --no-modify-path so it does not touch per-user shell configs).
