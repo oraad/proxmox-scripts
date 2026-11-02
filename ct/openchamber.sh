@@ -77,8 +77,8 @@ function update_script() {
   $STD apt -y upgrade
   msg_ok "Base system updated"
 
-  msg_info "Updating OpenCode CLI"
-  $STD bash -c 'curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path'
+  msg_info "Updating OpenCode CLI (v2)"
+  $STD bash -c 'curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path'
   if [[ ! -x "$OPENCODE_BIN" ]]; then
     msg_error "OpenCode binary not found at ${OPENCODE_BIN} after update"
     exit 1
@@ -88,8 +88,18 @@ function update_script() {
 
   msg_info "Updating ${APP}"
   $STD npm install -g @openchamber/web@latest
+  # npm's global prefix varies (NodeSource uses /usr); keep the unit's path valid
   if [[ ! -x "$OPENCHAMBER_BIN" ]]; then
-    msg_error "${APP} binary not found at ${OPENCHAMBER_BIN} after update"
+    _oc_resolved="$(command -v openchamber 2>/dev/null || true)"
+    if [[ -z "$_oc_resolved" ]]; then
+      _oc_prefix="$(npm prefix -g 2>/dev/null || true)"
+      [[ -n "$_oc_prefix" && -x "${_oc_prefix}/bin/openchamber" ]] && _oc_resolved="${_oc_prefix}/bin/openchamber"
+    fi
+    [[ -n "$_oc_resolved" && -x "$_oc_resolved" ]] && ln -sf "$_oc_resolved" "$OPENCHAMBER_BIN"
+    unset _oc_resolved _oc_prefix
+  fi
+  if [[ ! -x "$OPENCHAMBER_BIN" ]]; then
+    msg_error "${APP} binary not found after npm install (npm prefix: $(npm prefix -g 2>/dev/null || echo unknown))"
     exit 1
   fi
   msg_ok "Updated ${APP}"

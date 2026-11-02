@@ -52,8 +52,9 @@ export PATH="$(dirname "${OPENCODE_BIN}"):\$PATH"
 EOF
 
 stop_spinner
-msg_info "Installing OpenCode CLI"
-$STD bash -c 'curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path'
+msg_info "Installing OpenCode CLI (v2)"
+# v1 and v2 have separate installers; openchamber targets OpenCode 2
+$STD bash -c 'curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path'
 if [[ ! -x "$OPENCODE_BIN" ]]; then
   msg_error "OpenCode binary not found at ${OPENCODE_BIN}"
   exit 1
@@ -64,8 +65,21 @@ msg_ok "Installed OpenCode CLI (${OPENCODE_VERSION})"
 
 msg_info "Installing ${APPLICATION:-OpenChamber}"
 $STD npm install -g @openchamber/web@latest
+# npm's global prefix is not always /usr/local (NodeSource uses /usr), so
+# resolve where npm actually put the bin and link it to the path the unit uses.
 if [[ ! -x "$OPENCHAMBER_BIN" ]]; then
-  msg_error "OpenChamber binary not found at ${OPENCHAMBER_BIN}"
+  _oc_resolved="$(command -v openchamber 2>/dev/null || true)"
+  if [[ -z "$_oc_resolved" ]]; then
+    _oc_prefix="$(npm prefix -g 2>/dev/null || true)"
+    [[ -n "$_oc_prefix" && -x "${_oc_prefix}/bin/openchamber" ]] && _oc_resolved="${_oc_prefix}/bin/openchamber"
+  fi
+  if [[ -n "$_oc_resolved" && -x "$_oc_resolved" ]]; then
+    ln -sf "$_oc_resolved" "$OPENCHAMBER_BIN"
+  fi
+  unset _oc_resolved _oc_prefix
+fi
+if [[ ! -x "$OPENCHAMBER_BIN" ]]; then
+  msg_error "OpenChamber binary not found after npm install (npm prefix: $(npm prefix -g 2>/dev/null || echo unknown))"
   exit 1
 fi
 OPENCHAMBER_VERSION="$(npm list -g @openchamber/web --depth=0 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
