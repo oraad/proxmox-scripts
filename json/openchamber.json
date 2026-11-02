@@ -1,0 +1,62 @@
+{
+  "name": "OpenChamber",
+  "slug": "openchamber",
+  "categories": [5],
+  "date_created": "2026-10-31",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 3000,
+  "documentation": "https://docs.openchamber.dev/",
+  "website": "https://openchamber.dev/",
+  "logo": "https://openchamber.dev/favicon.ico",
+  "config_path": "/etc/openchamber/openchamber.env",
+  "description": "OpenChamber is a web/PWA UI for the OpenCode AI coding agent. This script installs it natively via Node.js/npm on top of the OpenCode CLI in an LXC (no Docker) and runs it as a systemd service on port 3000 with a generated UI password.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/openchamber.sh",
+      "resources": {
+        "cpu": 2,
+        "ram": 2048,
+        "hdd": 10,
+        "os": "debian",
+        "version": "13"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "The web UI binds to 0.0.0.0:3000 and requires UI auth (binding to 0.0.0.0 without a password is not allowed upstream). A password is auto-generated at install, shown once on screen, and saved to /etc/openchamber/openchamber.env (mode 0600) as OPENCHAMBER_UI_PASSWORD — it never appears on the command line. Recover/change it in that file and restart the service: `systemctl restart openchamber`.",
+      "type": "warning"
+    },
+    {
+      "text": "Web UI: http://<container-ip>:3000 (installable as a PWA). Unauthenticated health endpoint: http://<container-ip>:3000/health.",
+      "type": "info"
+    },
+    {
+      "text": "The OpenCode CLI is installed alongside (symlinked to /usr/local/bin/opencode). OpenChamber starts and manages its own OpenCode server — do not run a separate opencode service. Configure provider API keys inside the container with `opencode auth login` — stored at /root/.local/share/opencode/auth.json.",
+      "type": "info"
+    },
+    {
+      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. The updater upgrades the base system, re-runs the OpenCode installer (CLI upgrade), runs `npm install -g @openchamber/web@latest`, restarts the service, and waits for /health.",
+      "type": "info"
+    },
+    {
+      "text": "Unattended install with a custom UI password: `var_ui_password=\"your-secret\" bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/openchamber.sh)\"`.",
+      "type": "info"
+    },
+    {
+      "text": "Debian only: OpenChamber requires Node.js >= 24.14.0, provided by the NodeSource APT-based setup_nodejs helper — there is no Alpine path. Service logs: `journalctl -u openchamber`.",
+      "type": "info"
+    },
+    {
+      "text": "Upstream project: https://github.com/openchamber/openchamber — docs: https://docs.openchamber.dev/",
+      "type": "info"
+    }
+  ]
+}
