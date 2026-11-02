@@ -2,38 +2,60 @@
 # Copyright (c) 2026 Proxmox Custom Scripts contributors
 # License: MIT
 #
-# Thin wrapper around community-scripts build.func that redirects install scripts
-# and ASCII headers to this repository.
+# Loads the community-scripts engine (community-scripts/core) and points its
+# SCRIPT root — ct/ and install/ — at this repository instead of ProxmoxVE.
+#
+# The engine (core/build.func) resolves two roots independently:
+#   ENGINE  core/, lxc/, pve/, lib/, ui/, api/  -> COMMUNITY_SCRIPTS_CORE_URL
+#   SCRIPTS ct/, install/                      -> COMMUNITY_SCRIPTS_URL
+# so no upstream file patching is needed any more.
 
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/oraad/proxmox-scripts/main}"
-CS_RAW="${CS_RAW:-https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main}"
+export COMMUNITY_SCRIPTS_URL="${REPO_RAW}"
+export COMMUNITY_SCRIPTS_CORE_URL="${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}"
 
-_build_func_content="$(curl -fsSL --max-time 30 "${CS_RAW}/misc/build.func")"
+# When a ct script is run from a local checkout, let the engine use the local
+# install/ scripts instead of fetching them from GitHub. BASH_SOURCE[1] is the
+# ct script that sourced this wrapper (this file arrives via process substitution).
+if [[ -z "${COMMUNITY_SCRIPTS_ROOT:-}" && -n "${BASH_SOURCE[1]:-}" && -f "${BASH_SOURCE[1]}" ]]; then
+  _script_dir="$(cd "$(dirname "${BASH_SOURCE[1]}")" >/dev/null 2>&1 && pwd)"
+  if [[ -d "${_script_dir}/ct" && -d "${_script_dir}/install" ]]; then
+    export COMMUNITY_SCRIPTS_ROOT="${_script_dir}"
+  elif [[ -d "${_script_dir}/../ct" && -d "${_script_dir}/../install" ]]; then
+    export COMMUNITY_SCRIPTS_ROOT="$(cd "${_script_dir}/.." >/dev/null 2>&1 && pwd)"
+  fi
+  unset _script_dir
+fi
 
-if [[ -z "$_build_func_content" ]]; then
-  echo "ERROR: failed to download upstream misc/build.func from ${CS_RAW} (network/repo unavailable?)" >&2
+_engine="$(curl -fsSL --retry 3 --retry-delay 1 --retry-connrefused \
+  --connect-timeout 10 --max-time 30 \
+  "${COMMUNITY_SCRIPTS_CORE_URL}/core/build.func")"
+
+if [[ -z "$_engine" ]]; then
+  echo "ERROR: failed to download the community-scripts engine from ${COMMUNITY_SCRIPTS_CORE_URL} (network/repo unavailable?)" >&2
   exit 1
 fi
 
-# Fail loudly if upstream drifted away from our patch anchors — otherwise the
-# substitutions silently no-op, install scripts are fetched from the upstream
-# repo (404 for custom apps), and the extra-NIC / bind-mount hooks never run.
-if [[ "$_build_func_content" != *"raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install"* ]]; then
-  echo "ERROR: upstream misc/build.func changed — install-URL patch anchor not found" >&2
-  exit 1
-fi
-if [[ "$_build_func_content" != *'create_lxc_container || exit $?'* ]]; then
-  echo "ERROR: upstream misc/build.func changed — hook injection anchor (create_lxc_container) not found" >&2
-  exit 1
-fi
+source /dev/stdin <<<"$_engine"
+unset _engine
 
-_build_func_content="${_build_func_content//https:\/\/raw.githubusercontent.com\/community-scripts\/ProxmoxVE\/main\/install/${REPO_RAW}\/install}"
-_build_func_content="${_build_func_content//create_lxc_container || exit \$?/create_lxc_container || exit \$?
-  apply_extra_nics || true
-  apply_app_bind_mounts || true}"
-
-source /dev/stdin <<<"$_build_func_content"
-unset _build_func_content
+# Run the fork's post-create hooks after the container exists but before the
+# install script runs (extra NICs and media bind mounts must exist at install
+# time). Wrapping create_lxc_container survives engine refactors better than
+# patching upstream source text.
+if declare -f create_lxc_container >/dev/null 2>&1; then
+  eval "_orig_$(declare -f create_lxc_container)"
+  create_lxc_container() {
+    _orig_create_lxc_container "$@"
+    local _rc=$?
+    ((_rc == 0)) || return $_rc
+    apply_extra_nics || true
+    apply_app_bind_mounts || true
+    return 0
+  }
+else
+  echo "WARN: engine has no create_lxc_container — extra-NIC/bind-mount hooks disabled" >&2
+fi
 
 # Extra LXC NICs (net1–net9) after the upstream wizard's single net0.
 # Interactive Advanced installs only; Default / unattended leave net0 as-is.
@@ -258,25 +280,39 @@ apply_alpine_lxc_defaults() {
   var_keyctl="${var_keyctl:-1}"
 }
 
-# Override header fetch so custom ct/headers/* files load from this repo.
+# Prefer this repo's banners (ct/headers/*). The engine normally reads headers
+# from the core repo, so keep its get_header as a fallback for community-scripts
+# apps whose banner only exists upstream.
+if declare -f get_header >/dev/null 2>&1; then
+  eval "_orig_$(declare -f get_header)"
+fi
+
 get_header() {
-  local app_name
-  if [[ -n "${NSAPP:-}" ]]; then
-    app_name="${NSAPP,,}"
-  else
-    app_name="${1,,}"
-    app_name="${app_name// /}"
-  fi
+  local app_name="${1:-}"
+  [[ -n "$app_name" ]] || app_name="${NSAPP:-${APP:-}}"
+  app_name="${app_name,,}"
+  app_name="${app_name// /}"
+
   local header_dir="ct"
   local header_url="${REPO_RAW}/${header_dir}/headers/${app_name}"
-  local local_header_path="/usr/local/community-scripts/headers/${header_dir}/${app_name}"
+  local cache_root
+  cache_root="$(declare -f community_scripts_dir >/dev/null 2>&1 && community_scripts_dir || echo /usr/local/community-scripts)"
+  local local_header_path="${cache_root}/headers/${header_dir}/${app_name}"
 
-  mkdir -p "$(dirname "$local_header_path")"
+  mkdir -p "$(dirname "$local_header_path")" 2>/dev/null || true
 
   if [[ ! -s "$local_header_path" ]]; then
     # A partial download must not be cached as valid — remove it like upstream does
     if ! curl -fsSL --max-time 15 "$header_url" -o "$local_header_path" 2>/dev/null; then
       rm -f "$local_header_path"
+      if declare -f _orig_get_header >/dev/null 2>&1; then
+        # The engine's lookup derives the slug from APP, not from $1
+        local _saved_app="${APP:-}" _hdr_rc=0
+        APP="$app_name"
+        _orig_get_header "$app_name" || _hdr_rc=$?
+        APP="$_saved_app"
+        return $_hdr_rc
+      fi
       command -v msg_warn >/dev/null 2>&1 && msg_warn "Failed to download header: $header_url"
       return 1
     fi

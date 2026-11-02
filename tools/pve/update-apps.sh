@@ -19,25 +19,17 @@ _cs_fetch_source() {
   source /dev/stdin <<<"$_content"
 }
 
-# Upstream split the engine into community-scripts/core (core/core.func,
-# api/api.func). Fall back to the legacy ProxmoxVE/misc locations so older pins
-# and forks of the split still work.
-if ! _cs_fetch_source "${CS_CORE_RAW}/core/core.func"; then
-  _cs_fetch_source "${CS_RAW}/misc/core.func" || {
-    echo "ERROR: failed to load community-scripts core functions" >&2
-    exit 1
-  }
-fi
-# Legacy misc/core.func needs load_functions() to init colors/formatting/icons
-# and the msg_* helpers; the core-repo engine initializes itself at source time.
-if declare -f load_functions >/dev/null 2>&1; then
-  load_functions
-elif declare -f color >/dev/null 2>&1 && [[ -z "${GN:-}" ]]; then
-  color
-  declare -f formatting >/dev/null 2>&1 && formatting
-  declare -f icons >/dev/null 2>&1 && icons
-fi
-_cs_fetch_source "${CS_CORE_RAW}/api/api.func" || _cs_fetch_source "${CS_RAW}/misc/api.func" || true
+# The engine lives in community-scripts/core (core/core.func + api/api.func).
+# The old ProxmoxVE/misc/*.func locations were removed upstream, so there is no
+# legacy fallback any more.
+_cs_fetch_source "${CS_CORE_RAW}/core/core.func" || {
+  echo "ERROR: failed to load community-scripts core functions from ${CS_CORE_RAW}" >&2
+  exit 1
+}
+# core/core.func initializes colors/msg_* itself; load_functions() is a no-op
+# safety net for older engine snapshots.
+declare -f load_functions >/dev/null 2>&1 && load_functions
+_cs_fetch_source "${CS_CORE_RAW}/api/api.func" || true
 declare -f init_tool_telemetry &>/dev/null && init_tool_telemetry "update-apps" "pve"
 
 # =============================================================================

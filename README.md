@@ -76,7 +76,8 @@ ct/                 Host-side LXC creation scripts
 install/            In-container install scripts
 defaults/           App-specific wizard defaults
 json/               Script metadata for the website (per-script docs)
-misc/build.func     Wrapper around upstream community-scripts build.func
+misc/build.func     Loads the community-scripts core engine (community-scripts/core)
+                    and points ct/ + install/ resolution at this repo
 tools/pve/          Host-side Proxmox tools (update-apps)
 tools/addon/        Add-ons for the Proxmox host or existing LXCs
 frontend/           GitHub Pages catalog (Next.js static export)
