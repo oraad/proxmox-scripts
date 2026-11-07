@@ -22,6 +22,10 @@ OPENCHAMBER_BIN="${OPENCHAMBER_BIN:-/usr/local/bin/openchamber}"
 OPENCHAMBER_PORT="${OPENCHAMBER_PORT:-3000}"
 OPENCHAMBER_ENV_FILE="${OPENCHAMBER_ENV_FILE:-/etc/openchamber/openchamber.env}"
 OPENCODE_BIN="${OPENCODE_BIN:-/root/.opencode/bin/opencode}"
+OPENCHAMBER_USER_UNIT="${OPENCHAMBER_USER_UNIT:-/root/.config/systemd/user/openchamber.service}"
+OPENCHAMBER_SYSTEM_UNIT="${OPENCHAMBER_SYSTEM_UNIT:-/etc/systemd/system/openchamber.service}"
+OPENCHAMBER_UNIT_NAME="${OPENCHAMBER_UNIT_NAME:-openchamber.service}"
+OPENCHAMBER_RUNTIME_DIR="${OPENCHAMBER_RUNTIME_DIR:-/run/user/0}"
 
 header_info "$APP"
 variables
@@ -62,12 +66,120 @@ function openchamber_show_url() {
   echo -e "${INFO}${YW} UI password stored in:${CL} ${OPENCHAMBER_ENV_FILE} (mode 0600)"
 }
 
+# OpenChamber's updater only supports a systemd user service: it queues the
+# install with `systemd-run --user` and restarts with `systemctl --user`. A
+# system unit has no XDG_RUNTIME_DIR or session bus, so its Update button fails
+# with "Failed to connect to user scope bus". Run it as root's user service and
+# enable lingering so it still starts at boot with no login.
+function openchamber_write_user_unit() {
+  install -d -m 0755 "$(dirname "$OPENCHAMBER_USER_UNIT")"
+  cat >"$OPENCHAMBER_USER_UNIT" <<EOF
+[Unit]
+Description=OpenChamber web UI (OpenCode)
+
+[Service]
+Type=simple
+EnvironmentFile=${OPENCHAMBER_ENV_FILE}
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.opencode/bin
+ExecStart=${OPENCHAMBER_BIN} serve --port ${OPENCHAMBER_PORT} --host 0.0.0.0 --foreground
+Restart=always
+RestartSec=5
+WorkingDirectory=/root
+UMask=0022
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+function openchamber_switch_to_user_service() {
+  local had_system_unit=0 healthy=0
+
+  openchamber_write_user_unit
+
+  $STD apt-get install -y dbus-user-session || {
+    msg_error "Could not install dbus-user-session (needed for in-app updates)"
+    return 1
+  }
+  loginctl enable-linger root || {
+    msg_error "Could not enable lingering for root (the user service would stop at logout)"
+    return 1
+  }
+  export XDG_RUNTIME_DIR="$OPENCHAMBER_RUNTIME_DIR"
+  for _ in $(seq 1 30); do
+    [[ -S "${XDG_RUNTIME_DIR}/systemd/private" ]] && break
+    sleep 1
+  done
+  if [[ ! -S "${XDG_RUNTIME_DIR}/systemd/private" ]]; then
+    msg_error "Root's systemd user manager did not start (lingering is enabled)"
+    return 1
+  fi
+  systemctl --user daemon-reload
+  # dbus-user-session may have been installed after user@0 started, so its
+  # socket is not pulled in by the already-active sockets.target.
+  systemctl --user start dbus.socket 2>/dev/null || true
+  for _ in $(seq 1 15); do
+    [[ -S "${XDG_RUNTIME_DIR}/bus" ]] && break
+    sleep 1
+  done
+  if [[ ! -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+    msg_warn "No user D-Bus socket at ${XDG_RUNTIME_DIR}/bus — the in-app Update button will fail"
+  fi
+
+  systemctl --user enable "$OPENCHAMBER_UNIT_NAME" || {
+    msg_error "Could not enable ${OPENCHAMBER_UNIT_NAME} in root's user manager"
+    return 1
+  }
+
+  if [[ -f "$OPENCHAMBER_SYSTEM_UNIT" ]]; then
+    had_system_unit=1
+    msg_info "Moving ${APP} from the system service to root's user service"
+    systemctl disable --now "$OPENCHAMBER_UNIT_NAME" >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      systemctl is-active --quiet "$OPENCHAMBER_UNIT_NAME" || break
+      sleep 1
+    done
+  fi
+
+  systemctl --user restart "$OPENCHAMBER_UNIT_NAME" >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    if curl -sf "http://127.0.0.1:${OPENCHAMBER_PORT}/health" >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
+    sleep 2
+  done
+
+  if [[ "$healthy" == "1" ]]; then
+    if [[ "$had_system_unit" == "1" ]]; then
+      rm -f "$OPENCHAMBER_SYSTEM_UNIT"
+      systemctl daemon-reload
+    fi
+    return 0
+  fi
+
+  msg_error "${APP} did not become healthy as a user service"
+  msg_error "Check: XDG_RUNTIME_DIR=${OPENCHAMBER_RUNTIME_DIR} journalctl --user -u ${OPENCHAMBER_UNIT_NAME}"
+  systemctl --user --no-pager --full status "$OPENCHAMBER_UNIT_NAME" 2>&1 | head -n 20 || true
+  if [[ "$had_system_unit" == "1" ]]; then
+    msg_warn "Rolling back to the system service"
+    systemctl --user disable --now "$OPENCHAMBER_UNIT_NAME" >/dev/null 2>&1 || true
+    systemctl enable --now "$OPENCHAMBER_UNIT_NAME" >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      curl -sf "http://127.0.0.1:${OPENCHAMBER_PORT}/health" >/dev/null 2>&1 && break
+      sleep 2
+    done
+  fi
+  return 1
+}
+
 function update_script() {
   header_info
   check_container_storage
   check_container_resources
 
-  if [[ ! -x "$OPENCHAMBER_BIN" && ! -f /etc/systemd/system/openchamber.service ]]; then
+  if [[ ! -x "$OPENCHAMBER_BIN" && ! -f "$OPENCHAMBER_SYSTEM_UNIT" && ! -f "$OPENCHAMBER_USER_UNIT" ]]; then
     msg_error "No ${APP} Installation Found!"
     exit
   fi
@@ -104,20 +216,8 @@ function update_script() {
   fi
   msg_ok "Updated ${APP}"
 
-  msg_info "Restarting ${APP}"
-  $STD systemctl restart openchamber
-  msg_ok "Restarted ${APP}"
-
-  msg_info "Waiting for ${APP} to become healthy"
-  local retries=0
-  until curl -sf "http://127.0.0.1:${OPENCHAMBER_PORT}/health" >/dev/null 2>&1; do
-    retries=$((retries + 1))
-    if [[ "$retries" -ge 30 ]]; then
-      msg_error "${APP} did not become healthy — check: journalctl -u openchamber"
-      exit 1
-    fi
-    sleep 2
-  done
+  msg_info "Restarting ${APP} as root's systemd user service"
+  openchamber_switch_to_user_service || exit 1
   msg_ok "${APP} is healthy"
 
   msg_ok "Updated successfully!"
