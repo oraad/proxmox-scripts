@@ -494,12 +494,42 @@ stop_service() {
   esac
 }
 
+# Restart a service that was already active before an install. Upstream
+# `systemctl enable --now` and `rc-service start` leave an active unit running,
+# so new configuration would otherwise only take effect after a manual restart.
+# Fresh installs pass was_active=0 and are left to the install path, so an
+# in-flight provisioning exchange is not interrupted.
+_restart_if_was_active() {
+  local backend="$1" name="$2" was_active="$3"
+  [[ "$was_active" == 1 ]] || return 0
+  case "$backend" in
+  systemd)
+    systemctl restart "$name" || {
+      echo "Failed to restart the $name service" >&2
+      return 1
+    }
+    ;;
+  openrc)
+    rc-service "$name" restart || {
+      echo "Failed to restart the $name service" >&2
+      return 1
+    }
+    ;;
+  *) return 1 ;;
+  esac
+}
+
 # Install the site service with the verified CLI, then wait for it to become
-# active. Returns 1 without printing success when the install or wait fails.
+# active. An already-active unit is restarted so the new configuration takes
+# effect. Returns 1 without printing success when install, restart, or wait
+# fails.
 install_site_systemd() {
-  local config_path="$1"
+  local config_path="$1" was_active="${2:-0}"
   if ! "$PANGOLIN_BIN" service install site --config-file "$config_path"; then
     echo "Failed to install the pangolin-site service" >&2
+    return 1
+  fi
+  if ! _restart_if_was_active systemd pangolin-site "$was_active"; then
     return 1
   fi
   if ! wait_service_active systemd pangolin-site 30 1; then
@@ -509,14 +539,18 @@ install_site_systemd() {
 }
 
 # Install the client service with the verified CLI, then wait for it to become
-# active. Returns 1 without printing success when the install or wait fails.
+# active. An already-active unit is restarted so new credentials take effect.
+# Returns 1 without printing success when install, restart, or wait fails.
 # The CLI takes credentials on its command line because it has no config-file
 # option; that install-time argv exposure is a known upstream limitation.
 install_client_systemd() {
-  local id="$1" secret="$2" endpoint="$3"
+  local id="$1" secret="$2" endpoint="$3" was_active="${4:-0}"
   if ! "$PANGOLIN_BIN" service install client \
     --id "$id" --secret "$secret" --endpoint "$endpoint"; then
     echo "Failed to install the pangolin-client service" >&2
+    return 1
+  fi
+  if ! _restart_if_was_active systemd pangolin-client "$was_active"; then
     return 1
   fi
   if ! wait_service_active systemd pangolin-client 30 1; then
@@ -563,6 +597,32 @@ EOF
   chmod 0755 "$unit"
 }
 
+# Write /etc/logrotate.d/pangolin when logrotate is installed. Both OpenRC log
+# paths are covered because either component may install first. A write failure
+# warns instead of failing the service install: log rotation is auxiliary.
+_write_logrotate() {
+  local file
+  command -v logrotate >/dev/null 2>&1 || return 0
+  file="$(p /etc/logrotate.d/pangolin)"
+  install -d -m 0755 "$(dirname "$file")" || return 1
+  if ! cat >"$file" <<EOF
+$(p /var/log/pangolin-site.log)
+$(p /var/log/pangolin-client.log) {
+    size 10M
+    rotate 5
+    copytruncate
+    compress
+    missingok
+    notifempty
+}
+EOF
+  then
+    echo "Failed to write $file" >&2
+    return 1
+  fi
+  chmod 0644 "$file" || return 1
+}
+
 # Write the site wrapper and its OpenRC unit. The wrapper passes the JSON
 # configuration path to the CLI through CONFIG_FILE.
 write_site_openrc() {
@@ -582,7 +642,9 @@ EOF
     echo "Failed to write $wrapper" >&2
     return 1
   fi
-  _write_openrc_unit pangolin-site "Pangolin Site (CLI)" "$wrapper" "$log_path"
+  _write_openrc_unit pangolin-site "Pangolin Site (CLI)" "$wrapper" "$log_path" || return 1
+  _write_logrotate || echo "Warning: failed to write $(p /etc/logrotate.d/pangolin)" >&2
+  return 0
 }
 
 # Write the client env file, wrapper, and OpenRC unit. The secret stays in the
@@ -618,12 +680,15 @@ EOF
     echo "Failed to write $wrapper" >&2
     return 1
   fi
-  _write_openrc_unit pangolin-client "Pangolin Client (CLI)" "$wrapper" "$log_path"
+  _write_openrc_unit pangolin-client "Pangolin Client (CLI)" "$wrapper" "$log_path" || return 1
+  _write_logrotate || echo "Warning: failed to write $(p /etc/logrotate.d/pangolin)" >&2
+  return 0
 }
 
-# Enable and start an OpenRC service, then wait for it to become active.
+# Enable and start an OpenRC service, then wait for it to become active. An
+# already-active service is restarted so the new configuration takes effect.
 _start_openrc_service() {
-  local name="$1"
+  local name="$1" was_active="${2:-0}"
   if ! rc-update add "$name" default; then
     echo "Failed to enable the $name service" >&2
     return 1
@@ -632,24 +697,29 @@ _start_openrc_service() {
     echo "Failed to start the $name service" >&2
     return 1
   fi
+  if ! _restart_if_was_active openrc "$name" "$was_active"; then
+    return 1
+  fi
   if ! wait_service_active openrc "$name" 30 1; then
     echo "The $name service did not become active" >&2
     return 1
   fi
 }
 
-# Install the site OpenRC service, then wait for it to become active.
+# Install the site OpenRC service, then wait for it to become active. An
+# already-active unit is restarted so the new configuration takes effect.
 install_site_openrc() {
-  local config_path="$1"
+  local config_path="$1" was_active="${2:-0}"
   write_site_openrc "$config_path" || return 1
-  _start_openrc_service pangolin-site
+  _start_openrc_service pangolin-site "$was_active"
 }
 
-# Install the client OpenRC service, then wait for it to become active.
+# Install the client OpenRC service, then wait for it to become active. An
+# already-active unit is restarted so new credentials take effect.
 install_client_openrc() {
-  local id="$1" secret="$2" endpoint="$3"
+  local id="$1" secret="$2" endpoint="$3" was_active="${4:-0}"
   write_client_openrc "$id" "$secret" "$endpoint" || return 1
-  _start_openrc_service pangolin-client
+  _start_openrc_service pangolin-client "$was_active"
 }
 
 # Print the value of KEY from a KEY=value file, removing one layer of matching
@@ -769,24 +839,41 @@ restore_backup() {
   done <"$dir/manifest"
 }
 
+# Succeed when the file is the old addon's site env format. The upstream CLI
+# writes its own file at the same path with CONFIG_FILE=, which must survive.
+_is_legacy_site_env() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  grep -q '^[[:space:]]*SITE_ID=' "$path" 2>/dev/null ||
+    grep -q '^[[:space:]]*SITE_SECRET=' "$path" 2>/dev/null
+}
+
 # Record the legacy addon paths that exist, grouped by the component that owns
 # them. The current site wrapper has the same path on OpenRC, so cleanup checks
-# its content before removing it.
+# its content before removing it. The site env path is only legacy when it
+# still has the old addon format; an upstream CONFIG_FILE env belongs to the
+# new service and is left alone.
 _record_legacy_paths() {
-  local path
+  local path site_env
+  site_env="$(p /etc/pangolin/pangolin-site.env)"
   LEGACY_SITE_FILES=()
   LEGACY_CLIENT_FILES=()
-  for path in "$(p /etc/pangolin/pangolin-site.env)" \
+  for path in "$site_env" \
     "$(p /usr/local/bin/pangolin-site-start)" \
+    "$(p /usr/bin/update-pangolin-site)" \
     "$(p /root/.pangolin-cli)"; do
-    if [[ -e "$path" || -L "$path" ]]; then
-      LEGACY_SITE_FILES+=("$path")
+    if [[ "$path" == "$site_env" ]]; then
+      _is_legacy_site_env "$path" || continue
+    elif [[ ! -e "$path" && ! -L "$path" ]]; then
+      continue
     fi
+    LEGACY_SITE_FILES+=("$path")
   done
   for path in "$(p /etc/pangolin-cli/client.env)" \
     "$(p /etc/systemd/system/pangolin-cli.service)" \
     "$(p /etc/init.d/pangolin-cli)" \
     "$(p /usr/local/bin/pangolin-cli-start)" \
+    "$(p /usr/bin/update-pangolin-cli)" \
     "$(p /root/.pangolin-cli)"; do
     if [[ -e "$path" || -L "$path" ]]; then
       LEGACY_CLIENT_FILES+=("$path")
@@ -867,7 +954,7 @@ migrate_existing_addon() {
 
   old_site="$(p /etc/pangolin/pangolin-site.env)"
   new_site="$(p /etc/pangolin/site.json)"
-  if [[ -f "$old_site" ]]; then
+  if _is_legacy_site_env "$old_site"; then
     id="$(_env_value "$old_site" SITE_ID || true)"
     secret="$(_env_value "$old_site" SITE_SECRET || true)"
     endpoint="$(_env_value "$old_site" PANGOLIN_ENDPOINT || true)"
@@ -936,6 +1023,36 @@ _stop_legacy_client_service() {
   return 0
 }
 
+# Succeed when a path is one of the old generated updater scripts.
+_is_updater_script() {
+  case "$(basename "$1")" in
+  update-pangolin-site | update-pangolin-cli) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Replace an old generated updater with the one-release compatibility wrapper.
+# The binary path is written literally so the installed wrapper is correct on
+# the target, not under a test root.
+_write_updater_wrapper() {
+  local path="$1" tmp
+  tmp="$(dirname "$path")/.$(basename "$path").tmp.$$"
+  if ! cat >"$tmp" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/local/bin/pangolin update
+EOF
+  then
+    rm -f "$tmp"
+    echo "Failed to write the updater wrapper $path" >&2
+    return 1
+  fi
+  if ! chmod 0755 "$tmp" || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    echo "Failed to replace $path with the updater wrapper" >&2
+    return 1
+  fi
+}
+
 # Remove the recorded legacy files for the components verified in this run.
 # An unknown scope fails before touching anything. Each scope first backs up
 # the files it is about to remove, so the rollback path never depends on the
@@ -943,7 +1060,7 @@ _stop_legacy_client_service() {
 # Old client files are only removed when the new client is verified; site and
 # client are independent.
 cleanup_legacy_addon() {
-  local scope="${1:-}" path backup_dir rc=0 site_wrapper
+  local scope="${1:-}" path backup_dir rc=0 site_wrapper site_env
   local -a paths=()
   case "$scope" in
   site | client | both) ;;
@@ -956,8 +1073,14 @@ cleanup_legacy_addon() {
     LEGACY_SITE_BACKUP_DIR=""
     paths=()
     site_wrapper="$(p /usr/local/bin/pangolin-site-start)"
+    site_env="$(p /etc/pangolin/pangolin-site.env)"
     if [[ ${#LEGACY_SITE_FILES[@]} -gt 0 ]]; then
       for path in "${LEGACY_SITE_FILES[@]}"; do
+        # The installer may have replaced the old env with the upstream
+        # CONFIG_FILE form after migration recorded it. Never delete that.
+        if [[ "$path" == "$site_env" ]] && ! _is_legacy_site_env "$path"; then
+          continue
+        fi
         if [[ -e "$path" || -L "$path" ]]; then
           paths+=("$path")
         fi
@@ -972,6 +1095,8 @@ cleanup_legacy_addon() {
       for path in "${paths[@]}"; do
         if [[ "$path" == "$site_wrapper" ]]; then
           _remove_legacy_site_wrapper "$path" || rc=1
+        elif _is_updater_script "$path"; then
+          _write_updater_wrapper "$path" || rc=1
         elif ! rm -f "$path"; then
           echo "Failed to remove $path" >&2
           rc=1
@@ -997,7 +1122,9 @@ cleanup_legacy_addon() {
       fi
       LEGACY_CLIENT_BACKUP_DIR="$backup_dir"
       for path in "${paths[@]}"; do
-        if ! rm -f "$path"; then
+        if _is_updater_script "$path"; then
+          _write_updater_wrapper "$path" || rc=1
+        elif ! rm -f "$path"; then
           echo "Failed to remove $path" >&2
           rc=1
         fi
@@ -1086,8 +1213,8 @@ _install_site_component() {
   fi
 
   case "$backend" in
-  systemd) install_site_systemd "$config" || return 1 ;;
-  openrc) install_site_openrc "$config" || return 1 ;;
+  systemd) install_site_systemd "$config" "$SITE_INSTALL_WAS_ACTIVE" || return 1 ;;
+  openrc) install_site_openrc "$config" "$SITE_INSTALL_WAS_ACTIVE" || return 1 ;;
   *) return 1 ;;
   esac
   if ! wait_for_provisioning "$config" 30 1; then
@@ -1120,8 +1247,8 @@ _install_client_component() {
   fi
 
   case "$backend" in
-  systemd) install_client_systemd "$cid" "$csecret" "$cendpoint" || return 1 ;;
-  openrc) install_client_openrc "$cid" "$csecret" "$cendpoint" || return 1 ;;
+  systemd) install_client_systemd "$cid" "$csecret" "$cendpoint" "$CLIENT_INSTALL_WAS_ACTIVE" || return 1 ;;
+  openrc) install_client_openrc "$cid" "$csecret" "$cendpoint" "$CLIENT_INSTALL_WAS_ACTIVE" || return 1 ;;
   *) return 1 ;;
   esac
   client_env="$(p /etc/pangolin/pangolin-client.env)"
@@ -1194,8 +1321,35 @@ _backup_install_paths() {
   fi
 }
 
+# Disable a service that a failed fresh install enabled. A fresh install has no
+# previous files to restore, so leaving it enabled would restart-loop after
+# reboot. Never touches a service manager under PANGOLIN_ROOT, so tests stay
+# hermetic; explicit helper tests use fake binaries in PATH.
+_disable_service() {
+  local backend="$1" name="$2"
+  [[ -z "$PANGOLIN_ROOT" ]] || return 0
+  case "$backend" in
+  systemd)
+    command -v systemctl >/dev/null 2>&1 || return 0
+    systemctl disable "$name" || {
+      echo "Failed to disable the failed $name service" >&2
+      return 1
+    }
+    ;;
+  openrc)
+    command -v rc-update >/dev/null 2>&1 || return 0
+    rc-update del "$name" default || {
+      echo "Failed to remove the failed $name service from the default runlevel" >&2
+      return 1
+    }
+    ;;
+  *) return 1 ;;
+  esac
+}
+
 # Restore a pre-install backup and restart the previous service when it was
-# active. Called only after a failed replacement.
+# active. Called only after a failed replacement. A fresh install has no
+# backup, so the newly enabled service is disabled instead of left enabled.
 _restore_install_paths() {
   local backend="$1" scope="$2" backup_dir was_active name rc=0
   case "$scope" in
@@ -1211,7 +1365,11 @@ _restore_install_paths() {
     ;;
   *) return 1 ;;
   esac
-  [[ -n "$backup_dir" ]] || return 0
+  if [[ -z "$backup_dir" ]]; then
+    _disable_service "$backend" "$name" || rc=1
+    echo "The failed $name install had no previous files; disabled the new service." >&2
+    return "$rc"
+  fi
   if ! restore_backup "$backup_dir"; then
     echo "Failed to restore the previous $name files from $backup_dir" >&2
     return 1
@@ -1363,6 +1521,11 @@ payload_main() {
   return "$rc"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# Run main when executed as a file, piped through stdin, or read from a
+# process-substitution descriptor. An empty BASH_SOURCE[0] (bash -c or stdin)
+# must not fail under set -u.
+if [[ "${BASH_SOURCE[0]:-}" == "" ||
+  "${BASH_SOURCE[0]}" == "$0" ||
+  "${BASH_SOURCE[0]}" == /dev/fd/* ]]; then
   payload_main "$@"
 fi

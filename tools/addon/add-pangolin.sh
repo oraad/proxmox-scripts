@@ -749,6 +749,16 @@ main() {
   ANSWERS_DIR=""
   REMOTE_TARGET=""
   PANGOLIN_DRY_RUN="${PANGOLIN_DRY_RUN:-0}"
+  # A non-1 value must never turn a requested dry run into a live install.
+  case "$PANGOLIN_DRY_RUN" in
+  0 | 1) ;;
+  true) PANGOLIN_DRY_RUN=1 ;;
+  false) PANGOLIN_DRY_RUN=0 ;;
+  *)
+    echo "Invalid PANGOLIN_DRY_RUN: $PANGOLIN_DRY_RUN (expected 0 or 1)" >&2
+    return 1
+    ;;
+  esac
 
   reconfigure="${var_reconfigure:-0}"
   if [[ "$reconfigure" != 0 && "$reconfigure" != 1 ]]; then
@@ -902,7 +912,9 @@ main() {
   return 0
 }
 
-if [[ "${PANGOLIN_TEST}" != "1" ]] &&
-  [[ "${BASH_SOURCE[0]}" == "$0" || "${BASH_SOURCE[0]}" == /dev/fd/* ]]; then
+if [[ "${PANGOLIN_TEST:-0}" != 1 ]] &&
+  { [[ -z "${BASH_SOURCE[0]:-}" ]] ||
+    [[ "${BASH_SOURCE[0]}" == "$0" ]] ||
+    [[ "${BASH_SOURCE[0]}" == /dev/fd/* ]]; }; then
   main "$@"
 fi

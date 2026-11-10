@@ -659,6 +659,38 @@ case "$dry_prov_out" in
 esac
 [[ -z "$(ls -A "$dry/tmp")" ]] || { echo "dry runs wrote files" >&2; exit 1; }
 [[ ! -e "$dry/curl-ran" ]] || { echo "dry runs used the network" >&2; exit 1; }
+
+# The documented `bash -c "$(curl ...)"` form and a stdin run must reach main
+# under set -u even though BASH_SOURCE[0] is unset.
+if ! bashc_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_id=id var_site_secret=sec bash -c "$(cat "$ROOT/add-pangolin.sh")" 2>&1
+)"; then
+  echo "bash -c dry run failed: $bashc_out" >&2
+  exit 1
+fi
+case "$bashc_out" in
+*"Pangolin addon dry run"*"Target: host"*) ;;
+*) echo "bash -c dry run did not reach main: $bashc_out" >&2; exit 1 ;;
+esac
+case "$bashc_out" in
+*sec*) echo "bash -c dry run printed the secret" >&2; exit 1 ;;
+esac
+if ! stdin_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=client var_target=host var_pangolin_endpoint=https://p.example \
+    var_client_id=cid var_client_secret=csecret bash <"$ROOT/add-pangolin.sh" 2>&1
+)"; then
+  echo "stdin dry run failed: $stdin_out" >&2
+  exit 1
+fi
+case "$stdin_out" in
+*"Pangolin addon dry run"*"Target: host"*) ;;
+*) echo "stdin dry run did not reach main: $stdin_out" >&2; exit 1 ;;
+esac
+[[ -z "$(ls -A "$dry/tmp")" ]] || { echo "guard dry runs wrote files" >&2; exit 1; }
+[[ ! -e "$dry/curl-ran" ]] || { echo "guard dry runs used the network" >&2; exit 1; }
 rm -rf "$dry"
 
 # Dry run never opens whiptail: missing selectors fail with a required-values
@@ -710,7 +742,52 @@ case "$reconfigure_out" in
 *) echo "reconfigure validation message: $reconfigure_out" >&2; exit 1 ;;
 esac
 [[ ! -e "$dry2/whiptail-ran" ]] || { echo "dry run opened whiptail" >&2; exit 1; }
+
+# An unknown PANGOLIN_DRY_RUN value must fail before any side effect instead of
+# silently performing a live install.
+dryrun_rc=0
+dryrun_out="$(
+  PATH="$dry2/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=yes \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_id=id var_site_secret=sec bash "$ROOT/add-pangolin.sh" 2>&1
+)" || dryrun_rc=$?
+[[ "$dryrun_rc" -ne 0 ]] || { echo "invalid PANGOLIN_DRY_RUN should fail" >&2; exit 1; }
+case "$dryrun_out" in
+*"Invalid PANGOLIN_DRY_RUN: yes"*) ;;
+*) echo "dry-run validation message: $dryrun_out" >&2; exit 1 ;;
+esac
+[[ ! -e "$dry2/whiptail-ran" ]] || { echo "invalid dry run opened whiptail" >&2; exit 1; }
+
+# `true` is the common spelling and is accepted as a dry run, never a live run.
+if ! true_out="$(
+  PATH="$dry2/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=true \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_id=id var_site_secret=sec bash "$ROOT/add-pangolin.sh" 2>&1
+)"; then
+  echo "PANGOLIN_DRY_RUN=true should be a dry run: $true_out" >&2
+  exit 1
+fi
+case "$true_out" in
+*"Pangolin addon dry run"*) ;;
+*) echo "PANGOLIN_DRY_RUN=true did not run a dry run: $true_out" >&2; exit 1 ;;
+esac
 rm -rf "$dry2"
+
+# A partial result advertises next steps only for the component that verified.
+partial_steps="$(
+  msg_ok() { printf 'OK:%s\n' "$*"; }
+  _print_next_steps host 1 0
+)"
+case "$partial_steps" in
+*"Pangolin site is installed."*) ;;
+*) echo "partial next steps missing the site: $partial_steps" >&2; exit 1 ;;
+esac
+case "$partial_steps" in
+*"Pangolin client is installed."* | *"service status client"*)
+  echo "partial next steps must not advertise the failed client: $partial_steps" >&2
+  exit 1
+  ;;
+esac
 
 echo "Entry tests passed"
 echo "Orchestration tests passed"

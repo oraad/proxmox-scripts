@@ -268,6 +268,20 @@ install_site_systemd "$cfg"
 grep -q "service install site --config-file $cfg" "$FAKE_LOG" || fail "site install args"
 grep -q "systemctl is-active.*pangolin-site" "$FAKE_LOG" || fail "active check"
 
+# An already-active unit is restarted before the active wait so new
+# configuration takes effect. A fresh install is not restarted.
+: >"$FAKE_LOG"
+install_site_systemd "$cfg" 1 || fail "active site reinstall should succeed"
+grep -q "systemctl restart pangolin-site" "$FAKE_LOG" || fail "active site should restart"
+restart_line="$(grep -n "systemctl restart pangolin-site" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+active_line="$(grep -n "systemctl is-active.*pangolin-site" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ "$restart_line" -lt "$active_line" ]] || fail "site restart must precede the active wait"
+: >"$FAKE_LOG"
+install_site_systemd "$cfg"
+if grep -q "systemctl restart pangolin-site" "$FAKE_LOG"; then
+  fail "fresh site install must not restart"
+fi
+
 if wait_service_active systemd pangolin-site 1 0; then :; else fail "active should pass"; fi
 export FAKE_INACTIVE=1
 if wait_service_active systemd pangolin-site 1 0; then fail "inactive should fail"; fi
@@ -356,6 +370,18 @@ grep -q "service install client --id cid --secret csecret --endpoint https://p.e
   "$FAKE_LOG" || fail "client install args"
 grep -q "systemctl is-active.*pangolin-client" "$FAKE_LOG" || fail "client active check"
 
+# Replacing an active client restarts it so new credentials take effect; a
+# fresh client install is not restarted.
+: >"$FAKE_LOG"
+install_client_systemd cid csecret "https://p.example" 1 ||
+  fail "active client reinstall should succeed"
+grep -q "systemctl restart pangolin-client" "$FAKE_LOG" || fail "active client should restart"
+: >"$FAKE_LOG"
+install_client_systemd cid csecret "https://p.example"
+if grep -q "systemctl restart pangolin-client" "$FAKE_LOG"; then
+  fail "fresh client install must not restart"
+fi
+
 # A client install that never activates must fail and must not report success.
 client_rc=0
 client_stdout="$(
@@ -395,7 +421,7 @@ echo "Task 6 tests passed"
 tmpd="$(mktemp -d)"
 mkdir -p "$tmpd/bin" "$tmpd/root/etc/init.d" "$tmpd/root/usr/local/bin" \
   "$tmpd/root/etc/pangolin" "$tmpd/root/var/log"
-for c in rc-update rc-service supervise-daemon pangolin; do
+for c in rc-update rc-service supervise-daemon pangolin logrotate; do
   printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
   chmod 755 "$tmpd/bin/$c"
 done
@@ -435,6 +461,15 @@ grep -q 'exec .*pangolin.* up site' "$site_wrapper" || fail "site wrapper exec"
 grep -q 'rc-update add pangolin-site default' "$FAKE_LOG" || fail "site enable"
 grep -q 'rc-service pangolin-site start' "$FAKE_LOG" || fail "site start"
 grep -q 'rc-service pangolin-site status' "$FAKE_LOG" || fail "site status check"
+# An already-active OpenRC service is restarted so new configuration applies.
+: >"$FAKE_LOG"
+install_site_openrc "$cfg" 1 || fail "active site reinstall should succeed"
+grep -q 'rc-service pangolin-site restart' "$FAKE_LOG" || fail "active site should restart"
+: >"$FAKE_LOG"
+install_site_openrc "$cfg"
+if grep -q 'rc-service pangolin-site restart' "$FAKE_LOG"; then
+  fail "fresh OpenRC site install must not restart"
+fi
 # Run the wrapper: CONFIG_FILE must reach the CLI exported and intact.
 "$site_wrapper" || fail "site wrapper should run"
 grep -q "^CONFIG_FILE=$cfg$" "$FAKE_LOG" || fail "site wrapper must export CONFIG_FILE"
@@ -455,9 +490,28 @@ grep -q "^PANGOLIN_ENDPOINT='https://p.example'$" "$client_env" || fail "client 
 grep -q 'rc-update add pangolin-client default' "$FAKE_LOG" || fail "client enable"
 grep -q 'rc-service pangolin-client start' "$FAKE_LOG" || fail "client start"
 grep -q 'rc-service pangolin-client status' "$FAKE_LOG" || fail "client status check"
+# An already-active client is restarted so new credentials take effect.
+: >"$FAKE_LOG"
+install_client_openrc cid csecret "https://p.example" 1 ||
+  fail "active client reinstall should succeed"
+grep -q 'rc-service pangolin-client restart' "$FAKE_LOG" || fail "active client should restart"
+: >"$FAKE_LOG"
+install_client_openrc cid csecret "https://p.example"
+if grep -q 'rc-service pangolin-client restart' "$FAKE_LOG"; then
+  fail "fresh OpenRC client install must not restart"
+fi
 if grep -q 'csecret' "$client_unit" "$client_wrapper"; then
   fail "client unit and wrapper must not contain the secret"
 fi
+# logrotate is installed for both OpenRC log paths when it is available.
+lr="$tmpd/root/etc/logrotate.d/pangolin"
+[[ -f "$lr" ]] || fail "logrotate config should be written"
+[[ "$(stat -c '%a' "$lr")" == "644" ]] || fail "logrotate config mode"
+for token in copytruncate size rotate compress missingok notifempty; do
+  grep -q "$token" "$lr" || fail "logrotate config missing $token"
+done
+grep -q "$tmpd/root/var/log/pangolin-site.log" "$lr" || fail "logrotate site log path"
+grep -q "$tmpd/root/var/log/pangolin-client.log" "$lr" || fail "logrotate client log path"
 # Run the wrapper: the sourced env must reach the CLI, but not through argv.
 "$client_wrapper" || fail "client wrapper should run"
 grep -q '^PANGOLIN_CLIENT_SECRET=csecret$' "$FAKE_LOG" ||
@@ -511,6 +565,8 @@ old_client_wrapper="$tmpd/root/usr/local/bin/pangolin-cli-start"
 old_client_init="$tmpd/root/etc/init.d/pangolin-cli"
 old_site_wrapper="$tmpd/root/usr/local/bin/pangolin-site-start"
 legacy_marker="$tmpd/root/root/.pangolin-cli"
+old_site_updater="$tmpd/root/usr/bin/update-pangolin-site"
+old_client_updater="$tmpd/root/usr/bin/update-pangolin-cli"
 
 printf 'UNIT\n' >"$site_unit"
 printf 'SITE_ID=old\nSITE_SECRET=oldsec\nPANGOLIN_ENDPOINT=https://p.example\n' \
@@ -527,6 +583,10 @@ printf '#!/sbin/openrc-run\n' >"$old_client_init"
 printf '#!/bin/sh\n. /etc/pangolin/pangolin-site.env\nexec pangolin up site\n' \
   >"$old_site_wrapper"
 printf '1.2.3\n' >"$legacy_marker"
+printf '#!/bin/sh\nexec old-site-updater\n' >"$old_site_updater"
+chmod 755 "$old_site_updater"
+printf '#!/bin/sh\nexec old-client-updater\n' >"$old_client_updater"
+chmod 755 "$old_client_updater"
 
 backup="$(backup_existing "$site_unit" "$old_site_env")"
 [[ -f "$backup/pangolin-site.service" ]] || fail "backup file"
@@ -639,6 +699,13 @@ grep -q '^PANGOLIN_CLIENT_SECRET=csec$' "$LEGACY_CLIENT_BACKUP_DIR/client.env" |
   fail "client cleanup backup must keep the legacy secret"
 [[ "$(stat -c '%a' "$LEGACY_CLIENT_BACKUP_DIR/client.env")" == "600" ]] ||
   fail "client cleanup backup must keep the secret mode"
+# The old generated client updater is replaced by the safe CLI wrapper, and
+# its original content is preserved in the cleanup backup.
+grep -q 'exec /usr/local/bin/pangolin update' "$old_client_updater" ||
+  fail "client updater should become the pangolin update wrapper"
+[[ -x "$old_client_updater" ]] || fail "client updater wrapper should be executable"
+grep -q 'old-client-updater' "$LEGACY_CLIENT_BACKUP_DIR/update-pangolin-cli" ||
+  fail "client cleanup backup must keep the old updater"
 
 cleanup_legacy_addon site
 [[ ! -f "$old_site_env" ]] || fail "old site env should be removed after cleanup"
@@ -652,12 +719,40 @@ grep -q '^SITE_SECRET=oldsec$' "$LEGACY_SITE_BACKUP_DIR/pangolin-site.env" ||
   fail "site cleanup backup must keep the legacy secret"
 [[ "$(stat -c '%a' "$LEGACY_SITE_BACKUP_DIR/pangolin-site.env")" == "600" ]] ||
   fail "site cleanup backup must keep the secret mode"
+# The old generated site updater is replaced by the safe CLI wrapper, and its
+# original content is preserved in the cleanup backup.
+grep -q 'exec /usr/local/bin/pangolin update' "$old_site_updater" ||
+  fail "site updater should become the pangolin update wrapper"
+[[ -x "$old_site_updater" ]] || fail "site updater wrapper should be executable"
+grep -q 'old-site-updater' "$LEGACY_SITE_BACKUP_DIR/update-pangolin-site" ||
+  fail "site cleanup backup must keep the old updater"
 
 # The current OpenRC site wrapper must survive a repeated cleanup.
 printf '#!/bin/sh\nCONFIG_FILE=%s\nexport CONFIG_FILE\n' "$new_site_json" \
   >"$old_site_wrapper"
 cleanup_legacy_addon site
 [[ -f "$old_site_wrapper" ]] || fail "cleanup must keep the current site wrapper"
+
+# The upstream CLI writes its own env at the legacy path. Migration records the
+# old format before install, but cleanup must keep the CONFIG_FILE form.
+printf 'SITE_ID=old\nSITE_SECRET=oldsec\nPANGOLIN_ENDPOINT=https://p.example\n' \
+  >"$old_site_env"
+migrate_existing_addon >/dev/null 2>&1
+printf 'CONFIG_FILE=%s\n' "$new_site_json" >"$old_site_env"
+cleanup_legacy_addon site >/dev/null 2>&1 ||
+  fail "cleanup after upstream env replacement should succeed"
+[[ -f "$old_site_env" ]] || fail "upstream CONFIG_FILE env must survive cleanup"
+grep -q '^CONFIG_FILE=' "$old_site_env" || fail "upstream env contents must survive"
+[[ -f "$new_site_json" ]] || fail "upstream env cleanup must keep the site config"
+
+# An upstream env present before migration is not recorded as legacy at all.
+rm -f "$old_site_env"
+printf 'CONFIG_FILE=%s\n' "$new_site_json" >"$old_site_env"
+_record_legacy_paths
+for path in "${LEGACY_SITE_FILES[@]}"; do
+  [[ "$path" != "$old_site_env" ]] ||
+    fail "an upstream CONFIG_FILE env must not be recorded as legacy"
+done
 
 # A later migration plus both-scope cleanup removes both components' old files.
 mkdir -p "$tmpd/root/etc/pangolin-cli"
@@ -686,6 +781,35 @@ rm -rf "$tmpd"
 export PANGOLIN_ROOT="$old_pangolin_root"
 
 echo "Task 8 tests passed"
+
+# A failed fresh install has no backup to restore, so the service it enabled is
+# disabled rather than left to restart-loop after reboot.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin"
+for c in systemctl rc-update; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
+  chmod 755 "$tmpd/bin/$c"
+done
+old_path="$PATH"
+old_pangolin_root="${PANGOLIN_ROOT:-}"
+old_fake_log="${FAKE_LOG:-}"
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_ROOT=""
+SITE_INSTALL_BACKUP_DIR=""
+SITE_INSTALL_WAS_ACTIVE=0
+_restore_install_paths systemd site || fail "fresh site failure should disable cleanly"
+grep -q 'systemctl disable pangolin-site' "$tmpd/log" ||
+  fail "failed fresh site install must disable the unit"
+CLIENT_INSTALL_BACKUP_DIR=""
+CLIENT_INSTALL_WAS_ACTIVE=0
+_restore_install_paths openrc client || fail "fresh client failure should disable cleanly"
+grep -q 'rc-update del pangolin-client default' "$tmpd/log" ||
+  fail "failed fresh client install must leave the default runlevel"
+export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+rm -rf "$tmpd"
 
 # Task 10: legacy Newt files are backed up and removed only when called after a
 # verified site install. Cleanup is a quiet no-op when nothing is present.
