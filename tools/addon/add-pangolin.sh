@@ -542,13 +542,13 @@ _resolve_site_answers() {
     site_answers=1
   elif _target_site_verified "$target"; then
     if _has_site_form; then
-      msg_warn "Ignoring new site credentials; the verified site configuration is reused. Set var_reconfigure=1 to replace it."
+      msg_warn "Ignoring new site credentials; the verified site configuration is reused. Set var_reconfigure=1 to replace it." >&2
     fi
     site_answers=0
   elif _has_site_form; then
     site_answers=1
   elif _target_has_legacy_site "$target"; then
-    msg_info "A legacy site or Newt installation will be migrated."
+    msg_warn "A legacy site or Newt installation will be migrated." >&2
     site_answers=0
   else
     msg_error "No site configuration found. Provide a provisioning key or a site ID and secret."
