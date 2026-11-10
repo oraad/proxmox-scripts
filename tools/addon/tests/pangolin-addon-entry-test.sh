@@ -1036,6 +1036,313 @@ case "$true_out" in
 esac
 rm -rf "$dry2"
 
+# Multi-target selection: comma and space lists, normalization, duplicates, and
+# invalid values. `var_target` stays valid for one target; `var_targets` wins
+# when both are set.
+assert_eq $'host\n101\n102' "$(_parse_targets 'host,101, 102')"
+assert_eq $'host\n101' "$(_parse_targets 'host   101')"
+assert_eq "101" "$(_parse_targets '0101')"
+assert_eq $'101\n102' "$(var_targets='101,102' _resolve_targets)"
+assert_eq "host" "$(var_target='host' _resolve_targets)"
+assert_eq "host" "$(var_targets='host' var_target='101' _resolve_targets)"
+for bad in 'abc' '0' '-1' 'host;101' '101,abc'; do
+  if _parse_targets "$bad" >/dev/null 2>&1; then
+    echo "target [$bad] should fail" >&2
+    exit 1
+  fi
+done
+for dup in '101,101' 'host host' '101,0101'; do
+  dup_out="$(_parse_targets "$dup" 2>&1)" && {
+    echo "duplicate [$dup] should fail" >&2
+    exit 1
+  }
+  case "$dup_out" in
+  *Duplicate*) ;;
+  *)
+    echo "duplicate message for [$dup]: $dup_out" >&2
+    exit 1
+    ;;
+  esac
+done
+
+# Per-target credential lookup: a suffixed variable wins, and the global
+# fallback exists only when exactly one target is selected.
+assert_eq "cid-101" "$(var_client_id_101=cid-101 _target_value var_client_id 101 2)"
+assert_eq "" "$(var_client_id=global _target_value var_client_id 101 2)"
+assert_eq "global" "$(var_client_id=global _target_value var_client_id 101 1)"
+assert_eq "cid-101" "$(var_client_id_101=cid-101 var_client_id=global \
+  _target_value var_client_id 101 1)"
+assert_eq "spk-101" "$(var_site_provisioning_key_101=spk-101 \
+  _target_value var_site_provisioning_key 101 2)"
+assert_eq "host-secret" "$(var_site_secret_host=host-secret \
+  _target_value var_site_secret host 3)"
+if ! (
+  var_client_id=global-id var_client_secret=global-secret
+  var_client_id_101=per-id var_client_secret_101=per-secret
+  _load_target_credentials 101 2
+  [[ "$var_client_id" == per-id && "$var_client_secret" == per-secret ]] || exit 1
+  _load_target_credentials 102 2
+  [[ -z "$var_client_id" && -z "$var_client_secret" ]] || exit 1
+); then
+  echo "per-target credential lookup failed" >&2
+  exit 1
+fi
+if ! (
+  var_client_id=global-id var_client_secret=global-secret
+  _load_target_credentials 101 1
+  [[ "$var_client_id" == global-id && "$var_client_secret" == global-secret ]] || exit 1
+); then
+  echo "single-target global fallback failed" >&2
+  exit 1
+fi
+if ! (
+  var_site_id=global-id var_site_secret=global-secret
+  var_site_id_101=per-id var_site_secret_101=per-secret
+  _reset_target_credentials
+  [[ -z "$var_site_id" && -z "$var_site_secret" ]] || exit 1
+  # The endpoint and native toggles are shared and must survive the reset.
+  var_pangolin_endpoint=https://p.example
+  var_site_native=1
+  _reset_target_credentials
+  [[ "$var_pangolin_endpoint" == https://p.example && "$var_site_native" == 1 ]] || exit 1
+); then
+  echo "credential reset removed shared selections" >&2
+  exit 1
+fi
+
+# Multi-target install loop. A fake payload records each invocation and fails
+# only for the CTIDs listed in fail-targets. The fake pct maps the remote
+# answers path onto a local directory and records tag changes.
+loop="$(mktemp -d)"
+mkdir -p "$loop/bin" "$loop/tmp" "$loop/remote"
+cat >"$loop/bin/pct" <<'EOF'
+#!/usr/bin/env bash
+echo "pct $*" >>"$FAKE_LOG"
+ctid="$2"
+case "$1" in
+config) printf 'tags: old;pangolin-cli\n' ;;
+set) exit 0 ;;
+status) printf 'status: running\n' ;;
+start | shutdown) exit 0 ;;
+push)
+  src="$3"
+  dst="${4#/root/.pangolin-addon/}"
+  mkdir -p "$FAKE_REMOTE_DIR/$ctid"
+  cp "$src" "$FAKE_REMOTE_DIR/$ctid/$dst"
+  ;;
+exec)
+  shift 2
+  [[ "${1:-}" == "--" ]] && shift
+  dir="$FAKE_REMOTE_DIR/$ctid"
+  case "$*" in
+  *"rm -rf /root/.pangolin-addon"*) rm -rf "$dir" ;;
+  *"cat /root/.pangolin-addon/verified"*) cat "$dir/verified" 2>/dev/null ;;
+  *"mkdir -p /root/.pangolin-addon"*) mkdir -p "$dir" ;;
+  *"chmod "*) : ;;
+  *"payload.sh"*) bash "$dir/payload.sh" "$dir" ;;
+  *) exit 1 ;;
+  esac
+  ;;
+*) exit 1 ;;
+esac
+EOF
+chmod 755 "$loop/bin/pct"
+cat >"$loop/payload.sh" <<EOF
+#!/usr/bin/env bash
+# Sourced by main, executed per target.
+if [[ "\${BASH_SOURCE[0]:-}" != "\$0" ]]; then
+  return 0
+fi
+answers="\${1:-}"
+target="\$(sed -n 's/^TARGET=//p' "\$answers/flags" 2>/dev/null)"
+printf '%s\n' "\$target" >>"$loop/ran"
+if grep -qx "\$target" "$loop/fail-targets" 2>/dev/null; then
+  exit 1
+fi
+printf 'client\n' >"\$answers/verified"
+EOF
+: >"$loop/fail-targets"
+
+# Run main with every host-touching step stubbed except the payload and tags.
+_run_loop() {
+  (
+    export PATH="$loop/bin:$PATH"
+    export FAKE_LOG="$loop/log" FAKE_REMOTE_DIR="$loop/remote"
+    export FAKE_PAYLOAD="$loop/payload.sh" TMPDIR="$loop/tmp"
+    _ensure_curl() { :; }
+    _load_core() { :; }
+    require_pve_host() { return 0; }
+    header_info() { :; }
+    msg_info() { printf 'INFO:%s\n' "$*"; }
+    msg_ok() { printf 'OK:%s\n' "$*"; }
+    msg_warn() { printf 'WARN:%s\n' "$*" >&2; }
+    msg_error() { printf 'ERROR:%s\n' "$*" >&2; }
+    _ensure_lxc_running() { :; }
+    _validate_target_os() { :; }
+    _apply_lxc_tun() { :; }
+    _ensure_lxc_runtime() { :; }
+    _ensure_host_tun() { :; }
+    fetch_payload() { install -m 0600 "$FAKE_PAYLOAD" "$1"; }
+    main
+  )
+}
+
+# All targets succeed: the payload runs once per target, every target is
+# summarized as ok, only the LXC is tagged, and every answers copy is removed.
+: >"$loop/ran"
+: >"$loop/log"
+if ! all_out="$(
+  var_mode=client var_targets="host,101" var_pangolin_endpoint=https://p.example \
+    var_client_id_host=id-host var_client_secret_host=sec-host \
+    var_client_id_101=id-101 var_client_secret_101=sec-101 _run_loop 2>&1
+)"; then
+  echo "multi-target all-success run failed: $all_out" >&2
+  exit 1
+fi
+assert_eq $'host\n101' "$(cat "$loop/ran")"
+case "$all_out" in
+*"host: ok (client)"*) ;;
+*) echo "all-success summary missing host: $all_out" >&2; exit 1 ;;
+esac
+case "$all_out" in
+*"101: ok (client)"*) ;;
+*) echo "all-success summary missing 101: $all_out" >&2; exit 1 ;;
+esac
+grep -q 'pct set 101 -tags old;pangolin-client' "$loop/log" ||
+  { echo "successful LXC must be tagged" >&2; exit 1; }
+grep -q 'pct exec 101 -- env' "$loop/log" ||
+  { echo "LXC payload must run through pct exec" >&2; exit 1; }
+if grep -q 'PANGOLIN_CLIENT_SECRET=' "$loop/log"; then
+  echo "secret reached pct argv" >&2
+  exit 1
+fi
+if grep -q 'sec-101\|sec-host' "$loop/log"; then
+  echo "secret reached the pct log" >&2
+  exit 1
+fi
+[[ -z "$(ls -A "$loop/remote")" ]] || { echo "remote answers not cleaned" >&2; exit 1; }
+[[ -z "$(ls -A "$loop/tmp")" ]] || { echo "local answers not cleaned" >&2; exit 1; }
+
+# Partial failure: the middle target fails, the last target still runs and the
+# run exits non-zero. Only the successful LXC is tagged.
+printf '101\n' >"$loop/fail-targets"
+: >"$loop/ran"
+: >"$loop/log"
+partial_loop_rc=0
+partial_loop_out="$(
+  var_mode=client var_targets="host 101 102" var_pangolin_endpoint=https://p.example \
+    var_client_id_host=id-host var_client_secret_host=sec-host \
+    var_client_id_101=id-101 var_client_secret_101=sec-101 \
+    var_client_id_102=id-102 var_client_secret_102=sec-102 _run_loop 2>&1
+)" || partial_loop_rc=$?
+[[ "$partial_loop_rc" -ne 0 ]] || { echo "partial failure must exit non-zero" >&2; exit 1; }
+assert_eq $'host\n101\n102' "$(cat "$loop/ran")"
+case "$partial_loop_out" in
+*"101: failed"*) ;;
+*) echo "partial summary missing the failure: $partial_loop_out" >&2; exit 1 ;;
+esac
+case "$partial_loop_out" in
+*"102: ok (client)"*) ;;
+*) echo "partial run must continue after the failure: $partial_loop_out" >&2; exit 1 ;;
+esac
+case "$partial_loop_out" in
+*"continuing with the remaining targets"*) ;;
+*) echo "continuation message missing: $partial_loop_out" >&2; exit 1 ;;
+esac
+if grep -q 'pct set 101 -tags' "$loop/log"; then
+  echo "failed target must not be tagged" >&2
+  exit 1
+fi
+grep -q 'pct set 102 -tags' "$loop/log" ||
+  { echo "second successful target must be tagged" >&2; exit 1; }
+[[ -z "$(ls -A "$loop/tmp")" ]] || { echo "partial run left local answers" >&2; exit 1; }
+[[ -z "$(ls -A "$loop/remote")" ]] || { echo "partial run left remote answers" >&2; exit 1; }
+
+# All targets fail: every payload is attempted and the run exits non-zero.
+printf 'host\n101\n102\n' >"$loop/fail-targets"
+: >"$loop/ran"
+: >"$loop/log"
+all_fail_rc=0
+all_fail_out="$(
+  var_mode=client var_targets="host 101 102" var_pangolin_endpoint=https://p.example \
+    var_client_id_host=id-host var_client_secret_host=sec-host \
+    var_client_id_101=id-101 var_client_secret_101=sec-101 \
+    var_client_id_102=id-102 var_client_secret_102=sec-102 _run_loop 2>&1
+)" || all_fail_rc=$?
+[[ "$all_fail_rc" -ne 0 ]] || { echo "all-failure run must exit non-zero" >&2; exit 1; }
+assert_eq $'host\n101\n102' "$(cat "$loop/ran")"
+for t in host 101 102; do
+  case "$all_fail_out" in
+  *"$t: failed"*) ;;
+  *) echo "all-failure summary missing $t: $all_fail_out" >&2; exit 1 ;;
+  esac
+done
+if grep -q 'pct set' "$loop/log"; then
+  echo "failed targets must not be tagged" >&2
+  exit 1
+fi
+
+# Single-target compatibility: `var_target` plus unsuffixed credentials still
+# installs one host target.
+: >"$loop/fail-targets"
+: >"$loop/ran"
+: >"$loop/log"
+if ! single_out="$(
+  var_mode=client var_target=host var_pangolin_endpoint=https://p.example \
+    var_client_id=id-global var_client_secret=sec-global _run_loop 2>&1
+)"; then
+  echo "single var_target run failed: $single_out" >&2
+  exit 1
+fi
+assert_eq "host" "$(cat "$loop/ran")"
+case "$single_out" in
+*"host: ok (client)"*) ;;
+*) echo "single-target summary missing: $single_out" >&2; exit 1 ;;
+esac
+
+# Multi-target dry run lists every target and never touches the network.
+: >"$loop/log"
+if ! loop_dry_out="$(
+  TMPDIR="$loop/tmp" PATH="$loop/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_targets="host,101" var_pangolin_endpoint=https://p.example \
+    var_site_id_host=id-host var_site_secret_host=sec-host \
+    var_site_id_101=id-101 var_site_secret_101=sec-101 \
+    bash "$ROOT/add-pangolin.sh" 2>&1
+)"; then
+  echo "multi-target dry run failed: $loop_dry_out" >&2
+  exit 1
+fi
+assert_eq "2" "$(printf '%s\n' "$loop_dry_out" | grep -c '^Target: ')"
+case "$loop_dry_out" in
+*"Target: host"*"Target: LXC CTID 101"*) ;;
+*) echo "dry run must list every target: $loop_dry_out" >&2; exit 1 ;;
+esac
+case "$loop_dry_out" in
+*"Selected targets: 2"*) ;;
+*) echo "dry run target count missing: $loop_dry_out" >&2; exit 1 ;;
+esac
+case "$loop_dry_out" in
+*sec-host* | *sec-101*) echo "dry run printed a secret" >&2; exit 1 ;;
+esac
+[[ -z "$(ls -A "$loop/tmp")" ]] || { echo "dry run wrote files" >&2; exit 1; }
+[[ ! -s "$loop/log" ]] || { echo "dry run used pct" >&2; exit 1; }
+
+# A multi-target dry run must not fall back to the global credentials.
+global_dry_rc=0
+global_dry_out="$(
+  TMPDIR="$loop/tmp" PATH="$loop/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=client var_targets="host,101" var_pangolin_endpoint=https://p.example \
+    var_client_id=id-global var_client_secret=sec-global \
+    bash "$ROOT/add-pangolin.sh" 2>&1
+)" || global_dry_rc=$?
+[[ "$global_dry_rc" -ne 0 ]] || { echo "global creds must not cover two targets" >&2; exit 1; }
+case "$global_dry_out" in
+*"Missing required values:"*var_client_id*) ;;
+*) echo "multi-target global fallback message: $global_dry_out" >&2; exit 1 ;;
+esac
+
+rm -rf "$loop"
+
 # A partial result advertises next steps only for the component that verified.
 partial_steps="$(
   msg_ok() { printf 'OK:%s\n' "$*"; }

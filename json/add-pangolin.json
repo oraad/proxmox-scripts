@@ -14,7 +14,7 @@
   "website": "https://pangolin.net/",
   "logo": "https://pangolin.net/favicon.ico",
   "config_path": "/etc/pangolin",
-  "description": "Installs the official Pangolin CLI on the Proxmox host or an existing LXC and runs Site mode (`pangolin up site`) and/or Machine Client mode (`pangolin up client`).",
+  "description": "Installs the official Pangolin CLI on the Proxmox host and/or one or more existing LXCs and runs Site mode (`pangolin up site`) and/or Machine Client mode (`pangolin up client`).",
   "install_methods": [
     {
       "type": "default",
@@ -42,7 +42,7 @@
       "type": "warning"
     },
     {
-      "text": "Components: Site tunnel (userspace WireGuard, no TUN) and Machine client (needs /dev/net/tun). Target: Proxmox host or an existing Debian 12+/Ubuntu 22.04+/Alpine 3.20+ LXC.",
+      "text": "Components: Site tunnel (userspace WireGuard, no TUN) and Machine client (needs /dev/net/tun). Targets: Proxmox host and/or existing Debian 12+/Ubuntu 22.04+/Alpine 3.20+ LXCs, selected with var_targets or a checklist.",
       "type": "info"
     },
     {
@@ -54,7 +54,7 @@
       "type": "info"
     },
     {
-      "text": "Unattended: `var_mode=site var_target=host var_site_id=ID var_site_secret=SECRET var_pangolin_endpoint=URL` with tools/addon/add-pangolin.sh. Update: re-run the script.",
+      "text": "Unattended: `var_mode=site var_targets=\"host 101\" var_pangolin_endpoint=URL var_site_id_101=ID var_site_secret_101=SECRET` with tools/addon/add-pangolin.sh. Mode, endpoint, native toggles, and var_reconfigure are shared; credentials are per target (suffix `host` or the CTID). One target may still use `var_target` with the unsuffixed credentials. A failed target does not stop the others; the run exits non-zero if any failed. Update: re-run the script.",
       "type": "info"
     }
   ]

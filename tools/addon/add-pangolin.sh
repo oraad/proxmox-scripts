@@ -11,10 +11,19 @@
 #
 # Unattended:
 #   var_mode=site|client|both          (interactive menu when unset)
-#   var_target=host|<CTID>
+#   var_targets="host 101 102"         (space- or comma-separated; var_target
+#                                       still accepts exactly one target)
 #   Site/both: var_pangolin_endpoint=... var_site_id=... var_site_secret=...
 #              or var_site_provisioning_key=... var_site_name=...
+#              Per target: var_site_id_<host|CTID>=... and the same suffix on
+#              var_site_secret, var_site_provisioning_key, and var_site_name.
 #   Client/both: var_client_id=... var_client_secret=...
+#              Per target: var_client_id_<host|CTID>, var_client_secret_<host|CTID>.
+#   The unsuffixed credential variables are used only when exactly one target
+#   is selected.
+#
+# Mode, endpoint, site native toggles, and var_reconfigure are shared by every
+# target. Each target gets its own private answers directory and install run.
 
 set -Eeuo pipefail
 
@@ -27,6 +36,24 @@ APP_TYPE="${APP_TYPE:-addon}"
 # Components the payload verified in this run; used for LXC tags and next steps.
 VERIFIED_SITE=0
 VERIFIED_CLIENT=0
+# Targets selected for this run, in selection order.
+TARGETS=()
+# Per-target credentials resolved before the install loop.
+TARGET_SITE_ID=()
+TARGET_SITE_SECRET=()
+TARGET_SITE_PROVISIONING_KEY=()
+TARGET_SITE_NAME=()
+TARGET_CLIENT_ID=()
+TARGET_CLIENT_SECRET=()
+# Effective reconfigure flag per target. The shared var_reconfigure seeds it.
+TARGET_RECONFIGURE=()
+# Run results, parallel to TARGETS, for the final summary.
+TARGET_STATUS=()
+# Every private answers directory and every LXC that received a copy.
+TARGET_ANSWERS=()
+REMOTE_TARGETS=()
+# Private run directory that holds the shared payload and the answers dirs.
+WORK_DIR=""
 
 # Load the payload at source time when a local checkout is supplied. Tests use
 # this path so the entry helpers can be exercised without network access or a
@@ -343,32 +370,87 @@ _resolve_mode() {
   printf '%s\n' "$choice"
 }
 
-# Print the target, prompting only in interactive mode. A target is `host` or a
-# numeric CTID.
-_resolve_target() {
-  local target="${var_target:-}"
-  if [[ -z "$target" ]]; then
-    if _is_noninteractive; then
-      echo "var_target is required (host or a CTID)" >&2
+# Print one normalized target per line: `host` or a CTID without leading zeros.
+# Accepts a space- or comma-separated list. Rejects non-numeric values, CTID 0,
+# and duplicates (including leading-zero spellings).
+_parse_targets() {
+  local raw="${1:-}" token seen=" " ctid
+  local -a tokens=()
+  raw="${raw//,/ }"
+  # Word splitting is intentional: the list is space- or comma-separated.
+  # shellcheck disable=SC2206
+  tokens=($raw)
+  if ((${#tokens[@]} == 0)); then
+    echo "No targets selected (expected host or CTIDs)" >&2
+    return 1
+  fi
+  for token in "${tokens[@]}"; do
+    case "$token" in
+    host) ;;
+    *)
+      if [[ ! "$token" =~ ^[0-9]+$ ]]; then
+        echo "Invalid target: $token (expected host or a CTID)" >&2
+        return 1
+      fi
+      ctid=$((10#$token))
+      if ((ctid <= 0)); then
+        echo "Invalid target: $token (expected a CTID greater than 0)" >&2
+        return 1
+      fi
+      token="$ctid"
+      ;;
+    esac
+    if [[ "$seen" == *" $token "* ]]; then
+      echo "Duplicate target: $token" >&2
       return 1
     fi
-    if ! command -v whiptail >/dev/null 2>&1; then
-      echo "whiptail is required for interactive mode" >&2
-      return 1
-    fi
-    target="$(whiptail --title "Pangolin Addon" \
-      --inputbox "Target: host, or an LXC CTID" 10 60 "host" 3>&1 1>&2 2>&3)" || return 1
+    seen="${seen}${token} "
+    printf '%s\n' "$token"
+  done
+}
+
+# Print the whiptail checklist rows: the host first, then every LXC on this
+# host. `pct list` output is VMID Status Lock Name; the name may move columns
+# when the container is locked, so the last field is used.
+_target_choices() {
+  printf 'host\tThis Proxmox host\n'
+  if command -v pct >/dev/null 2>&1; then
+    pct list 2>/dev/null | tail -n +2 |
+      awk 'NF >= 2 && $1 ~ /^[0-9]+$/ { printf "%s\tLXC %s (CTID %s)\n", $1, $NF, $1 }'
   fi
-  if [[ "$target" == host ]]; then
-    printf 'host\n'
-    return 0
+}
+
+# Print every selected target, one per line. Uses var_targets first, then the
+# single-target var_target, then an interactive checklist.
+_resolve_targets() {
+  local raw="${var_targets:-}" choice item label
+  local -a items=()
+  if [[ -z "$raw" ]]; then
+    raw="${var_target:-}"
   fi
-  if [[ "$target" =~ ^[0-9]+$ ]] && ((10#$target > 0)); then
-    printf '%s\n' "$target"
-    return 0
+  if [[ -n "$raw" ]]; then
+    _parse_targets "$raw"
+    return
   fi
-  echo "Invalid var_target: $target (expected host or a CTID)" >&2
-  return 1
+  if _is_noninteractive; then
+    echo "var_targets or var_target is required (host or CTIDs)" >&2
+    return 1
+  fi
+  if ! command -v whiptail >/dev/null 2>&1; then
+    echo "whiptail is required for interactive mode" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r item label; do
+    [[ -n "$item" ]] && items+=("$item" "$label" "OFF")
+  done <<<"$(_target_choices)"
+  choice="$(whiptail --title "Pangolin Addon" --checklist \
+    "Targets (space selects, Enter confirms)" 20 74 12 "${items[@]}" 3>&1 1>&2 2>&3)" ||
+    return 1
+  if [[ -z "${choice//[[:space:]\"\']/}" ]]; then
+    echo "Select at least one target" >&2
+    return 1
+  fi
+  _parse_targets "$(printf '%s' "$choice" | tr -d '"')"
 }
 
 # Print the hostname used as the default provisioning site name.
@@ -408,6 +490,64 @@ _apply_legacy_aliases() {
   if [[ -z "${var_site_secret:-}" && -n "${var_newt_secret:-}" ]]; then
     var_site_secret="$var_newt_secret"
   fi
+}
+
+# Print the value of NAME_<target> when it is set, otherwise the global NAME
+# when this run has exactly one target. The target suffix is `host` or the CTID.
+_target_value() {
+  local prefix="$1" target="$2" total="$3" name="${1}_$2" value
+  value="${!name-}"
+  if [[ -z "$value" && "$total" == 1 ]]; then
+    name="$prefix"
+    value="${!name-}"
+  fi
+  printf '%s' "$value"
+}
+
+# Copy the per-target credentials into the credential globals that the shared
+# prompt, validation, and answers helpers read.
+_activate_target_credentials() {
+  local i="$1"
+  var_site_id="${TARGET_SITE_ID[i]-}"
+  var_site_secret="${TARGET_SITE_SECRET[i]-}"
+  var_site_provisioning_key="${TARGET_SITE_PROVISIONING_KEY[i]-}"
+  var_site_name="${TARGET_SITE_NAME[i]-}"
+  var_client_id="${TARGET_CLIENT_ID[i]-}"
+  var_client_secret="${TARGET_CLIENT_SECRET[i]-}"
+}
+
+# Save the credential globals for target index i.
+_capture_target_credentials() {
+  local i="$1"
+  TARGET_SITE_ID[i]="${var_site_id-}"
+  TARGET_SITE_SECRET[i]="${var_site_secret-}"
+  TARGET_SITE_PROVISIONING_KEY[i]="${var_site_provisioning_key-}"
+  TARGET_SITE_NAME[i]="${var_site_name-}"
+  TARGET_CLIENT_ID[i]="${var_client_id-}"
+  TARGET_CLIENT_SECRET[i]="${var_client_secret-}"
+}
+
+# Resolve the unattended credentials for one target into the globals. A
+# suffixed variable wins; globals are the fallback only for a single target.
+_load_target_credentials() {
+  local target="$1" total="$2"
+  var_site_id="$(_target_value var_site_id "$target" "$total")"
+  var_site_secret="$(_target_value var_site_secret "$target" "$total")"
+  var_site_provisioning_key="$(_target_value var_site_provisioning_key "$target" "$total")"
+  var_site_name="$(_target_value var_site_name "$target" "$total")"
+  var_client_id="$(_target_value var_client_id "$target" "$total")"
+  var_client_secret="$(_target_value var_client_secret "$target" "$total")"
+}
+
+# Clear only the credentials before asking for the next target. The endpoint
+# and the site native toggles stay as shared selections.
+_reset_target_credentials() {
+  var_site_id=""
+  var_site_secret=""
+  var_site_provisioning_key=""
+  var_site_name=""
+  var_client_id=""
+  var_client_secret=""
 }
 
 # Validate the site native toggles and resolve the interface names before any
@@ -559,7 +699,6 @@ _print_dry_run() {
   if tun_required "$client" "$site_native" "$site_native_main"; then
     need_tun=1
   fi
-  printf 'Pangolin addon dry run\n'
   printf 'Target: %s\n' "$where"
   printf 'Mode: %s\n' "$mode"
   printf 'Components: %s\n' "$(_components_label "$site" "$client")"
@@ -846,15 +985,33 @@ _resolve_site_answers() {
   printf '%s\n' "$site_answers"
 }
 
-# Throw away the private answers directory on every exit path, including the
-# copy pushed into an LXC container.
+# Throw away every private answers directory on every exit path, including the
+# copies pushed into each LXC container.
 _cleanup_answers() {
+  local dir target
+  for dir in "${TARGET_ANSWERS[@]}"; do
+    [[ -n "$dir" ]] && rm -rf "$dir"
+  done
+  for target in "${REMOTE_TARGETS[@]}"; do
+    _remove_remote_answers "$target"
+  done
+  if [[ -n "${WORK_DIR:-}" ]]; then
+    rm -rf "$WORK_DIR"
+  fi
   if [[ -n "${ANSWERS_DIR:-}" ]]; then
     rm -rf "$ANSWERS_DIR"
   fi
   if [[ -n "${REMOTE_TARGET:-}" ]]; then
-    pct exec "$REMOTE_TARGET" -- rm -rf /root/.pangolin-addon >/dev/null 2>&1 || true
+    _remove_remote_answers "$REMOTE_TARGET"
   fi
+}
+
+# Remove the answers copy from one LXC. A missing or stopped container is fine:
+# the run must not fail because cleanup could not reach it.
+_remove_remote_answers() {
+  local target="${1:-}"
+  [[ -n "$target" && "$target" != host ]] || return 0
+  pct exec "$target" -- rm -rf /root/.pangolin-addon >/dev/null 2>&1 || true
 }
 
 # Print the commands the operator uses to confirm and inspect the services.
@@ -911,109 +1068,87 @@ _apply_verified_tags() {
   fi
 }
 
-# Full interactive or unattended flow. Secrets stay in the mode 0700 answers
-# directory and never enter a pct argument value or a log line.
-main() {
-  local mode="" target="" site=0 client=0 reconfigure=0 site_answers=0
-  local payload_rc=0 name="" need_tun=0
-  local var_site_native="${var_site_native-0}"
-  local var_site_native_main="${var_site_native_main-0}"
-  local var_site_interface="${var_site_interface-pangolin}"
-  local var_site_interface_main="${var_site_interface_main-pangolin}"
-  local -a runenv=() missing=()
-
-  ANSWERS_DIR=""
-  REMOTE_TARGET=""
-  PANGOLIN_DRY_RUN="${PANGOLIN_DRY_RUN:-0}"
-  # A non-1 value must never turn a requested dry run into a live install.
-  case "$PANGOLIN_DRY_RUN" in
-  0 | 1) ;;
-  true) PANGOLIN_DRY_RUN=1 ;;
-  false) PANGOLIN_DRY_RUN=0 ;;
-  *)
-    echo "Invalid PANGOLIN_DRY_RUN: $PANGOLIN_DRY_RUN (expected 0 or 1)" >&2
+# Create one private answers directory for a target inside the run directory.
+_new_answers_dir() {
+  local dir
+  dir="$(mktemp -d "${WORK_DIR}/answers.XXXXXX")" || return 1
+  chmod 0700 "$dir" || {
+    rm -rf "$dir"
     return 1
-    ;;
-  esac
+  }
+  printf '%s\n' "$dir"
+}
 
-  reconfigure="${var_reconfigure:-0}"
-  if [[ "$reconfigure" != 0 && "$reconfigure" != 1 ]]; then
-    echo "Invalid var_reconfigure: $reconfigure (expected 0 or 1)" >&2
+# Run the shared payload for one target. The host runs it in place; an LXC gets
+# the file and the per-target answers directory pushed, then runs them. Secrets
+# never appear in an argument value or in `pct exec -- env`.
+_run_target_payload() {
+  local target="$1" answers="$2" rc=0
+  local -a runenv=()
+  if [[ "$target" == host ]]; then
+    bash "$WORK_DIR/payload.sh" "$answers" || rc=$?
+    return "$rc"
+  fi
+  if ! push_payload "$target" "$WORK_DIR/payload.sh" "$answers"; then
+    msg_error "Failed to push the Pangolin install payload to CTID $target"
     return 1
   fi
-
-  # Dry run must never open whiptail: require the unattended selectors first.
-  if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
-    missing=()
-    [[ -n "${var_mode:-}" ]] || missing+=("var_mode")
-    [[ -n "${var_target:-}" ]] || missing+=("var_target")
-    if ((${#missing[@]} > 0)); then
-      echo "Missing required values: ${missing[*]}" >&2
-      return 1
-    fi
+  runenv=(PANGOLIN_ROOT=)
+  if [[ -n "${var_pangolin_cli_version:-}" ]]; then
+    runenv+=("var_pangolin_cli_version=$var_pangolin_cli_version")
   fi
-
-  mode="$(_resolve_mode)" || return 1
-  target="$(_resolve_target)" || return 1
-  read -r site client <<<"$(components_from_mode "$mode")" || return 1
-  _apply_legacy_aliases
-  # Validate the site native toggles before the dry run or any host change.
-  if [[ "$site" == 1 ]]; then
-    _resolve_site_native || return 1
+  if [[ -n "${var_pangolin_cli_sha256:-}" ]]; then
+    runenv+=("var_pangolin_cli_sha256=$var_pangolin_cli_sha256")
   fi
+  pct exec "$target" -- env "${runenv[@]}" \
+    bash /root/.pangolin-addon/payload.sh /root/.pangolin-addon || rc=$?
+  return "$rc"
+}
 
-  if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
-    _validate_plan "$site" "$client" "$reconfigure" || return 1
-    _print_dry_run "$mode" "$target" "$site" "$client" "$reconfigure"
-    return 0
+# Print the result of every target after the loop.
+_print_run_summary() {
+  local i
+  printf '\nPangolin addon summary\n'
+  for ((i = 0; i < ${#TARGETS[@]}; i++)); do
+    printf '  %s: %s\n' "${TARGETS[i]}" "${TARGET_STATUS[i]:-failed}"
+  done
+}
+
+# Install one target from the shared selections. Returns non-zero for that
+# target only; the caller continues with the rest. Credentials for the target
+# come from the per-target arrays, except in interactive mode where the prompts
+# fill them for this target.
+_install_target() {
+  local target="$1" index="$2" site="$3" client="$4" shared_reconfigure="$5"
+  local reconfigure="${TARGET_RECONFIGURE[index]:-$shared_reconfigure}"
+  local site_answers=0 need_tun=0 payload_rc=0 name="" answers=""
+
+  if _is_noninteractive; then
+    _activate_target_credentials "$index"
+  else
+    _reset_target_credentials
+    var_reconfigure="$shared_reconfigure"
   fi
 
   if [[ "$target" != host ]]; then
-    _ensure_lxc_running "$target" || return 1
+    if ! _ensure_lxc_running "$target"; then
+      msg_error "Target $target: the container could not be started."
+      return 1
+    fi
   fi
   _validate_target_os "$target" || return 1
-
-  if ! _ensure_curl; then
-    echo "curl is required to fetch the Pangolin install payload" >&2
-    return 1
-  fi
-  _load_core
-  # Core dev trace would print credential assignments. This addon never traces.
-  set +x
-  # The banner is cosmetic; its header fetch must not add noise to the run.
-  header_info 2>/dev/null || true
-  if ! require_pve_host; then
-    return 232
-  fi
-
-  ANSWERS_DIR="$(mktemp -d)" || return 1
-  chmod 0700 "$ANSWERS_DIR" || {
-    rm -rf "$ANSWERS_DIR"
-    ANSWERS_DIR=""
-    return 1
-  }
-  trap _cleanup_answers EXIT
-
-  if ! fetch_payload "$ANSWERS_DIR/payload.sh"; then
-    msg_error "Failed to fetch the Pangolin install payload from $PANGOLIN_PAYLOAD_URL"
-    return 1
-  fi
-  if ! bash -n "$ANSWERS_DIR/payload.sh"; then
-    msg_error "The fetched Pangolin install payload failed bash -n"
-    return 1
-  fi
-  # shellcheck disable=SC1090,SC1091
-  source "$ANSWERS_DIR/payload.sh"
 
   if ! _is_noninteractive; then
     _prompt_inputs "$target" "$site" "$client" || return 1
     reconfigure="${var_reconfigure:-0}"
     [[ "$reconfigure" == 1 ]] || reconfigure=0
-    # The interactive site checkboxes can change the native modes.
+    TARGET_RECONFIGURE[index]="$reconfigure"
+    # The interactive site checkboxes can change the shared native modes.
     if [[ "$site" == 1 ]]; then
       _resolve_site_native || return 1
     fi
   fi
+
   _validate_plan "$site" "$client" "$reconfigure" || return 1
   _warn_provisioning_risks "$reconfigure" "$site"
 
@@ -1040,13 +1175,20 @@ main() {
     fi
   else
     _apply_lxc_tun "$target" "$need_tun" || return 1
-    _ensure_lxc_runtime "$target" || {
+    if ! _ensure_lxc_runtime "$target"; then
       msg_error "CTID $target does not have a usable bash and curl runtime"
       return 1
-    }
+    fi
   fi
 
-  write_private_file "$ANSWERS_DIR/flags" \
+  answers="$(_new_answers_dir)" || return 1
+  TARGET_ANSWERS+=("$answers")
+  ANSWERS_DIR="$answers"
+  if [[ "$target" != host ]]; then
+    REMOTE_TARGETS+=("$target")
+  fi
+
+  write_private_file "$answers/flags" \
     "$(printf 'SITE=%s\nCLIENT=%s\nRECONFIGURE=%s\nTARGET=%s' \
       "$site" "$client" "$reconfigure" "$target")" || return 1
 
@@ -1060,21 +1202,167 @@ main() {
         msg_error "Invalid site name; expected 1-63 characters with no control characters."
         return 1
       fi
-      build_site_answers "$ANSWERS_DIR" "$var_pangolin_endpoint" \
+      build_site_answers "$answers" "$var_pangolin_endpoint" \
         "$var_site_provisioning_key" "$name" - - \
         "$var_site_native" "$var_site_native_main" \
         "$var_site_interface" "$var_site_interface_main" || return 1
     else
-      build_site_answers "$ANSWERS_DIR" "$var_pangolin_endpoint" - - \
+      build_site_answers "$answers" "$var_pangolin_endpoint" - - \
         "$var_site_id" "$var_site_secret" \
         "$var_site_native" "$var_site_native_main" \
         "$var_site_interface" "$var_site_interface_main" || return 1
     fi
   fi
   if [[ "$client" == 1 ]]; then
-    build_client_answers "$ANSWERS_DIR" "$var_pangolin_endpoint" \
+    build_client_answers "$answers" "$var_pangolin_endpoint" \
       "$var_client_id" "$var_client_secret" || return 1
   fi
+
+  payload_rc=0
+  _run_target_payload "$target" "$answers" || payload_rc=$?
+
+  _apply_verified_tags "$target" "$answers"
+  # The remote copy is no longer needed once the marker is read.
+  _remove_remote_answers "$target"
+  if ((payload_rc != 0)); then
+    msg_error "The Pangolin install failed on $target. Components that were verified stay installed."
+    return 1
+  fi
+
+  if [[ "$VERIFIED_SITE" == 0 && "$VERIFIED_CLIENT" == 0 ]]; then
+    VERIFIED_SITE="$site"
+    VERIFIED_CLIENT="$client"
+  fi
+  _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT"
+  return 0
+}
+
+# Full interactive or unattended flow. Secrets stay in the mode 0700 answers
+# directories and never enter a pct argument value or a log line.
+main() {
+  local mode="" target="" site=0 client=0 reconfigure=0
+  local var_site_native="${var_site_native-0}"
+  local var_site_native_main="${var_site_native_main-0}"
+  local var_site_interface="${var_site_interface-pangolin}"
+  local var_site_interface_main="${var_site_interface_main-pangolin}"
+  local -a missing=()
+  local i total=0 target_out="" failed=0
+
+  ANSWERS_DIR=""
+  REMOTE_TARGET=""
+  WORK_DIR=""
+  TARGETS=()
+  TARGET_ANSWERS=()
+  REMOTE_TARGETS=()
+  TARGET_STATUS=()
+  TARGET_RECONFIGURE=()
+  TARGET_SITE_ID=()
+  TARGET_SITE_SECRET=()
+  TARGET_SITE_PROVISIONING_KEY=()
+  TARGET_SITE_NAME=()
+  TARGET_CLIENT_ID=()
+  TARGET_CLIENT_SECRET=()
+
+  PANGOLIN_DRY_RUN="${PANGOLIN_DRY_RUN:-0}"
+  # A non-1 value must never turn a requested dry run into a live install.
+  case "$PANGOLIN_DRY_RUN" in
+  0 | 1) ;;
+  true) PANGOLIN_DRY_RUN=1 ;;
+  false) PANGOLIN_DRY_RUN=0 ;;
+  *)
+    echo "Invalid PANGOLIN_DRY_RUN: $PANGOLIN_DRY_RUN (expected 0 or 1)" >&2
+    return 1
+    ;;
+  esac
+
+  reconfigure="${var_reconfigure:-0}"
+  if [[ "$reconfigure" != 0 && "$reconfigure" != 1 ]]; then
+    echo "Invalid var_reconfigure: $reconfigure (expected 0 or 1)" >&2
+    return 1
+  fi
+
+  # Dry run must never open whiptail: require the unattended selectors first.
+  if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
+    missing=()
+    [[ -n "${var_mode:-}" ]] || missing+=("var_mode")
+    [[ -n "${var_targets:-}${var_target:-}" ]] || missing+=("var_targets or var_target")
+    if ((${#missing[@]} > 0)); then
+      echo "Missing required values: ${missing[*]}" >&2
+      return 1
+    fi
+  fi
+
+  mode="$(_resolve_mode)" || return 1
+  read -r site client <<<"$(components_from_mode "$mode")" || return 1
+  target_out="$(_resolve_targets)" || return 1
+  mapfile -t TARGETS <<<"$target_out"
+  total=${#TARGETS[@]}
+  if ((total == 0)); then
+    echo "No targets selected (expected host or CTIDs)" >&2
+    return 1
+  fi
+  _apply_legacy_aliases
+  # Validate the site native toggles before the dry run or any host change.
+  if [[ "$site" == 1 ]]; then
+    _resolve_site_native || return 1
+  fi
+
+  # The shared reconfigure flag seeds every target. Unattended credentials are
+  # resolved once per target here, before any host is touched.
+  for ((i = 0; i < total; i++)); do
+    TARGET_RECONFIGURE[i]="$reconfigure"
+  done
+  if _is_noninteractive; then
+    for ((i = 0; i < total; i++)); do
+      _load_target_credentials "${TARGETS[i]}" "$total"
+      _capture_target_credentials "$i"
+    done
+  fi
+
+  if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
+    printf 'Pangolin addon dry run\n'
+    printf 'Selected targets: %s\n' "$total"
+    for ((i = 0; i < total; i++)); do
+      _activate_target_credentials "$i"
+      _validate_plan "$site" "$client" "$reconfigure" || return 1
+      _print_dry_run "$mode" "${TARGETS[i]}" "$site" "$client" "$reconfigure"
+      printf '\n'
+    done
+    return 0
+  fi
+
+  if ! _ensure_curl; then
+    echo "curl is required to fetch the Pangolin install payload" >&2
+    return 1
+  fi
+  _load_core
+  # Core dev trace would print credential assignments. This addon never traces.
+  set +x
+  # The banner is cosmetic; its header fetch must not add noise to the run.
+  header_info 2>/dev/null || true
+  if ! require_pve_host; then
+    return 232
+  fi
+
+  WORK_DIR="$(mktemp -d)" || return 1
+  chmod 0700 "$WORK_DIR" || {
+    rm -rf "$WORK_DIR"
+    WORK_DIR=""
+    return 1
+  }
+  trap _cleanup_answers EXIT
+
+  # One payload copy serves every target.
+  if ! fetch_payload "$WORK_DIR/payload.sh"; then
+    msg_error "Failed to fetch the Pangolin install payload from $PANGOLIN_PAYLOAD_URL"
+    return 1
+  fi
+  if ! bash -n "$WORK_DIR/payload.sh"; then
+    msg_error "The fetched Pangolin install payload failed bash -n"
+    return 1
+  fi
+  # shellcheck disable=SC1090,SC1091
+  source "$WORK_DIR/payload.sh"
 
   if [[ -n "${var_pangolin_cli_version:-}" ]]; then
     export var_pangolin_cli_version
@@ -1083,35 +1371,24 @@ main() {
     export var_pangolin_cli_sha256
   fi
 
-  if [[ "$target" == host ]]; then
-    bash "$ANSWERS_DIR/payload.sh" "$ANSWERS_DIR" || payload_rc=$?
-  else
-    REMOTE_TARGET="$target"
-    if ! push_payload "$target" "$ANSWERS_DIR/payload.sh" "$ANSWERS_DIR"; then
-      msg_error "Failed to push the Pangolin install payload to CTID $target"
-      return 1
+  for ((i = 0; i < total; i++)); do
+    target="${TARGETS[i]}"
+    if _install_target "$target" "$i" "$site" "$client" "$reconfigure"; then
+      TARGET_STATUS[i]="ok ($(_components_label "$VERIFIED_SITE" "$VERIFIED_CLIENT"))"
+      msg_ok "Target $target: succeeded."
+    else
+      TARGET_STATUS[i]="failed"
+      failed=$((failed + 1))
+      if ((i + 1 < total)); then
+        msg_error "Target $target failed; continuing with the remaining targets."
+      else
+        msg_error "Target $target failed."
+      fi
     fi
-    runenv=(PANGOLIN_ROOT=)
-    if [[ -n "${var_pangolin_cli_version:-}" ]]; then
-      runenv+=("var_pangolin_cli_version=$var_pangolin_cli_version")
-    fi
-    if [[ -n "${var_pangolin_cli_sha256:-}" ]]; then
-      runenv+=("var_pangolin_cli_sha256=$var_pangolin_cli_sha256")
-    fi
-    pct exec "$target" -- env "${runenv[@]}" \
-      bash /root/.pangolin-addon/payload.sh /root/.pangolin-addon || payload_rc=$?
-  fi
+  done
 
-  _apply_verified_tags "$target" "$ANSWERS_DIR"
-  if ((payload_rc != 0)); then
-    msg_error "The Pangolin install failed. Components that were verified stay installed."
-    return "$payload_rc"
-  fi
-  if [[ "$VERIFIED_SITE" == 0 && "$VERIFIED_CLIENT" == 0 ]]; then
-    VERIFIED_SITE="$site"
-    VERIFIED_CLIENT="$client"
-  fi
-  _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT"
+  _print_run_summary
+  ((failed == 0)) || return 1
   return 0
 }
 
