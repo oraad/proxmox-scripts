@@ -486,6 +486,23 @@ install_site_systemd() {
   fi
 }
 
+# Install the client service with the verified CLI, then wait for it to become
+# active. Returns 1 without printing success when the install or wait fails.
+# The CLI takes credentials on its command line because it has no config-file
+# option; that install-time argv exposure is a known upstream limitation.
+install_client_systemd() {
+  local id="$1" secret="$2" endpoint="$3"
+  if ! "$PANGOLIN_BIN" service install client \
+    --id "$id" --secret "$secret" --endpoint "$endpoint"; then
+    echo "Failed to install the pangolin-client service" >&2
+    return 1
+  fi
+  if ! wait_service_active systemd pangolin-client 30 1; then
+    echo "The pangolin-client service did not become active" >&2
+    return 1
+  fi
+}
+
 # The full addon entry point is added in Task 10.
 payload_main() {
   echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2

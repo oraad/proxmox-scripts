@@ -325,3 +325,68 @@ if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FA
 if [[ -n "$old_fake_inactive" ]]; then export FAKE_INACTIVE="$old_fake_inactive"; else unset FAKE_INACTIVE; fi
 
 echo "Task 5 tests passed"
+
+# Task 6: systemd client install.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin"
+cat >"$tmpd/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$FAKE_LOG"
+if [[ "$1" == "is-active" && "${FAKE_INACTIVE:-0}" == "1" ]]; then exit 3; fi
+exit 0
+EOF
+cat >"$tmpd/bin/pangolin" <<'EOF'
+#!/usr/bin/env bash
+echo "pangolin $*" >>"$FAKE_LOG"
+EOF
+chmod 755 "$tmpd/bin/systemctl" "$tmpd/bin/pangolin"
+
+old_path="$PATH"
+old_pangolin_bin="$PANGOLIN_BIN"
+old_fake_log="${FAKE_LOG:-}"
+old_fake_inactive="${FAKE_INACTIVE:-}"
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_BIN="$tmpd/bin/pangolin"
+
+client_stdout="$(install_client_systemd cid csecret "https://p.example")" ||
+  fail "client install should succeed"
+[[ -z "$client_stdout" ]] || fail "client install should stay quiet on success"
+grep -q "service install client --id cid --secret csecret --endpoint https://p.example" \
+  "$FAKE_LOG" || fail "client install args"
+grep -q "systemctl is-active.*pangolin-client" "$FAKE_LOG" || fail "client active check"
+
+# A client install that never activates must fail and must not report success.
+client_rc=0
+client_stdout="$(
+  wait_service_active() { return 1; }
+  install_client_systemd cid csecret "https://p.example" 2>/dev/null
+)" || client_rc=$?
+[[ "$client_rc" -ne 0 ]] || fail "inactive client install should fail"
+[[ -z "$client_stdout" ]] || fail "inactive client install should not report success"
+case "$client_stdout" in
+*"csecret"*) fail "client install must not print the secret" ;;
+esac
+
+# A failing CLI install must fail without waiting for the service.
+cat >"$tmpd/bin/pangolin-fail" <<'EOF'
+#!/usr/bin/env bash
+echo "pangolin $*" >>"$FAKE_LOG"
+exit 1
+EOF
+chmod 755 "$tmpd/bin/pangolin-fail"
+client_rc=0
+client_stdout="$(
+  export PANGOLIN_BIN="$tmpd/bin/pangolin-fail"
+  install_client_systemd cid csecret "https://p.example" 2>/dev/null
+)" || client_rc=$?
+[[ "$client_rc" -ne 0 ]] || fail "failed client CLI install should fail"
+[[ -z "$client_stdout" ]] || fail "failed client CLI install should not report success"
+
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+if [[ -n "$old_fake_inactive" ]]; then export FAKE_INACTIVE="$old_fake_inactive"; else unset FAKE_INACTIVE; fi
+
+echo "Task 6 tests passed"
