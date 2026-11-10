@@ -1024,8 +1024,8 @@ push_payload() {
   fi
   for file in "$answers"/*; do
     [[ -f "$file" ]] || continue
-    [[ "$file" == "$payload" ]] && continue
     base="$(basename "$file")"
+    [[ "$base" == payload.sh ]] && continue
     if ! pct push "$ctid" "$file" "$remote/$base" --perms 600; then
       pct push "$ctid" "$file" "$remote/$base" || return 1
       pct exec "$ctid" -- chmod 600 "$remote/$base" || return 1

@@ -450,7 +450,8 @@ _prepare_lxc() {
 # the container's own package manager before the payload is pushed.
 _ensure_lxc_runtime() {
   local ctid="$1"
-  if pct exec "$ctid" -- sh -c 'command -v bash >/dev/null 2>&1'; then
+  if pct exec "$ctid" -- sh -c \
+    'command -v bash >/dev/null 2>&1 && command -v curl >/dev/null 2>&1'; then
     return 0
   fi
   if pct exec "$ctid" -- sh -c 'command -v apk >/dev/null 2>&1'; then
@@ -644,7 +645,7 @@ main() {
   if [[ "$target" != host ]]; then
     _prepare_lxc "$target" "$client" || return 1
     _ensure_lxc_runtime "$target" || {
-      msg_error "CTID $target does not have a usable bash runtime"
+      msg_error "CTID $target does not have a usable bash and curl runtime"
       return 1
     }
   fi
