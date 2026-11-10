@@ -1067,6 +1067,7 @@ _install_site_component() {
     write_private_file "$config" "$content" || return 1
   elif [[ -f "$config" ]] &&
     { site_config_has_credentials "$config" || grep -q '"provisioningKey"[[:space:]]*:' "$config"; }; then
+    chmod 0600 "$config" || return 1
     echo "Reusing the existing site configuration at $config."
   elif [[ -n "$LEGACY_NEWT_ID" && -n "$LEGACY_NEWT_SECRET" && -n "$LEGACY_ENDPOINT" ]]; then
     install -d -m 0755 "$(dirname "$config")" || return 1

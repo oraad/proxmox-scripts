@@ -251,6 +251,7 @@ mkdir -p "$tmpd4/answers" "$tmpd4/root/etc/pangolin"
 printf 'SITE=1\nCLIENT=0\nRECONFIGURE=0\nTARGET=host\n' >"$tmpd4/answers/flags"
 write_private_file "$tmpd4/root/etc/pangolin/site.json" \
   "$(site_config_static https://p.example old-id old-secret)"
+chmod 644 "$tmpd4/root/etc/pangolin/site.json"
 write_private_file "$tmpd4/answers/site.json" \
   "$(site_config_static https://p.example new-id new-secret)"
 old_pangolin_root="${PANGOLIN_ROOT:-}"
@@ -268,6 +269,8 @@ if ! (
     { echo "reuse should succeed" >&2; exit 1; }
   grep -q '"id":"old-id"' "$tmpd4/root/etc/pangolin/site.json" ||
     { echo "existing site config must be reused" >&2; exit 1; }
+  [[ "$(stat -c '%a' "$tmpd4/root/etc/pangolin/site.json")" == "600" ]] ||
+    { echo "reused site config must be private" >&2; exit 1; }
 ); then
   exit 1
 fi
