@@ -399,6 +399,14 @@ for c in rc-update rc-service supervise-daemon pangolin; do
   printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
   chmod 755 "$tmpd/bin/$c"
 done
+# Record the exported CONFIG_FILE and the argv of every wrapper exec.
+cat >"$tmpd/root/usr/local/bin/pangolin" <<'EOF'
+#!/usr/bin/env bash
+printf 'argv=%s\n' "$*" >>"$FAKE_LOG"
+printf 'CONFIG_FILE=%s\n' "${CONFIG_FILE:-}" >>"$FAKE_LOG"
+printf 'PANGOLIN_CLIENT_SECRET=%s\n' "${PANGOLIN_CLIENT_SECRET:-}" >>"$FAKE_LOG"
+EOF
+chmod 755 "$tmpd/root/usr/local/bin/pangolin"
 
 old_path="$PATH"
 old_pangolin_root="$PANGOLIN_ROOT"
@@ -427,6 +435,10 @@ grep -q 'exec .*pangolin.* up site' "$site_wrapper" || fail "site wrapper exec"
 grep -q 'rc-update add pangolin-site default' "$FAKE_LOG" || fail "site enable"
 grep -q 'rc-service pangolin-site start' "$FAKE_LOG" || fail "site start"
 grep -q 'rc-service pangolin-site status' "$FAKE_LOG" || fail "site status check"
+# Run the wrapper: CONFIG_FILE must reach the CLI exported and intact.
+"$site_wrapper" || fail "site wrapper should run"
+grep -q "^CONFIG_FILE=$cfg$" "$FAKE_LOG" || fail "site wrapper must export CONFIG_FILE"
+grep -q '^argv=up site$' "$FAKE_LOG" || fail "site wrapper argv"
 
 client_unit="$tmpd/root/etc/init.d/pangolin-client"
 client_wrapper="$tmpd/root/usr/local/bin/pangolin-client-start"
@@ -437,15 +449,30 @@ grep -q 'respawn_max=0' "$client_unit" || fail "client respawn"
 grep -q "command=\"$client_wrapper\"" "$client_unit" || fail "client unit command"
 [[ "$(stat -c '%a' "$client_env")" == "600" ]] || fail "client env mode"
 [[ "$(stat -c '%a' "$client_wrapper")" == "700" ]] || fail "client wrapper mode"
-grep -q '^PANGOLIN_CLIENT_ID=cid$' "$client_env" || fail "client id env"
-grep -q '^PANGOLIN_CLIENT_SECRET=csecret$' "$client_env" || fail "client secret env"
-grep -q '^PANGOLIN_ENDPOINT=https://p.example$' "$client_env" || fail "client endpoint env"
+grep -q "^PANGOLIN_CLIENT_ID='cid'$" "$client_env" || fail "client id env"
+grep -q "^PANGOLIN_CLIENT_SECRET='csecret'$" "$client_env" || fail "client secret env"
+grep -q "^PANGOLIN_ENDPOINT='https://p.example'$" "$client_env" || fail "client endpoint env"
 grep -q 'rc-update add pangolin-client default' "$FAKE_LOG" || fail "client enable"
 grep -q 'rc-service pangolin-client start' "$FAKE_LOG" || fail "client start"
 grep -q 'rc-service pangolin-client status' "$FAKE_LOG" || fail "client status check"
 if grep -q 'csecret' "$client_unit" "$client_wrapper"; then
   fail "client unit and wrapper must not contain the secret"
 fi
+# Run the wrapper: the sourced env must reach the CLI, but not through argv.
+"$client_wrapper" || fail "client wrapper should run"
+grep -q '^PANGOLIN_CLIENT_SECRET=csecret$' "$FAKE_LOG" ||
+  fail "client wrapper must export PANGOLIN_CLIENT_SECRET"
+grep -q '^argv=up client --attach$' "$FAKE_LOG" || fail "client wrapper argv"
+if grep -q '^argv=.*csecret' "$FAKE_LOG"; then
+  fail "client wrapper must not pass the secret in argv"
+fi
+
+# Shell metacharacters in credentials must reach the CLI verbatim, not run.
+hostile="s3cr\$et \`id\` 'q' ; \"d\""
+write_client_openrc hid "$hostile" "https://p.example"
+"$client_wrapper" || fail "client wrapper with hostile secret should run"
+grep -qF "PANGOLIN_CLIENT_SECRET=$hostile" "$FAKE_LOG" ||
+  fail "client env must preserve shell metacharacters verbatim"
 
 # Without supervise-daemon the unit cannot restart, so writing must refuse.
 mkdir -p "$tmpd/no-supervise"

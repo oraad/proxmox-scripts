@@ -511,12 +511,17 @@ _require_supervise_daemon() {
   fi
 }
 
+# Quote a value as a single-quoted POSIX shell word, escaping embedded quotes.
+_shell_single_quote() {
+  printf "'%s'" "${1//\'/\'\\\'\'}"
+}
+
 # Write an OpenRC unit that runs a wrapper under supervise-daemon.
 _write_openrc_unit() {
   local name="$1" description="$2" command_path="$3" log_path="$4" unit
   unit="$(p "/etc/init.d/$name")"
   install -d -m 0755 "$(dirname "$unit")" || return 1
-  cat >"$unit" <<EOF
+  if ! cat >"$unit" <<EOF
 #!/sbin/openrc-run
 name="$name"
 description="$description"
@@ -529,6 +534,10 @@ output_log="$log_path"
 error_log="$log_path"
 depend() { need net; after firewall; }
 EOF
+  then
+    echo "Failed to write $unit" >&2
+    return 1
+  fi
   chmod 0755 "$unit"
 }
 
@@ -541,17 +550,22 @@ write_site_openrc() {
   log_path="$(p /var/log/pangolin-site.log)"
   install -d -m 0755 "$(dirname "$wrapper")" "$(dirname "$log_path")" || return 1
   install -m 0700 /dev/null "$wrapper" || return 1
-  cat >"$wrapper" <<EOF
+  if ! cat >"$wrapper" <<EOF
 #!/bin/sh
 CONFIG_FILE=$config_path
 export CONFIG_FILE
 exec "$PANGOLIN_BIN" up site
 EOF
+  then
+    echo "Failed to write $wrapper" >&2
+    return 1
+  fi
   _write_openrc_unit pangolin-site "Pangolin Site (CLI)" "$wrapper" "$log_path"
 }
 
 # Write the client env file, wrapper, and OpenRC unit. The secret stays in the
-# mode 0600 env file; the wrapper only sources it.
+# mode 0600 env file; the wrapper only sources it. Values are single-quoted so
+# the sourced file cannot split or execute shell metacharacters.
 write_client_openrc() {
   local id="$1" secret="$2" endpoint="$3" env_file wrapper log_path
   _require_supervise_daemon || return 1
@@ -562,18 +576,26 @@ write_client_openrc() {
     return 1
   install -m 0600 /dev/null "$env_file" || return 1
   {
-    printf 'PANGOLIN_CLIENT_ID=%s\n' "$id"
-    printf 'PANGOLIN_CLIENT_SECRET=%s\n' "$secret"
-    printf 'PANGOLIN_ENDPOINT=%s\n' "$endpoint"
+    printf 'PANGOLIN_CLIENT_ID='
+    _shell_single_quote "$id"
+    printf '\nPANGOLIN_CLIENT_SECRET='
+    _shell_single_quote "$secret"
+    printf '\nPANGOLIN_ENDPOINT='
+    _shell_single_quote "$endpoint"
+    printf '\n'
   } >"$env_file" || return 1
   install -m 0700 /dev/null "$wrapper" || return 1
-  cat >"$wrapper" <<EOF
+  if ! cat >"$wrapper" <<EOF
 #!/bin/sh
 set -a
-. $env_file
+. "$env_file"
 set +a
 exec "$PANGOLIN_BIN" up client --attach
 EOF
+  then
+    echo "Failed to write $wrapper" >&2
+    return 1
+  fi
   _write_openrc_unit pangolin-client "Pangolin Client (CLI)" "$wrapper" "$log_path"
 }
 
