@@ -54,7 +54,7 @@
       "type": "info"
     },
     {
-      "text": "Unattended: `var_mode=site var_targets=\"host 101\" var_pangolin_endpoint=URL var_site_id_101=ID var_site_secret_101=SECRET` with tools/addon/add-pangolin.sh. Mode, endpoint, native toggles, and var_reconfigure are shared; credentials are per target (suffix `host` or the CTID). One target may still use `var_target` with the unsuffixed credentials. A failed target does not stop the others; the run exits non-zero if any failed. Update: re-run the script.",
+      "text": "Unattended: `var_mode=site var_targets=\"host 101\" var_pangolin_endpoint=URL var_site_id_host=ID var_site_secret_host=SECRET var_site_id_101=ID var_site_secret_101=SECRET` with tools/addon/add-pangolin.sh. Mode, endpoint, native toggles, and var_reconfigure are shared; credentials are per target (suffix `host` or the CTID). One target may still use `var_target` with the unsuffixed credentials. A failed target does not stop the others; the run exits non-zero if any failed. Update: re-run the script.",
       "type": "info"
     }
   ]

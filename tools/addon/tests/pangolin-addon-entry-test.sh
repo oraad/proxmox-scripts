@@ -1121,6 +1121,7 @@ echo "pct $*" >>"$FAKE_LOG"
 ctid="$2"
 case "$1" in
 config) printf 'tags: old;pangolin-cli\n' ;;
+list) printf 'VMID Status Lock Name\n101 running c1\n102 stopped c2\n' ;;
 set) exit 0 ;;
 status) printf 'status: running\n' ;;
 start | shutdown) exit 0 ;;
@@ -1147,6 +1148,25 @@ exec)
 esac
 EOF
 chmod 755 "$loop/bin/pct"
+cat >"$loop/bin/whiptail" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FAKE_WHIPTAIL_LOG"
+case "$*" in
+*"Targets (space selects"*) printf '%s' "${FAKE_TARGETS_OUT:-}" >&2 ;;
+*"Site networking:"*) printf '%s' "${FAKE_NATIVE_OUT:-}" >&2 ;;
+*"Site credentials:"*) printf 'static' >&2 ;;
+*"Existing site"*) printf 'replace' >&2 ;;
+*"Select components"*) printf 'client' >&2 ;;
+*"Pangolin endpoint"*) printf '%s' "${FAKE_ENDPOINT_OUT:-https://p.example}" >&2 ;;
+*"Site ID"*) printf 'id' >&2 ;;
+*"Site secret"*) printf 'sec' >&2 ;;
+*"Site name"*) printf 'pve' >&2 ;;
+*"Machine client ID"*) printf 'cid' >&2 ;;
+*"Machine client secret"*) printf 'csec' >&2 ;;
+*) exit 1 ;;
+esac
+EOF
+chmod 755 "$loop/bin/whiptail"
 cat >"$loop/payload.sh" <<EOF
 #!/usr/bin/env bash
 # Sourced by main, executed per target.
@@ -1159,9 +1179,72 @@ printf '%s\n' "\$target" >>"$loop/ran"
 if grep -qx "\$target" "$loop/fail-targets" 2>/dev/null; then
   exit 1
 fi
+if grep -qx "\$target" "$loop/partial-targets" 2>/dev/null; then
+  printf 'site\n' >"\$answers/verified"
+  exit 1
+fi
 printf 'client\n' >"\$answers/verified"
 EOF
 : >"$loop/fail-targets"
+
+# Interactive target checklist: rows come from pct list, a selection parses to
+# CTIDs, and an empty selection fails.
+: >"$loop/wlog"
+targets_out="$(
+  unset var_mode var_unattended var_targets var_target
+  export PATH="$loop/bin:$PATH" FAKE_WHIPTAIL_LOG="$loop/wlog"
+  export FAKE_TARGETS_OUT='"host" "101"'
+  _resolve_targets
+)" || { echo "interactive checklist selection failed" >&2; exit 1; }
+assert_eq $'host\n101' "$targets_out"
+grep -q 'This Proxmox host' "$loop/wlog" ||
+  { echo "checklist host row missing" >&2; exit 1; }
+grep -q 'LXC c1 (CTID 101)' "$loop/wlog" ||
+  { echo "checklist LXC row missing" >&2; exit 1; }
+empty_rc=0
+empty_out="$(
+  unset var_mode var_unattended var_targets var_target
+  export PATH="$loop/bin:$PATH" FAKE_WHIPTAIL_LOG="$loop/wlog"
+  export FAKE_TARGETS_OUT=''
+  _resolve_targets 2>&1
+)" || empty_rc=$?
+[[ "$empty_rc" -ne 0 ]] || { echo "empty checklist must fail" >&2; exit 1; }
+case "$empty_out" in
+*"Select at least one target"*) ;;
+*) echo "empty checklist message: $empty_out" >&2; exit 1 ;;
+esac
+
+# Interactive shared selections: the endpoint is asked once and the native
+# checklist is asked once, then reused for the next target. Credentials are
+# cleared between targets.
+: >"$loop/wlog"
+if ! (
+  unset var_mode var_unattended var_targets var_target
+  unset var_pangolin_endpoint var_site_id var_site_secret
+  unset var_site_provisioning_key var_site_name var_site_native var_site_native_main
+  export PATH="$loop/bin:$PATH" FAKE_WHIPTAIL_LOG="$loop/wlog"
+  export FAKE_NATIVE_OUT='"client"'
+  NATIVE_PROMPTED=0
+  _target_site_verified() { return 1; }
+  _target_has_legacy_site() { return 1; }
+  _default_site_name() { printf 'pve\n'; }
+  _prompt_inputs host 1 0
+  [[ "$var_pangolin_endpoint" == https://p.example ]] || exit 1
+  [[ "$var_site_id" == id && "$var_site_secret" == sec ]] || exit 1
+  [[ "$var_site_native" == 1 ]] || exit 1
+  _reset_target_credentials
+  [[ -z "$var_site_id" && -z "$var_site_secret" ]] || exit 1
+  export FAKE_NATIVE_OUT=''
+  _prompt_inputs 101 1 0
+  [[ "$var_pangolin_endpoint" == https://p.example ]] || exit 1
+  [[ "$var_site_native" == 1 ]] || exit 1
+  [[ "$(grep -c 'Pangolin endpoint' "$FAKE_WHIPTAIL_LOG")" == 1 ]] || exit 1
+  [[ "$(grep -c 'Site networking:' "$FAKE_WHIPTAIL_LOG")" == 1 ]] || exit 1
+) >"$loop/prompt-out" 2>&1; then
+  echo "interactive shared selections regression:" >&2
+  cat "$loop/prompt-out" >&2
+  exit 1
+fi
 
 # Run main with every host-touching step stubbed except the payload and tags.
 _run_loop() {
@@ -1169,6 +1252,7 @@ _run_loop() {
     export PATH="$loop/bin:$PATH"
     export FAKE_LOG="$loop/log" FAKE_REMOTE_DIR="$loop/remote"
     export FAKE_PAYLOAD="$loop/payload.sh" TMPDIR="$loop/tmp"
+    export FAKE_WHIPTAIL_LOG="$loop/wlog"
     _ensure_curl() { :; }
     _load_core() { :; }
     require_pve_host() { return 0; }
@@ -1177,9 +1261,9 @@ _run_loop() {
     msg_ok() { printf 'OK:%s\n' "$*"; }
     msg_warn() { printf 'WARN:%s\n' "$*" >&2; }
     msg_error() { printf 'ERROR:%s\n' "$*" >&2; }
-    _ensure_lxc_running() { :; }
-    _validate_target_os() { :; }
-    _apply_lxc_tun() { :; }
+    _ensure_lxc_running() { ! grep -qx "$1" "$loop/fail-start" 2>/dev/null; }
+    _validate_target_os() { ! grep -qx "$1" "$loop/fail-os" 2>/dev/null; }
+    _apply_lxc_tun() { ! grep -qx "$1" "$loop/fail-tun" 2>/dev/null; }
     _ensure_lxc_runtime() { :; }
     _ensure_host_tun() { :; }
     fetch_payload() { install -m 0600 "$FAKE_PAYLOAD" "$1"; }
@@ -1300,6 +1384,84 @@ case "$single_out" in
 *) echo "single-target summary missing: $single_out" >&2; exit 1 ;;
 esac
 
+# The first interactive target keeps environment-provided credentials; only
+# later targets are reset. A client target with all values supplied must not
+# prompt for credentials.
+: >"$loop/fail-targets"
+: >"$loop/ran"
+: >"$loop/log"
+: >"$loop/wlog"
+if ! interactive_out="$(
+  var_mode= var_target=host var_pangolin_endpoint=https://p.example \
+    var_client_id=env-id var_client_secret=env-secret _run_loop 2>&1
+)"; then
+  echo "interactive single target failed: $interactive_out" >&2
+  exit 1
+fi
+assert_eq "host" "$(cat "$loop/ran")"
+[[ "$(wc -l <"$loop/wlog")" == 1 ]] || {
+  echo "first target must not prompt for supplied credentials:" >&2
+  cat "$loop/wlog" >&2
+  exit 1
+}
+
+# Failure before the payload: an LXC that cannot start, an unsupported OS, and
+# a failed TUN step each fail that target without running the payload or
+# tagging it, and the later targets still install.
+printf '101\n' >"$loop/fail-start"
+printf '102\n' >"$loop/fail-os"
+printf '103\n' >"$loop/fail-tun"
+: >"$loop/ran"
+: >"$loop/log"
+pre_rc=0
+pre_out="$(
+  var_mode=client var_targets="host 101 102 103" var_pangolin_endpoint=https://p.example \
+    var_client_id_host=id-host var_client_secret_host=sec-host \
+    var_client_id_101=id-101 var_client_secret_101=sec-101 \
+    var_client_id_102=id-102 var_client_secret_102=sec-102 \
+    var_client_id_103=id-103 var_client_secret_103=sec-103 _run_loop 2>&1
+)" || pre_rc=$?
+[[ "$pre_rc" -ne 0 ]] || { echo "pre-payload failures must exit non-zero" >&2; exit 1; }
+assert_eq "host" "$(cat "$loop/ran")"
+for t in 101 102 103; do
+  case "$pre_out" in
+  *"$t: failed"*) ;;
+  *) echo "pre-payload failure missing $t: $pre_out" >&2; exit 1 ;;
+  esac
+done
+if grep -q 'pct set' "$loop/log"; then
+  echo "pre-payload failures must not be tagged" >&2
+  exit 1
+fi
+[[ -z "$(ls -A "$loop/tmp")" ]] || { echo "pre-payload run left local answers" >&2; exit 1; }
+[[ -z "$(ls -A "$loop/remote")" ]] || { echo "pre-payload run left remote answers" >&2; exit 1; }
+rm -f "$loop/fail-start" "$loop/fail-os" "$loop/fail-tun"
+
+# A failed payload can leave a partial verified marker. It must not be tagged.
+printf '101\n' >"$loop/partial-targets"
+: >"$loop/ran"
+: >"$loop/log"
+partial_marker_rc=0
+partial_marker_out="$(
+  var_mode=client var_targets="host 101 102" var_pangolin_endpoint=https://p.example \
+    var_client_id_host=id-host var_client_secret_host=sec-host \
+    var_client_id_101=id-101 var_client_secret_101=sec-101 \
+    var_client_id_102=id-102 var_client_secret_102=sec-102 _run_loop 2>&1
+)" || partial_marker_rc=$?
+[[ "$partial_marker_rc" -ne 0 ]] || { echo "partial marker run must exit non-zero" >&2; exit 1; }
+assert_eq $'host\n101\n102' "$(cat "$loop/ran")"
+case "$partial_marker_out" in
+*"101: failed"*) ;;
+*) echo "partial marker target must fail: $partial_marker_out" >&2; exit 1 ;;
+esac
+if grep -q 'pct set 101' "$loop/log"; then
+  echo "a partial verified marker must not tag the failed target" >&2
+  exit 1
+fi
+grep -q 'pct set 102 -tags' "$loop/log" ||
+  { echo "the next target must still be tagged" >&2; exit 1; }
+: >"$loop/partial-targets"
+
 # Multi-target dry run lists every target and never touches the network.
 : >"$loop/log"
 if ! loop_dry_out="$(
@@ -1339,6 +1501,24 @@ global_dry_out="$(
 case "$global_dry_out" in
 *"Missing required values:"*var_client_id*) ;;
 *) echo "multi-target global fallback message: $global_dry_out" >&2; exit 1 ;;
+esac
+
+# An inherited bash -x must not print credentials. The dry run exits before the
+# install path, so it is the strictest xtrace regression case.
+xtrace_rc=0
+xtrace_err="$(
+  TMPDIR="$loop/tmp" PATH="$loop/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=client var_targets="host,101" var_pangolin_endpoint=https://p.example \
+    var_client_id_host=XT-ID-HOST var_client_secret_host=XT-SECRET-HOST \
+    var_client_id_101=XT-ID-101 var_client_secret_101=XT-SECRET-101 \
+    bash -x "$ROOT/add-pangolin.sh" 2>&1 >/dev/null
+)" || xtrace_rc=$?
+[[ "$xtrace_rc" -eq 0 ]] || { echo "bash -x dry run failed" >&2; exit 1; }
+case "$xtrace_err" in
+*XT-SECRET* | *XT-ID-*)
+  echo "xtrace printed a credential" >&2
+  exit 1
+  ;;
 esac
 
 rm -rf "$loop"

@@ -54,6 +54,8 @@ TARGET_ANSWERS=()
 REMOTE_TARGETS=()
 # Private run directory that holds the shared payload and the answers dirs.
 WORK_DIR=""
+# The site native checklist is a shared selection; it is asked at most once.
+NATIVE_PROMPTED=0
 
 # Load the payload at source time when a local checkout is supplied. Tests use
 # this path so the entry helpers can be exercised without network access or a
@@ -926,7 +928,8 @@ _prompt_inputs() {
     elif _has_site_form; then
       msg_warn "Ignoring new site credentials; the verified site configuration is reused. Set var_reconfigure=1 to replace it."
     fi
-    if [[ "$enrolling" == 1 ]]; then
+    if [[ "$enrolling" == 1 && "${NATIVE_PROMPTED:-0}" != 1 ]]; then
+      NATIVE_PROMPTED=1
       net_state="OFF"
       main_state="OFF"
       [[ "${var_site_native-0}" == 1 ]] && net_state="ON"
@@ -1089,6 +1092,8 @@ _run_target_payload() {
     bash "$WORK_DIR/payload.sh" "$answers" || rc=$?
     return "$rc"
   fi
+  # A stale verified marker from an earlier run must never tag this target.
+  _remove_remote_answers "$target"
   if ! push_payload "$target" "$WORK_DIR/payload.sh" "$answers"; then
     msg_error "Failed to push the Pangolin install payload to CTID $target"
     return 1
@@ -1126,9 +1131,15 @@ _install_target() {
   if _is_noninteractive; then
     _activate_target_credentials "$index"
   else
-    _reset_target_credentials
+    # The first target keeps environment-provided credentials. Later targets
+    # must not inherit the previous target's answers.
+    if ((index > 0)); then
+      _reset_target_credentials
+    fi
     var_reconfigure="$shared_reconfigure"
   fi
+  VERIFIED_SITE=0
+  VERIFIED_CLIENT=0
 
   if [[ "$target" != host ]]; then
     if ! _ensure_lxc_running "$target"; then
@@ -1221,7 +1232,14 @@ _install_target() {
   payload_rc=0
   _run_target_payload "$target" "$answers" || payload_rc=$?
 
-  _apply_verified_tags "$target" "$answers"
+  # Only a successful payload may tag. A failed run can leave a partial marker
+  # behind, and that must not mark the target as installed.
+  if ((payload_rc == 0)); then
+    _apply_verified_tags "$target" "$answers"
+  else
+    VERIFIED_SITE=0
+    VERIFIED_CLIENT=0
+  fi
   # The remote copy is no longer needed once the marker is read.
   _remove_remote_answers "$target"
   if ((payload_rc != 0)); then
@@ -1240,6 +1258,9 @@ _install_target() {
 # Full interactive or unattended flow. Secrets stay in the mode 0700 answers
 # directories and never enter a pct argument value or a log line.
 main() {
+  # An inherited `bash -x` would print every credential assignment below.
+  # Disable the trace before target resolution or credential loading.
+  set +x
   local mode="" target="" site=0 client=0 reconfigure=0
   local var_site_native="${var_site_native-0}"
   local var_site_native_main="${var_site_native_main-0}"
@@ -1251,6 +1272,7 @@ main() {
   ANSWERS_DIR=""
   REMOTE_TARGET=""
   WORK_DIR=""
+  NATIVE_PROMPTED=0
   TARGETS=()
   TARGET_ANSWERS=()
   REMOTE_TARGETS=()
@@ -1336,8 +1358,6 @@ main() {
     return 1
   fi
   _load_core
-  # Core dev trace would print credential assignments. This addon never traces.
-  set +x
   # The banner is cosmetic; its header fetch must not add noise to the run.
   header_info 2>/dev/null || true
   if ! require_pve_host; then
