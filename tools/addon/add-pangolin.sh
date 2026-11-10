@@ -340,6 +340,23 @@ _load_core() {
   _install_fallbacks
 }
 
+# Pangolin addon banner. The community-scripts core header is generic and shows
+# the wrong product art for this addon.
+pangolin_header() {
+  [[ -t 1 ]] && clear 2>/dev/null || true
+  cat <<'EOF'
+  ____                         _ _
+ |  _ \ __ _ _ __   __ _  ___ | (_)_ __
+ | |_) / _` | '_ \ / _` |/ _ \| | | '_ \
+ |  __/ (_| | | | | (_| | (_) | | | | | |
+ |_|   \__,_|_| |_|\__, |\___/|_|_|_| |_|
+                   |___/
+
+   Pangolin Addon (CLI)
+
+EOF
+}
+
 # Any var_mode selects non-interactive mode. var_unattended=1 is an alias, but
 # still requires an explicit var_mode because there is nothing to prompt with.
 _is_noninteractive() {
@@ -1363,8 +1380,8 @@ main() {
   # Core helpers (load_functions/set_std_mode) can re-enable xtrace when
   # DEV_MODE_TRACE is set. Never trace credential activation.
   set +x
-  # The banner is cosmetic; its header fetch must not add noise to the run.
-  header_info 2>/dev/null || true
+  # Pangolin art, not the generic community-scripts header.
+  pangolin_header
   if ! require_pve_host; then
     return 232
   fi

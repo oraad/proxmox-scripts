@@ -192,7 +192,11 @@ tmpd="$(mktemp -d)"
 mkdir -p "$tmpd/bin" "$tmpd/root/usr/local/bin" "$tmpd/root/var/lib/pangolin"
 cat >"$tmpd/pangolin" <<'EOF'
 #!/bin/sh
-[ "$1" = "version" ] && echo 0.21.0
+if [ "$1" = "version" ]; then
+  echo "Pangolin desktop client banner"
+  echo
+  echo "0.21.0"
+fi
 EOF
 chmod 755 "$tmpd/pangolin"
 fake_sha="$(sha256sum "$tmpd/pangolin" | awk '{print $1}')"
@@ -221,7 +225,7 @@ export PANGOLIN_STATE_FILE="$tmpd/root/var/lib/pangolin/cli.json"
 export PANGOLIN_SELINUX_ENFORCE="$tmpd/no-selinux"
 install_cli_binary latest -
 [[ -x "$PANGOLIN_BIN" ]] || fail "binary should install"
-[[ "$("$PANGOLIN_BIN" version)" == "0.21.0" ]] || fail "binary version"
+[[ "$("$PANGOLIN_BIN" version | tail -n1)" == "0.21.0" ]] || fail "binary version"
 cli_state_matches 0.21.0 || fail "state should match"
 [[ "$(stat -c '%a' "$PANGOLIN_STATE_FILE")" == "644" ]] || fail "state file mode"
 grep -q '"version":"0.21.0"' "$PANGOLIN_STATE_FILE" || fail "state version"
@@ -235,7 +239,7 @@ after="$(wc -l <"$tmpd/curl.log")"
 if install_cli_binary 0.20.9 - >/dev/null 2>&1; then fail "version below floor should fail"; fi
 # A pinned version that is not the API's latest needs an explicit digest.
 if install_cli_binary 0.21.1 - >/dev/null 2>&1; then fail "pinned version needs explicit digest"; fi
-[[ "$("$PANGOLIN_BIN" version)" == "0.21.0" ]] || fail "refused install must keep the binary"
+[[ "$("$PANGOLIN_BIN" version | tail -n1)" == "0.21.0" ]] || fail "refused install must keep the binary"
 
 printf 'old' >"$PANGOLIN_BIN"
 if install_cli_binary latest deadbeef >/dev/null 2>&1; then fail "bad digest should fail"; fi
