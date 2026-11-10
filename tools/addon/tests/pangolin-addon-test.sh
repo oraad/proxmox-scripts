@@ -67,3 +67,28 @@ assert_eq "a;b" "$(remove_tag "a;pangolin-cli;b" "pangolin-cli")"
 rm -rf "$tmpd"
 
 echo "Task 2 tests passed"
+
+conf="$(mktemp)"
+TUN_CHANGED=0
+ensure_tun_config "$conf"
+[[ "$TUN_CHANGED" == "1" ]] || fail "empty conf should change"
+grep -q 'lxc.cgroup2.devices.allow: c 10:200 rwm' "$conf" || fail "cgroup line"
+grep -q 'lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file' "$conf" || fail "mount line"
+
+ensure_tun_config "$conf"
+[[ "$TUN_CHANGED" == "0" ]] || fail "second pass should be unchanged"
+[[ "$(grep -c 'c 10:200' "$conf")" == "1" ]] || fail "no duplicate cgroup line"
+[[ "$(grep -c 'lxc.mount.entry: /dev/net/tun' "$conf")" == "1" ]] || fail "no duplicate mount line"
+rm -f "$conf"
+
+assert_eq systemd "$(backend_from_facts 1 0 0)"
+assert_eq openrc "$(backend_from_facts 0 1 1)"
+assert_eq none "$(backend_from_facts 0 1 0)"
+assert_eq none "$(backend_from_facts 0 0 0)"
+
+case "$(service_backend)" in
+systemd | openrc | none) ;;
+*) fail "service_backend returned unexpected value" ;;
+esac
+
+echo "Task 3 tests passed"

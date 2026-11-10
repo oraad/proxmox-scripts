@@ -162,6 +162,60 @@ remove_tag() {
   printf '%s' "$out"
 }
 
+# Append a line to a config file, adding a trailing newline first if needed.
+_tun_append() {
+  local conf="$1" line="$2"
+  if [[ -s "$conf" && -n "$(tail -c 1 "$conf")" ]]; then
+    printf '\n' >>"$conf"
+  fi
+  printf '%s\n' "$line" >>"$conf"
+}
+
+# Add the TUN device cgroup rule and bind mount to an LXC config when missing.
+# Sets TUN_CHANGED to 1 when a line was appended, 0 when nothing changed.
+ensure_tun_config() {
+  local conf="$1" changed=0
+  local cgroup='lxc.cgroup2.devices.allow: c 10:200 rwm'
+  local mount='lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file'
+  if ! grep -qE 'lxc\.cgroup2\.devices\.allow:[[:space:]]*c 10:200 rwm' "$conf"; then
+    _tun_append "$conf" "$cgroup"
+    changed=1
+  fi
+  if ! grep -qE 'lxc\.mount\.entry:[[:space:]]*/dev/net/tun[[:space:]]+dev/net/tun[[:space:]]+none[[:space:]]+bind,create=file' "$conf"; then
+    _tun_append "$conf" "$mount"
+    changed=1
+  fi
+  TUN_CHANGED="$changed"
+  return 0
+}
+
+# Map service manager facts (1/0 each) to the backend name.
+backend_from_facts() {
+  local has_systemd="$1" has_openrc="$2" has_supervise="$3"
+  if [[ "$has_systemd" == 1 ]]; then
+    echo systemd
+  elif [[ "$has_openrc" == 1 && "$has_supervise" == 1 ]]; then
+    echo openrc
+  else
+    echo none
+  fi
+}
+
+# Detect the service manager on the current host.
+service_backend() {
+  local has_systemd=0 has_openrc=0 has_supervise=0
+  if [[ -d /run/systemd/system ]]; then
+    has_systemd=1
+  fi
+  if command -v rc-service >/dev/null 2>&1; then
+    has_openrc=1
+  fi
+  if command -v supervise-daemon >/dev/null 2>&1; then
+    has_supervise=1
+  fi
+  backend_from_facts "$has_systemd" "$has_openrc" "$has_supervise"
+}
+
 # The full addon entry point is added in Task 10.
 payload_main() {
   echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2
