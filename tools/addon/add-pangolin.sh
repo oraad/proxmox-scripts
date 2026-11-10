@@ -36,6 +36,44 @@ if [[ -n "${PANGOLIN_PAYLOAD:-}" && -r "$PANGOLIN_PAYLOAD" ]]; then
   source "$PANGOLIN_PAYLOAD"
 fi
 
+# Succeed when a Linux interface name is 1-15 characters, starts with a letter,
+# and uses only letters, digits, underscore, dash, or dot.
+validate_interface_name() {
+  local name="${1:-}"
+  ((${#name} >= 1 && ${#name} <= 15)) || return 1
+  [[ "$name" =~ ^[A-Za-z][A-Za-z0-9_.-]*$ ]]
+}
+
+# Succeed when a native mode flag is exactly 0 or 1.
+validate_native_flag() {
+  local flag="${1:-}"
+  [[ "$flag" == 0 || "$flag" == 1 ]]
+}
+
+# Succeed when the four optional site native arguments are valid. Interface
+# names only matter for an enabled mode.
+_validate_native_args() {
+  local native="${1-0}" native_main="${2-0}"
+  local interface="${3-pangolin}" interface_main="${4-pangolin}"
+  local rule="1-15 characters, starting with a letter, using letters, digits, _, -, or ."
+  validate_native_flag "$native" || {
+    echo "Invalid native flag: $native (expected 0 or 1)" >&2
+    return 1
+  }
+  validate_native_flag "$native_main" || {
+    echo "Invalid nativeMain flag: $native_main (expected 0 or 1)" >&2
+    return 1
+  }
+  if [[ "$native" == 1 ]] && ! validate_interface_name "$interface"; then
+    echo "Invalid native interface name: $interface (expected $rule)" >&2
+    return 1
+  fi
+  if [[ "$native_main" == 1 ]] && ! validate_interface_name "$interface_main"; then
+    echo "Invalid nativeMain interface name: $interface_main (expected $rule)" >&2
+    return 1
+  fi
+}
+
 # Succeed when the URL is an http(s) endpoint with a non-empty host and no
 # whitespace or control characters.
 validate_endpoint() {
@@ -138,6 +176,13 @@ components_from_mode() {
   esac
 }
 
+# Succeed when the selected components need /dev/net/tun and root or
+# CAP_NET_ADMIN. Client mode needs TUN; site mode only with a native interface.
+tun_required() {
+  local client="${1-0}" native="${2-0}" native_main="${3-0}"
+  [[ "$client" == 1 || "$native" == 1 || "$native_main" == 1 ]]
+}
+
 # Put the shared payload at dest, either by copying the local override or by
 # downloading the latest copy from REPO_RAW. Always leaves a mode 0600 file.
 fetch_payload() {
@@ -151,23 +196,30 @@ fetch_payload() {
   fi
 }
 
-# Write <dir>/site.json for a provisioning key or for static credentials.
-# A dash means "not supplied"; the key wins when both forms are present.
+# Write <dir>/site.json for a provisioning key or for static credentials. The
+# optional trailing native arguments are "native nativeMain interface
+# interfaceMain"; a dash means "not supplied" only for the credential fields.
+# The key wins when both credential forms are present.
 build_site_answers() {
-  local dir="$1" endpoint="$2" key="$3" name="$4" id="$5" secret="$6" config
+  local dir="$1" endpoint="$2" key="$3" name="$4" id="$5" secret="$6"
+  local native="${7-0}" native_main="${8-0}" interface="${9-pangolin}"
+  local interface_main="${10-pangolin}" config
   validate_endpoint "$endpoint" || {
     echo "Invalid Pangolin endpoint: $endpoint" >&2
     return 1
   }
+  _validate_native_args "$native" "$native_main" "$interface" "$interface_main" || return 1
   if [[ "$key" != "-" && -n "$key" ]]; then
     [[ "$name" == "-" ]] && name=""
-    config="$(site_config_provisioning "$endpoint" "$key" "$name")"
+    config="$(site_config_provisioning "$endpoint" "$key" "$name" \
+      "$native" "$native_main" "$interface" "$interface_main")"
   else
     if [[ "$id" == "-" || -z "$id" || "$secret" == "-" || -z "$secret" ]]; then
       echo "Site answers need a provisioning key or an id and secret" >&2
       return 1
     fi
-    config="$(site_config_static "$endpoint" "$id" "$secret")"
+    config="$(site_config_static "$endpoint" "$id" "$secret" \
+      "$native" "$native_main" "$interface" "$interface_main")"
   fi
   install -d -m 0700 "$dir" || return 1
   write_private_file "$dir/site.json" "$config"
@@ -358,6 +410,38 @@ _apply_legacy_aliases() {
   fi
 }
 
+# Validate the site native toggles and resolve the interface names before any
+# side effect. Both modes enabled with the CLI default name move the main tunnel
+# to pangolin-main; any other shared name is ambiguous and fails.
+_resolve_site_native() {
+  local native="${var_site_native-0}" native_main="${var_site_native_main-0}"
+  local interface="${var_site_interface-pangolin}"
+  local interface_main="${var_site_interface_main-pangolin}"
+  _validate_native_args "$native" "$native_main" "$interface" "$interface_main" || return 1
+  if [[ "$native" == 1 && "$native_main" == 1 && "$interface" == "$interface_main" ]]; then
+    if [[ "$interface" != pangolin ]]; then
+      echo "Both site native modes use the interface name $interface; set var_site_interface and var_site_interface_main to distinct names." >&2
+      return 1
+    fi
+    interface_main="pangolin-main"
+    printf 'Note: both native modes use the default interface name; the main tunnel uses pangolin-main.\n' >&2
+  fi
+  var_site_native="$native"
+  var_site_native_main="$native_main"
+  var_site_interface="$interface"
+  var_site_interface_main="$interface_main"
+}
+
+# Succeed when the native toggles can take effect: either no site native mode is
+# enabled, or this run writes a new site configuration. A reused or migrated
+# configuration is never silently left without the requested native keys.
+_native_config_possible() {
+  local site="$1" answers="$2"
+  [[ "$site" == 1 ]] || return 0
+  [[ "$answers" == 1 ]] && return 0
+  ! tun_required 0 "$var_site_native" "$var_site_native_main"
+}
+
 # Print a component list for messages.
 _components_label() {
   local site="$1" client="$2"
@@ -415,10 +499,20 @@ _validate_plan() {
 # Print the plan and exit without network, prompts, or filesystem changes.
 _print_dry_run() {
   local mode="$1" target="$2" site="$3" client="$4" reconfigure="$5"
-  local where="host" prefix=""
+  local where="host" prefix="" site_native=0 site_native_main=0 need_tun=0
+  local native_label="disabled" main_label="disabled"
   if [[ "$target" != host ]]; then
     where="LXC CTID $target"
     prefix="pct exec $target -- "
+  fi
+  if [[ "$site" == 1 ]]; then
+    site_native="${var_site_native-0}"
+    site_native_main="${var_site_native_main-0}"
+    [[ "$site_native" == 1 ]] && native_label="enabled"
+    [[ "$site_native_main" == 1 ]] && main_label="enabled"
+  fi
+  if tun_required "$client" "$site_native" "$site_native_main"; then
+    need_tun=1
   fi
   printf 'Pangolin addon dry run\n'
   printf 'Target: %s\n' "$where"
@@ -441,18 +535,24 @@ _print_dry_run() {
         printf '  - Note: reconfiguring with a provisioning key creates a second server-side site\n'
       fi
     fi
+    printf '  - Site native client tunnels: %s (interface %s)\n' \
+      "$native_label" "${var_site_interface-pangolin}"
+    printf '  - Site native main tunnel: %s (interface %s)\n' \
+      "$main_label" "${var_site_interface_main-pangolin}"
     printf '  - Install the pangolin-site service and verify provisioning\n'
     printf '  - Check status with: %spangolin service status site\n' "$prefix"
   fi
   if [[ "$client" == 1 ]]; then
+    printf '  - Install the pangolin-client service with the provided credentials\n'
+    printf '  - Check status with: %spangolin service status client\n' "$prefix"
+  fi
+  if [[ "$need_tun" == 1 ]]; then
     if [[ "$target" == host ]]; then
-      printf '  - Ensure /dev/net/tun exists on the host; load the tun module when missing\n'
+      printf '  - Ensure /dev/net/tun exists on the host; native site interfaces and client mode need it\n'
     else
       printf '  - Apply TUN passthrough and restart CTID %s gracefully when the config changes\n' \
         "$target"
     fi
-    printf '  - Install the pangolin-client service with the provided credentials\n'
-    printf '  - Check status with: %spangolin service status client\n' "$prefix"
   fi
   if [[ "$target" != host ]]; then
     printf '  - Update the LXC tags for the selected components\n'
@@ -585,9 +685,12 @@ _ensure_lxc_runtime() {
 }
 
 # Collect interactive credentials. Existing verified site configs are offered
-# as reuse or replace; client credentials are always prompted when missing.
+# as reuse or replace; client credentials are always prompted when missing. A
+# site enrollment ends with the native interface toggles; names are never
+# prompted.
 _prompt_inputs() {
   local target="$1" site="$2" client="$3" choice default_name
+  local net_choice net_state main_state enrolling=0
   if [[ "$site" == 1 ]]; then
     if _target_site_verified "$target" && [[ "${var_reconfigure:-0}" != 1 ]]; then
       choice="$(whiptail --title "Existing site" --menu \
@@ -600,6 +703,7 @@ _prompt_inputs() {
     fi
     if [[ "${var_reconfigure:-0}" == 1 ]] || ! _target_site_verified "$target"; then
       if ! _target_has_legacy_site "$target" || [[ "${var_reconfigure:-0}" == 1 ]]; then
+        enrolling=1
         if [[ -z "${var_pangolin_endpoint:-}" ]]; then
           var_pangolin_endpoint="$(whiptail --title "Pangolin Addon" \
             --inputbox "Pangolin endpoint" 10 64 "https://app.pangolin.net" 3>&1 1>&2 2>&3)" ||
@@ -633,6 +737,25 @@ _prompt_inputs() {
       fi
     elif _has_site_form; then
       msg_warn "Ignoring new site credentials; the verified site configuration is reused. Set var_reconfigure=1 to replace it."
+    fi
+    if [[ "$enrolling" == 1 ]]; then
+      net_state="OFF"
+      main_state="OFF"
+      [[ "${var_site_native-0}" == 1 ]] && net_state="ON"
+      [[ "${var_site_native_main-0}" == 1 ]] && main_state="ON"
+      net_choice="$(whiptail --title "Site networking" --checklist \
+        "Site networking:" 15 74 2 \
+        main "native main tunnel (kernel interface, needs TUN)" "$main_state" \
+        client "native client tunnels (kernel interface, needs TUN)" "$net_state" \
+        3>&1 1>&2 2>&3)" || return 1
+      var_site_native=0
+      var_site_native_main=0
+      case "$net_choice" in
+      *'"client"'*) var_site_native=1 ;;
+      esac
+      case "$net_choice" in
+      *'"main"'*) var_site_native_main=1 ;;
+      esac
     fi
   fi
   if [[ "$client" == 1 ]]; then
@@ -743,7 +866,11 @@ _apply_verified_tags() {
 # directory and never enter a pct argument value or a log line.
 main() {
   local mode="" target="" site=0 client=0 reconfigure=0 site_answers=0
-  local payload_rc=0 name=""
+  local payload_rc=0 name="" need_tun=0
+  local var_site_native="${var_site_native-0}"
+  local var_site_native_main="${var_site_native_main-0}"
+  local var_site_interface="${var_site_interface-pangolin}"
+  local var_site_interface_main="${var_site_interface_main-pangolin}"
   local -a runenv=() missing=()
 
   ANSWERS_DIR=""
@@ -781,6 +908,10 @@ main() {
   target="$(_resolve_target)" || return 1
   read -r site client <<<"$(components_from_mode "$mode")" || return 1
   _apply_legacy_aliases
+  # Validate the site native toggles before the dry run or any host change.
+  if [[ "$site" == 1 ]]; then
+    _resolve_site_native || return 1
+  fi
 
   if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
     _validate_plan "$site" "$client" "$reconfigure" || return 1
@@ -792,9 +923,6 @@ main() {
     _ensure_lxc_running "$target" || return 1
   fi
   _validate_target_os "$target" || return 1
-  if [[ "$target" == host && "$client" == 1 ]]; then
-    _ensure_host_tun || return 1
-  fi
 
   if ! _ensure_curl; then
     echo "curl is required to fetch the Pangolin install payload" >&2
@@ -828,23 +956,45 @@ main() {
   # shellcheck disable=SC1090,SC1091
   source "$ANSWERS_DIR/payload.sh"
 
-  if [[ "$target" != host ]]; then
-    _apply_lxc_tun "$target" "$client" || return 1
-    _ensure_lxc_runtime "$target" || {
-      msg_error "CTID $target does not have a usable bash and curl runtime"
-      return 1
-    }
-  fi
   if ! _is_noninteractive; then
     _prompt_inputs "$target" "$site" "$client" || return 1
     reconfigure="${var_reconfigure:-0}"
     [[ "$reconfigure" == 1 ]] || reconfigure=0
+    # The interactive site checkboxes can change the native modes.
+    if [[ "$site" == 1 ]]; then
+      _resolve_site_native || return 1
+    fi
   fi
   _validate_plan "$site" "$client" "$reconfigure" || return 1
   _warn_provisioning_risks "$reconfigure" "$site"
 
   if [[ "$site" == 1 ]]; then
     site_answers="$(_resolve_site_answers "$target" "$reconfigure")" || return 1
+    if ! _native_config_possible "$site" "$site_answers"; then
+      msg_error "Native site interfaces need a new site configuration; set var_reconfigure=1 or provide site credentials."
+      return 1
+    fi
+  fi
+
+  # The final components and native toggles decide whether TUN is needed. The
+  # interactive checkboxes and the reuse decision run first, so this stays after
+  # input resolution and never touches a host that will not be changed.
+  if [[ "$client" == 1 ]]; then
+    need_tun=1
+  fi
+  if [[ "$site" == 1 ]] && tun_required 0 "$var_site_native" "$var_site_native_main"; then
+    need_tun=1
+  fi
+  if [[ "$target" == host ]]; then
+    if [[ "$need_tun" == 1 ]]; then
+      _ensure_host_tun || return 1
+    fi
+  else
+    _apply_lxc_tun "$target" "$need_tun" || return 1
+    _ensure_lxc_runtime "$target" || {
+      msg_error "CTID $target does not have a usable bash and curl runtime"
+      return 1
+    }
   fi
 
   write_private_file "$ANSWERS_DIR/flags" \
@@ -862,10 +1012,14 @@ main() {
         return 1
       fi
       build_site_answers "$ANSWERS_DIR" "$var_pangolin_endpoint" \
-        "$var_site_provisioning_key" "$name" - - || return 1
+        "$var_site_provisioning_key" "$name" - - \
+        "$var_site_native" "$var_site_native_main" \
+        "$var_site_interface" "$var_site_interface_main" || return 1
     else
       build_site_answers "$ANSWERS_DIR" "$var_pangolin_endpoint" - - \
-        "$var_site_id" "$var_site_secret" || return 1
+        "$var_site_id" "$var_site_secret" \
+        "$var_site_native" "$var_site_native_main" \
+        "$var_site_interface" "$var_site_interface_main" || return 1
     fi
   fi
   if [[ "$client" == 1 ]]; then

@@ -14,6 +14,30 @@ if validate_endpoint "pangolin.example.com" >/dev/null 2>&1; then echo "missing 
 validate_site_name "pve-1" || { echo "site name" >&2; exit 1; }
 if validate_site_name "$(printf 'a\nb')" >/dev/null 2>&1; then echo "newline should fail" >&2; exit 1; fi
 
+# Site native toggles: booleans are 0/1 only and interface names are validated
+# before any side effect.
+validate_native_flag 0 || { echo "native flag 0" >&2; exit 1; }
+validate_native_flag 1 || { echo "native flag 1" >&2; exit 1; }
+for flag in true yes ""; do
+  if validate_native_flag "$flag" >/dev/null 2>&1; then
+    echo "native flag [$flag] should fail" >&2
+    exit 1
+  fi
+done
+for name in "bad name" "bad/name" "1bad" "abcdefghijklmnop"; do
+  if validate_interface_name "$name" >/dev/null 2>&1; then
+    echo "interface [$name] should fail" >&2
+    exit 1
+  fi
+done
+validate_interface_name pangolin || { echo "default interface should pass" >&2; exit 1; }
+validate_interface_name "wg0.1-test_2" || { echo "dotted interface should pass" >&2; exit 1; }
+validate_interface_name "abcdefghijklmno" || { echo "15-character interface should pass" >&2; exit 1; }
+if _validate_native_args "" 0 pangolin pangolin >/dev/null 2>&1; then
+  echo "empty native flag should fail" >&2
+  exit 1
+fi
+
 os_supported debian 12 || { echo "debian 12 should pass" >&2; exit 1; }
 os_supported debian 13 || { echo "debian 13 should pass" >&2; exit 1; }
 os_supported debian 12.5 || { echo "debian 12.5 should pass" >&2; exit 1; }
@@ -67,6 +91,13 @@ if _ensure_host_tun "$tun_tmpd/missing-tun" >/dev/null 2>&1; then
 fi
 rm -rf "$tun_tmpd"
 
+# TUN is needed by client mode and by either site native mode, never by a plain
+# userspace site tunnel.
+tun_required 1 0 0 || { echo "client mode needs TUN" >&2; exit 1; }
+tun_required 0 1 0 || { echo "native site mode needs TUN" >&2; exit 1; }
+tun_required 0 0 1 || { echo "native main site mode needs TUN" >&2; exit 1; }
+if tun_required 0 0 0; then echo "plain site must not need TUN" >&2; exit 1; fi
+
 # Provisioning-key warnings cover the paid tier and reconfigure second site.
 if ! (
   msg_warn() { printf 'WARN:%s\n' "$*" >&2; }
@@ -103,6 +134,93 @@ assert d["provisioningKey"] == "spk-1.key", d
 PY
 [[ "$(stat -c '%a' "$dir")" == "700" ]] || { echo "answers dir mode" >&2; exit 1; }
 [[ "$(stat -c '%a' "$dir/site.json")" == "600" ]] || { echo "site config mode" >&2; exit 1; }
+
+# Task 12: build_site_answers passes the native toggles through to the config.
+build_site_answers "$dir" "https://p.example" - - id secret 1 1 pangolin pangolin-main ||
+  { echo "native site answers" >&2; exit 1; }
+python3 - "$dir/site.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["native"] is True and d["interface"] == "pangolin", d
+assert d["nativeMain"] is True and d["interfaceMain"] == "pangolin-main", d
+PY
+[[ "$(stat -c '%a' "$dir/site.json")" == "600" ]] || { echo "native config mode" >&2; exit 1; }
+
+# Invalid native values fail before the answers file is written.
+bad_dir="$dir/bad"
+if build_site_answers "$bad_dir" "https://p.example" - - id secret yes 0 pangolin pangolin \
+  >/dev/null 2>&1; then
+  echo "invalid native flag should fail" >&2
+  exit 1
+fi
+if build_site_answers "$bad_dir" "https://p.example" - - id secret 1 0 "bad name" pangolin \
+  >/dev/null 2>&1; then
+  echo "invalid native interface should fail" >&2
+  exit 1
+fi
+[[ ! -e "$bad_dir/site.json" ]] || { echo "failed validation must not write answers" >&2; exit 1; }
+
+# Both enabled with the CLI default name resolves the main tunnel to
+# pangolin-main and prints a notice; any other shared name fails.
+if ! native_notice="$(
+  var_site_native=1 var_site_native_main=1
+  var_site_interface=pangolin var_site_interface_main=pangolin
+  _resolve_site_native 2>&1 || exit 1
+  [[ "$var_site_native" == 1 && "$var_site_native_main" == 1 ]] || exit 1
+  [[ "$var_site_interface" == pangolin ]] || exit 1
+  [[ "$var_site_interface_main" == pangolin-main ]] || exit 1
+)"; then
+  echo "both default native names must resolve" >&2
+  exit 1
+fi
+case "$native_notice" in
+*pangolin-main*) ;;
+*)
+  echo "default native name resolution should print a notice: $native_notice" >&2
+  exit 1
+  ;;
+esac
+
+equal_rc=0
+equal_out="$(
+  var_site_native=1 var_site_native_main=1
+  var_site_interface=wg0 var_site_interface_main=wg0
+  _resolve_site_native 2>&1
+)" || equal_rc=$?
+[[ "$equal_rc" -ne 0 ]] || { echo "equal custom native names should fail" >&2; exit 1; }
+case "$equal_out" in
+*distinct*) ;;
+*)
+  echo "equal native names should ask for distinct names: $equal_out" >&2
+  exit 1
+  ;;
+esac
+
+# An enabled native mode needs a run that writes the site configuration; a
+# reused or migrated config must not silently drop it.
+(
+  var_site_native=1
+  var_site_native_main=0
+  _native_config_possible 1 1
+) || { echo "native toggles with new answers should pass" >&2; exit 1; }
+if (
+  var_site_native=1
+  var_site_native_main=0
+  _native_config_possible 1 0
+); then
+  echo "native toggles without new answers should fail" >&2
+  exit 1
+fi
+(
+  var_site_native=0
+  var_site_native_main=0
+  _native_config_possible 1 0
+) || { echo "disabled native toggles should pass" >&2; exit 1; }
+(
+  var_site_native=1
+  var_site_native_main=0
+  _native_config_possible 0 0
+) || { echo "client-only runs ignore site native toggles" >&2; exit 1; }
 
 fetch_payload "$dir/payload.sh"
 cmp -s "$PANGOLIN_PAYLOAD" "$dir/payload.sh" || { echo "payload copy" >&2; exit 1; }
@@ -624,6 +742,12 @@ case "$dry_out" in
 *"Validate the target OS floor"*) ;;
 *) echo "dry run OS plan missing" >&2; exit 1 ;;
 esac
+case "$dry_out" in
+*"/dev/net/tun"*)
+  echo "plain site dry run must not mention TUN" >&2
+  exit 1
+  ;;
+esac
 
 if ! dry_client_out="$(
   TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
@@ -657,6 +781,61 @@ esac
 case "$dry_prov_out" in
 *spk-SECRET*) echo "dry run printed the provisioning key" >&2; exit 1 ;;
 esac
+
+# Native site mode lists the toggles and interface names and needs TUN, without
+# printing credentials.
+if ! dry_native_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_id=id var_site_secret=s3cr3t-DO-NOT-PRINT \
+    var_site_native=1 var_site_native_main=1 bash "$ROOT/add-pangolin.sh" 2>&1
+)"; then
+  echo "native dry run failed: $dry_native_out" >&2
+  exit 1
+fi
+for token in "native client tunnels" "native main tunnel" "interface pangolin" \
+  "interface pangolin-main" "/dev/net/tun"; do
+  case "$dry_native_out" in
+  *"$token"*) ;;
+  *)
+    echo "native dry run missing [$token]: $dry_native_out" >&2
+    exit 1
+    ;;
+  esac
+done
+case "$dry_native_out" in
+*s3cr3t-DO-NOT-PRINT*) echo "native dry run printed the secret" >&2; exit 1 ;;
+esac
+[[ -z "$(ls -A "$dry/tmp")" ]] || { echo "native dry run wrote files" >&2; exit 1; }
+
+# Invalid native values fail before any side effect, including a dry run.
+bad_flag_rc=0
+bad_flag_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_id=id var_site_secret=secret var_site_native=yes \
+    bash "$ROOT/add-pangolin.sh" 2>&1
+)" || bad_flag_rc=$?
+[[ "$bad_flag_rc" -ne 0 ]] || { echo "invalid native flag should fail" >&2; exit 1; }
+case "$bad_flag_out" in
+*"Invalid native flag: yes"*) ;;
+*) echo "native flag validation message: $bad_flag_out" >&2; exit 1 ;;
+esac
+
+bad_name_rc=0
+bad_name_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_id=id var_site_secret=secret var_site_native=1 \
+    var_site_interface="bad name" bash "$ROOT/add-pangolin.sh" 2>&1
+)" || bad_name_rc=$?
+[[ "$bad_name_rc" -ne 0 ]] || { echo "invalid native interface should fail" >&2; exit 1; }
+case "$bad_name_out" in
+*"Invalid native interface name: bad name"*) ;;
+*) echo "interface validation message: $bad_name_out" >&2; exit 1 ;;
+esac
+[[ ! -e "$dry/curl-ran" ]] || { echo "native dry runs used the network" >&2; exit 1; }
+[[ -z "$(ls -A "$dry/tmp")" ]] || { echo "native dry runs wrote files" >&2; exit 1; }
 [[ -z "$(ls -A "$dry/tmp")" ]] || { echo "dry runs wrote files" >&2; exit 1; }
 [[ ! -e "$dry/curl-ran" ]] || { echo "dry runs used the network" >&2; exit 1; }
 

@@ -117,16 +117,39 @@ json_escape() {
   printf '%s' "$value"
 }
 
-# Print a static-credential site configuration as JSON.
-site_config_static() {
-  printf '{"endpoint":"%s","id":"%s","secret":"%s"}\n' \
-    "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")"
+# Print the JSON keys for the enabled site native modes. A flag equal to 1 adds
+# its boolean and interface name; disabled modes add nothing so the CLI defaults
+# apply. Callers validate the values before building a configuration.
+_native_config_suffix() {
+  local native="${1-0}" native_main="${2-0}"
+  local interface="${3-pangolin}" interface_main="${4-pangolin}" out=""
+  if [[ "$native" == 1 ]]; then
+    out=",\"native\":true,\"interface\":\"$(json_escape "$interface")\""
+  fi
+  if [[ "$native_main" == 1 ]]; then
+    out+=",\"nativeMain\":true,\"interfaceMain\":\"$(json_escape "$interface_main")\""
+  fi
+  printf '%s' "$out"
 }
 
-# Print a provisioning-key site configuration as JSON.
+# Print a static-credential site configuration as JSON. The optional trailing
+# native arguments add the kernel interface keys when a mode is enabled.
+site_config_static() {
+  local suffix
+  suffix="$(_native_config_suffix "${4-0}" "${5-0}" "${6-pangolin}" "${7-pangolin}")" ||
+    return 1
+  printf '{"endpoint":"%s","id":"%s","secret":"%s"%s}\n' \
+    "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")" "$suffix"
+}
+
+# Print a provisioning-key site configuration as JSON. The optional trailing
+# native arguments add the kernel interface keys when a mode is enabled.
 site_config_provisioning() {
-  printf '{"endpoint":"%s","provisioningKey":"%s","name":"%s"}\n' \
-    "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")"
+  local suffix
+  suffix="$(_native_config_suffix "${4-0}" "${5-0}" "${6-pangolin}" "${7-pangolin}")" ||
+    return 1
+  printf '{"endpoint":"%s","provisioningKey":"%s","name":"%s"%s}\n' \
+    "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")" "$suffix"
 }
 
 # Succeed when a site configuration holds credentials and no provisioning key.

@@ -68,6 +68,73 @@ rm -rf "$tmpd"
 
 echo "Task 2 tests passed"
 
+# Task 12: site native interface keys appear only for enabled modes.
+# Both enabled matches the documented JSON exactly, including key order.
+assert_eq '{"endpoint":"https://p.example","id":"id","secret":"secret","native":true,"interface":"pangolin","nativeMain":true,"interfaceMain":"pangolin-main"}' \
+  "$(site_config_static "https://p.example" "id" "secret" 1 1 "pangolin" "pangolin-main")"
+
+native_static="$(site_config_static "https://p.example" "id1" "sec1" 1 0 "pangolin" "pangolin")"
+python3 - "$native_static" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d == {
+    "endpoint": "https://p.example",
+    "id": "id1",
+    "secret": "sec1",
+    "native": True,
+    "interface": "pangolin",
+}, d
+PY
+
+both_static="$(site_config_static "https://p.example" "id1" "sec1" 1 1 "pangolin" "pangolin-main")"
+python3 - "$both_static" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d == {
+    "endpoint": "https://p.example",
+    "id": "id1",
+    "secret": "sec1",
+    "native": True,
+    "interface": "pangolin",
+    "nativeMain": True,
+    "interfaceMain": "pangolin-main",
+}, d
+PY
+
+native_prov="$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1" 0 1 "pangolin" "wg-main")"
+python3 - "$native_prov" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d == {
+    "endpoint": "https://p.example",
+    "provisioningKey": "spk-1.secret",
+    "name": "pve-1",
+    "nativeMain": True,
+    "interfaceMain": "wg-main",
+}, d
+PY
+
+both_prov="$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1" 1 1 "pangolin" "pangolin-main")"
+python3 - "$both_prov" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d == {
+    "endpoint": "https://p.example",
+    "provisioningKey": "spk-1.secret",
+    "name": "pve-1",
+    "native": True,
+    "interface": "pangolin",
+    "nativeMain": True,
+    "interfaceMain": "pangolin-main",
+}, d
+PY
+
+# Disabled modes add no native keys, even when interface names are supplied.
+assert_eq "$static" "$(site_config_static "https://p.example" "id1" "sec1" 0 0 "wg0" "wg1")"
+assert_eq "$prov" "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1" 0 0 "wg0" "wg1")"
+
+echo "Task 12 tests passed"
+
 conf="$(mktemp)"
 TUN_CHANGED=0
 ensure_tun_config "$conf"

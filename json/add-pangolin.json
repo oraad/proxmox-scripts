@@ -62,6 +62,10 @@
       "type": "info"
     },
     {
+      "text": "Site native interfaces (optional, default off): `var_site_native=1` uses a kernel WireGuard interface for downstream client tunnels, and `var_site_native_main=1` for the main site tunnel. The addon writes the matching `native`/`interface` or `nativeMain`/`interfaceMain` keys to /etc/pangolin/site.json; `var_site_interface` and `var_site_interface_main` set the names (default `pangolin`, 1-15 characters, starting with a letter, using letters, digits, `_`, `-`, or `.`). With both modes on and the default name, the main interface becomes `pangolin-main`; any other shared name is rejected, so set distinct names. Native interfaces need /dev/net/tun and root or CAP_NET_ADMIN, so the addon adds TUN on the host or LXC like client mode. Unattended runs use the variables directly.",
+      "type": "info"
+    },
+    {
       "text": "The CLI is installed at /usr/local/bin/pangolin only from the official fosrl/cli release, after its sha256 digest and reported version are verified. The accepted artifact is recorded in /var/lib/pangolin/cli.json. Minimum CLI version 0.21.0. Pin `var_pangolin_cli_version` and supply `var_pangolin_cli_sha256` when pinning a version other than the latest.",
       "type": "info"
     },
