@@ -503,6 +503,111 @@ install_client_systemd() {
   fi
 }
 
+# Fail with an actionable message when OpenRC cannot supervise a service.
+_require_supervise_daemon() {
+  if ! command -v supervise-daemon >/dev/null 2>&1; then
+    echo "OpenRC supervise-daemon is required for restart supervision; install the openrc package." >&2
+    return 1
+  fi
+}
+
+# Write an OpenRC unit that runs a wrapper under supervise-daemon.
+_write_openrc_unit() {
+  local name="$1" description="$2" command_path="$3" log_path="$4" unit
+  unit="$(p "/etc/init.d/$name")"
+  install -d -m 0755 "$(dirname "$unit")" || return 1
+  cat >"$unit" <<EOF
+#!/sbin/openrc-run
+name="$name"
+description="$description"
+supervisor=supervise-daemon
+command="$command_path"
+command_user=root
+respawn_delay=2
+respawn_max=0
+output_log="$log_path"
+error_log="$log_path"
+depend() { need net; after firewall; }
+EOF
+  chmod 0755 "$unit"
+}
+
+# Write the site wrapper and its OpenRC unit. The wrapper passes the JSON
+# configuration path to the CLI through CONFIG_FILE.
+write_site_openrc() {
+  local config_path="$1" wrapper log_path
+  _require_supervise_daemon || return 1
+  wrapper="$(p /usr/local/bin/pangolin-site-start)"
+  log_path="$(p /var/log/pangolin-site.log)"
+  install -d -m 0755 "$(dirname "$wrapper")" "$(dirname "$log_path")" || return 1
+  install -m 0700 /dev/null "$wrapper" || return 1
+  cat >"$wrapper" <<EOF
+#!/bin/sh
+CONFIG_FILE=$config_path
+export CONFIG_FILE
+exec "$PANGOLIN_BIN" up site
+EOF
+  _write_openrc_unit pangolin-site "Pangolin Site (CLI)" "$wrapper" "$log_path"
+}
+
+# Write the client env file, wrapper, and OpenRC unit. The secret stays in the
+# mode 0600 env file; the wrapper only sources it.
+write_client_openrc() {
+  local id="$1" secret="$2" endpoint="$3" env_file wrapper log_path
+  _require_supervise_daemon || return 1
+  env_file="$(p /etc/pangolin/pangolin-client.env)"
+  wrapper="$(p /usr/local/bin/pangolin-client-start)"
+  log_path="$(p /var/log/pangolin-client.log)"
+  install -d -m 0755 "$(dirname "$env_file")" "$(dirname "$wrapper")" "$(dirname "$log_path")" ||
+    return 1
+  install -m 0600 /dev/null "$env_file" || return 1
+  {
+    printf 'PANGOLIN_CLIENT_ID=%s\n' "$id"
+    printf 'PANGOLIN_CLIENT_SECRET=%s\n' "$secret"
+    printf 'PANGOLIN_ENDPOINT=%s\n' "$endpoint"
+  } >"$env_file" || return 1
+  install -m 0700 /dev/null "$wrapper" || return 1
+  cat >"$wrapper" <<EOF
+#!/bin/sh
+set -a
+. $env_file
+set +a
+exec "$PANGOLIN_BIN" up client --attach
+EOF
+  _write_openrc_unit pangolin-client "Pangolin Client (CLI)" "$wrapper" "$log_path"
+}
+
+# Enable and start an OpenRC service, then wait for it to become active.
+_start_openrc_service() {
+  local name="$1"
+  if ! rc-update add "$name" default; then
+    echo "Failed to enable the $name service" >&2
+    return 1
+  fi
+  if ! rc-service "$name" start; then
+    echo "Failed to start the $name service" >&2
+    return 1
+  fi
+  if ! wait_service_active openrc "$name" 30 1; then
+    echo "The $name service did not become active" >&2
+    return 1
+  fi
+}
+
+# Install the site OpenRC service, then wait for it to become active.
+install_site_openrc() {
+  local config_path="$1"
+  write_site_openrc "$config_path" || return 1
+  _start_openrc_service pangolin-site
+}
+
+# Install the client OpenRC service, then wait for it to become active.
+install_client_openrc() {
+  local id="$1" secret="$2" endpoint="$3"
+  write_client_openrc "$id" "$secret" "$endpoint" || return 1
+  _start_openrc_service pangolin-client
+}
+
 # The full addon entry point is added in Task 10.
 payload_main() {
   echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2

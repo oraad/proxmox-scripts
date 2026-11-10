@@ -390,3 +390,77 @@ if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FA
 if [[ -n "$old_fake_inactive" ]]; then export FAKE_INACTIVE="$old_fake_inactive"; else unset FAKE_INACTIVE; fi
 
 echo "Task 6 tests passed"
+
+# Task 7: OpenRC site and client installs with restart supervision.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin" "$tmpd/root/etc/init.d" "$tmpd/root/usr/local/bin" \
+  "$tmpd/root/etc/pangolin" "$tmpd/root/var/log"
+for c in rc-update rc-service supervise-daemon pangolin; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
+  chmod 755 "$tmpd/bin/$c"
+done
+
+old_path="$PATH"
+old_pangolin_root="$PANGOLIN_ROOT"
+old_pangolin_bin="$PANGOLIN_BIN"
+old_fake_log="${FAKE_LOG:-}"
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_ROOT="$tmpd/root"
+export PANGOLIN_BIN="$tmpd/root/usr/local/bin/pangolin"
+
+site_unit="$tmpd/root/etc/init.d/pangolin-site"
+site_wrapper="$tmpd/root/usr/local/bin/pangolin-site-start"
+cfg="$tmpd/root/etc/pangolin/site.json"
+write_private_file "$cfg" "$(site_config_static "https://p.example" id1 sec1)"
+install_site_openrc "$cfg"
+grep -q 'supervisor=supervise-daemon' "$site_unit" || fail "site supervisor"
+grep -q 'respawn_max=0' "$site_unit" || fail "site respawn"
+grep -q 'respawn_delay=2' "$site_unit" || fail "site respawn delay"
+grep -q 'command_user=root' "$site_unit" || fail "site command user"
+grep -q 'need net' "$site_unit" || fail "site net dependency"
+grep -q "command=\"$site_wrapper\"" "$site_unit" || fail "site unit command"
+grep -q "CONFIG_FILE=$cfg" "$site_wrapper" || fail "site config export"
+grep -q 'exec .*pangolin.* up site' "$site_wrapper" || fail "site wrapper exec"
+[[ "$(stat -c '%a' "$site_wrapper")" == "700" ]] || fail "wrapper mode"
+[[ "$(stat -c '%a' "$site_unit")" == "755" ]] || fail "site unit mode"
+grep -q 'rc-update add pangolin-site default' "$FAKE_LOG" || fail "site enable"
+grep -q 'rc-service pangolin-site start' "$FAKE_LOG" || fail "site start"
+grep -q 'rc-service pangolin-site status' "$FAKE_LOG" || fail "site status check"
+
+client_unit="$tmpd/root/etc/init.d/pangolin-client"
+client_wrapper="$tmpd/root/usr/local/bin/pangolin-client-start"
+client_env="$tmpd/root/etc/pangolin/pangolin-client.env"
+install_client_openrc cid csecret "https://p.example"
+grep -q 'supervisor=supervise-daemon' "$client_unit" || fail "client supervisor"
+grep -q 'respawn_max=0' "$client_unit" || fail "client respawn"
+grep -q "command=\"$client_wrapper\"" "$client_unit" || fail "client unit command"
+[[ "$(stat -c '%a' "$client_env")" == "600" ]] || fail "client env mode"
+[[ "$(stat -c '%a' "$client_wrapper")" == "700" ]] || fail "client wrapper mode"
+grep -q '^PANGOLIN_CLIENT_ID=cid$' "$client_env" || fail "client id env"
+grep -q '^PANGOLIN_CLIENT_SECRET=csecret$' "$client_env" || fail "client secret env"
+grep -q '^PANGOLIN_ENDPOINT=https://p.example$' "$client_env" || fail "client endpoint env"
+grep -q 'rc-update add pangolin-client default' "$FAKE_LOG" || fail "client enable"
+grep -q 'rc-service pangolin-client start' "$FAKE_LOG" || fail "client start"
+grep -q 'rc-service pangolin-client status' "$FAKE_LOG" || fail "client status check"
+if grep -q 'csecret' "$client_unit" "$client_wrapper"; then
+  fail "client unit and wrapper must not contain the secret"
+fi
+
+# Without supervise-daemon the unit cannot restart, so writing must refuse.
+mkdir -p "$tmpd/no-supervise"
+if supervise_err="$(PATH="$tmpd/no-supervise:/usr/bin:/bin" write_site_openrc "$cfg" 2>&1 >/dev/null)"; then
+  fail "missing supervise-daemon should fail"
+fi
+case "$supervise_err" in
+*supervise-daemon*) ;;
+*) fail "missing supervise-daemon should name it, got: $supervise_err" ;;
+esac
+
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+
+echo "Task 7 tests passed"
