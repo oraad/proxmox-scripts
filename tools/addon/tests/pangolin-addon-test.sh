@@ -686,3 +686,46 @@ rm -rf "$tmpd"
 export PANGOLIN_ROOT="$old_pangolin_root"
 
 echo "Task 8 tests passed"
+
+# Task 10: legacy Newt files are backed up and removed only when called after a
+# verified site install. Cleanup is a quiet no-op when nothing is present.
+tmpd="$(mktemp -d)"
+old_pangolin_root="$PANGOLIN_ROOT"
+export PANGOLIN_ROOT="$tmpd/root"
+mkdir -p "$tmpd/root/etc/newt" "$tmpd/root/usr/local/bin" "$tmpd/root/root" \
+  "$tmpd/root/usr/bin"
+newt_env="$tmpd/root/etc/newt/newt.env"
+newt_bin="$tmpd/root/usr/local/bin/newt"
+newt_marker="$tmpd/root/root/.newt"
+printf 'NEWT_ID=nid\nNEWT_SECRET=nsec\nPANGOLIN_ENDPOINT=https://p.example\n' >"$newt_env"
+chmod 600 "$newt_env"
+printf 'binary\n' >"$newt_bin"
+printf 'marker\n' >"$newt_marker"
+if ! newt_out="$(cleanup_legacy_newt 2>&1)"; then
+  fail "legacy Newt cleanup should succeed"
+fi
+case "$newt_out" in
+*nsec*) fail "legacy Newt cleanup must not print the secret" ;;
+esac
+[[ ! -e "$newt_env" && ! -e "$newt_bin" && ! -e "$newt_marker" ]] ||
+  fail "legacy Newt files should be removed"
+[[ ! -d "$tmpd/root/etc/newt" ]] || fail "empty Newt directory should be removed"
+newt_backup="$(find "$tmpd/root/var/lib/pangolin/backup" -name newt.env -print -quit)"
+[[ -n "$newt_backup" ]] || fail "legacy Newt cleanup should back up the env file"
+grep -q '^NEWT_SECRET=nsec$' "$newt_backup" || fail "Newt backup should keep the secret"
+if ! newt_out="$(cleanup_legacy_newt 2>&1)"; then
+  fail "repeated legacy Newt cleanup should succeed"
+fi
+[[ -z "$newt_out" ]] || fail "repeated legacy Newt cleanup should be quiet"
+rm -rf "$tmpd"
+export PANGOLIN_ROOT="$old_pangolin_root"
+
+# Task 10: payload_main fails on a missing orchestrator flags file before it
+# touches the service manager or the network.
+tmpd="$(mktemp -d)"
+if payload_main "$tmpd" >/dev/null 2>&1; then
+  fail "payload_main without flags should fail"
+fi
+rm -rf "$tmpd"
+
+echo "Task 10 tests passed"

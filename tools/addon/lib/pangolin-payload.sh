@@ -803,6 +803,52 @@ migrate_legacy_newt() {
   return 0
 }
 
+# Remove a standalone Newt installation only after the replacement site is
+# verified. Files are backed up first; a failed backup removes nothing. The
+# Alpine `newt` dialog package is not touched: only /usr/local/bin/newt is the
+# Pangolin binary.
+cleanup_legacy_newt() {
+  local path backup_dir
+  local -a paths=()
+  for path in "$(p /etc/newt/newt.env)" \
+    "$(p /usr/local/bin/newt)" "$(p /usr/local/bin/newt-start)" \
+    "$(p /usr/bin/update-newt)" "$(p /root/.newt)" \
+    "$(p /etc/systemd/system/newt.service)" "$(p /etc/init.d/newt)"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      paths+=("$path")
+    fi
+  done
+  if ((${#paths[@]} == 0)); then
+    return 0
+  fi
+  if [[ -z "$PANGOLIN_ROOT" ]]; then
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now newt >/dev/null 2>&1 || true
+    fi
+    if command -v rc-service >/dev/null 2>&1; then
+      rc-service newt stop >/dev/null 2>&1 || true
+    fi
+    if command -v rc-update >/dev/null 2>&1; then
+      rc-update del newt default >/dev/null 2>&1 || true
+    fi
+  fi
+  if ! backup_dir="$(backup_existing "${paths[@]}")"; then
+    echo "Failed to back up legacy Newt files; refusing to remove them" >&2
+    return 1
+  fi
+  for path in "${paths[@]}"; do
+    if ! rm -f "$path"; then
+      echo "Failed to remove $path" >&2
+      return 1
+    fi
+  done
+  rmdir "$(p /etc/newt)" 2>/dev/null || true
+  if [[ -z "$PANGOLIN_ROOT" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  echo "Removed the legacy Newt installation (backup: $backup_dir)."
+}
+
 # Convert the current addon's site and client files into the new layout. Old
 # files are only recorded, never removed; the entry point calls
 # cleanup_legacy_addon after each component verifies.
@@ -959,10 +1005,196 @@ cleanup_legacy_addon() {
   return "$rc"
 }
 
-# The full addon entry point is added in Task 10.
+# Push the payload and every regular file in the answers directory into
+# /root/.pangolin-addon with explicit modes. Older versions of `pct push` have
+# no --perms option, so a failed push is retried without it and the mode is
+# applied with chmod inside the container. File contents never enter argv.
+push_payload() {
+  local ctid="${1:-}" payload="${2:-}" answers="${3:-}" file base remote
+  if [[ -z "$ctid" || ! -f "$payload" || ! -d "$answers" ]]; then
+    echo "push_payload: expected a CTID, a payload file, and an answers directory" >&2
+    return 1
+  fi
+  remote="/root/.pangolin-addon"
+  pct exec "$ctid" -- sh -c 'mkdir -p /root/.pangolin-addon && chmod 700 /root/.pangolin-addon' ||
+    return 1
+  if ! pct push "$ctid" "$payload" "$remote/payload.sh" --perms 700; then
+    pct push "$ctid" "$payload" "$remote/payload.sh" || return 1
+    pct exec "$ctid" -- chmod 700 "$remote/payload.sh" || return 1
+  fi
+  for file in "$answers"/*; do
+    [[ -f "$file" ]] || continue
+    [[ "$file" == "$payload" ]] && continue
+    base="$(basename "$file")"
+    if ! pct push "$ctid" "$file" "$remote/$base" --perms 600; then
+      pct push "$ctid" "$file" "$remote/$base" || return 1
+      pct exec "$ctid" -- chmod 600 "$remote/$base" || return 1
+    fi
+  done
+}
+
+# Replace the old pangolin-cli tag with the tags for the components installed
+# in this run. Existing unrelated tags are kept and the container is only
+# updated when the tag list actually changes.
+apply_lxc_tags() {
+  local ctid="${1:-}" site="$2" client="$3" current next
+  if [[ -z "$ctid" ]]; then
+    echo "apply_lxc_tags: expected a CTID" >&2
+    return 1
+  fi
+  current="$(pct config "$ctid" 2>/dev/null | awk -F': ' '/^tags:/ {print $2}')" || return 1
+  next="$(remove_tag "$current" pangolin-cli)"
+  if [[ "$site" == 1 ]]; then
+    next="$(add_tag "$next" pangolin-site)"
+  fi
+  if [[ "$client" == 1 ]]; then
+    next="$(add_tag "$next" pangolin-client)"
+  fi
+  [[ "$next" == "$current" ]] && return 0
+  pct set "$ctid" -tags "$next"
+}
+
+# Install the site component and verify it before its legacy files are removed.
+# `site_verified` records whether a verified config existed before migration, so
+# new answers replace a legacy install instead of losing to the migrated file.
+# Returns 1 without printing success when the service or provisioning fails.
+_install_site_component() {
+  local backend="$1" answers="$2" reconfigure="$3" site_verified="$4" config content
+  config="$(p /etc/pangolin/site.json)"
+  if [[ -f "$answers/site.json" ]] && [[ "$reconfigure" == 1 || "$site_verified" == 0 ]]; then
+    content="$(<"$answers/site.json")"
+    install -d -m 0755 "$(dirname "$config")" || return 1
+    write_private_file "$config" "$content" || return 1
+  elif [[ -f "$config" ]] &&
+    { site_config_has_credentials "$config" || grep -q '"provisioningKey"[[:space:]]*:' "$config"; }; then
+    echo "Reusing the existing site configuration at $config."
+  elif [[ -n "$LEGACY_NEWT_ID" && -n "$LEGACY_NEWT_SECRET" && -n "$LEGACY_ENDPOINT" ]]; then
+    install -d -m 0755 "$(dirname "$config")" || return 1
+    write_private_file "$config" \
+      "$(site_config_static "$LEGACY_ENDPOINT" "$LEGACY_NEWT_ID" "$LEGACY_NEWT_SECRET")" ||
+      return 1
+  else
+    echo "No site configuration to install; provide site credentials." >&2
+    return 1
+  fi
+
+  case "$backend" in
+  systemd) install_site_systemd "$config" || return 1 ;;
+  openrc) install_site_openrc "$config" || return 1 ;;
+  *) return 1 ;;
+  esac
+  if ! wait_for_provisioning "$config" 30 1; then
+    echo "The pangolin-site service did not complete provisioning." >&2
+    return 1
+  fi
+  echo "Pangolin site service is installed and verified."
+}
+
+# Install the client component from the private answers file. Client
+# credentials always replace the existing client service.
+_install_client_component() {
+  local backend="$1" answers="$2" cid csecret cendpoint
+  if [[ ! -f "$answers/client.env" ]]; then
+    echo "No client credentials to install; client.env is missing." >&2
+    return 1
+  fi
+  # Source the answers file so quoted secrets with apostrophes or newlines come
+  # back byte-for-byte. The answers directory is mode 0700 and the file 0600.
+  # shellcheck disable=SC1090,SC1091
+  source "$answers/client.env"
+  cid="${PANGOLIN_CLIENT_ID:-}"
+  csecret="${PANGOLIN_CLIENT_SECRET:-}"
+  cendpoint="${PANGOLIN_ENDPOINT:-}"
+  unset PANGOLIN_CLIENT_ID PANGOLIN_CLIENT_SECRET PANGOLIN_ENDPOINT
+  if [[ -z "$cid" || -z "$csecret" || -z "$cendpoint" ]]; then
+    echo "Client credentials are incomplete; client.env needs an id, secret, and endpoint." >&2
+    return 1
+  fi
+
+  case "$backend" in
+  systemd) install_client_systemd "$cid" "$csecret" "$cendpoint" || return 1 ;;
+  openrc) install_client_openrc "$cid" "$csecret" "$cendpoint" || return 1 ;;
+  *) return 1 ;;
+  esac
+  echo "Pangolin client service is installed and verified."
+}
+
+# Install the selected components from a private answers directory. Components
+# are independent: a verified component stays installed when the other fails,
+# and the failed component is stopped without touching the earlier one.
 payload_main() {
-  echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2
-  return 1
+  local answers="${1:-}" flags backend site client reconfigure rc=0 site_verified=0
+  if [[ -z "$answers" || ! -d "$answers" ]]; then
+    echo "payload_main: an answers directory is required" >&2
+    return 1
+  fi
+  flags="$answers/flags"
+  if [[ ! -f "$flags" ]]; then
+    echo "payload_main: $flags is missing" >&2
+    return 1
+  fi
+  site="$(_env_value "$flags" SITE || true)"
+  client="$(_env_value "$flags" CLIENT || true)"
+  reconfigure="$(_env_value "$flags" RECONFIGURE || true)"
+  if [[ "$site" != 0 && "$site" != 1 ]] || [[ "$client" != 0 && "$client" != 1 ]]; then
+    echo "payload_main: flags must set SITE and CLIENT to 0 or 1" >&2
+    return 1
+  fi
+  if [[ "$site" != 1 && "$client" != 1 ]]; then
+    echo "payload_main: flags select no component" >&2
+    return 1
+  fi
+  if [[ "$reconfigure" != 1 ]]; then
+    reconfigure=0
+  fi
+
+  backend="$(service_backend)" || {
+    echo "Could not detect the service manager." >&2
+    return 1
+  }
+  if [[ "$backend" == none ]]; then
+    echo "No supported service manager found (systemd or OpenRC with supervise-daemon)." >&2
+    return 1
+  fi
+
+  install_cli_binary "${var_pangolin_cli_version:-latest}" "${var_pangolin_cli_sha256:--}" ||
+    return 1
+  if [[ -f "$(p /etc/pangolin/site.json)" ]] &&
+    site_config_has_credentials "$(p /etc/pangolin/site.json)"; then
+    site_verified=1
+  fi
+  migrate_existing_addon || return 1
+  if [[ "$site" == 1 ]]; then
+    migrate_legacy_newt || return 1
+  fi
+
+  if [[ "$site" == 1 ]]; then
+    if _install_site_component "$backend" "$answers" "$reconfigure" "$site_verified"; then
+      cleanup_legacy_addon site || {
+        echo "The pangolin-site service is verified, but legacy site cleanup failed." >&2
+        rc=1
+      }
+      cleanup_legacy_newt || {
+        echo "The pangolin-site service is verified, but legacy Newt cleanup failed." >&2
+        rc=1
+      }
+    else
+      stop_service "$backend" pangolin-site >/dev/null 2>&1 || true
+      rc=1
+    fi
+  fi
+  if [[ "$client" == 1 ]]; then
+    if _install_client_component "$backend" "$answers"; then
+      cleanup_legacy_addon client || {
+        echo "The pangolin-client service is verified, but legacy client cleanup failed." >&2
+        rc=1
+      }
+    else
+      stop_service "$backend" pangolin-client >/dev/null 2>&1 || true
+      rc=1
+    fi
+  fi
+  return "$rc"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
