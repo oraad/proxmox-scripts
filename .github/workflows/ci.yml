@@ -51,3 +51,8 @@ jobs:
         run: |
           find ct install misc tools -type f \( -name '*.sh' -o -name 'build.func' \) -print0 \
             | xargs -0 -I{} bash -n {}
+
+      - name: Addon tests
+        run: |
+          bash tools/addon/tests/pangolin-addon-test.sh
+          bash tools/addon/tests/pangolin-addon-entry-test.sh
