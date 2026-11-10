@@ -388,6 +388,8 @@ tmpd7="$(mktemp -d)"
 mkdir -p "$tmpd7/answers" "$tmpd7/root/etc/systemd/system" "$tmpd7/root/etc/pangolin"
 printf 'OLD UNIT\n' >"$tmpd7/root/etc/systemd/system/pangolin-site.service"
 printf 'OLD ENV\n' >"$tmpd7/root/etc/pangolin/pangolin-site.env"
+printf 'OLD SITE CONFIG\n' >"$tmpd7/root/etc/pangolin/site.json"
+cp "$tmpd7/root/etc/pangolin/site.json" "$tmpd7/original-site.json"
 printf 'SITE=1\nCLIENT=0\nRECONFIGURE=1\nTARGET=host\n' >"$tmpd7/answers/flags"
 write_private_file "$tmpd7/answers/site.json" \
   "$(site_config_static https://p.example new-id new-secret)"
@@ -406,6 +408,7 @@ if ! (
   install_site_systemd() {
     printf 'NEW UNIT\n' >"$PANGOLIN_ROOT/etc/systemd/system/pangolin-site.service"
     printf 'NEW ENV\n' >"$PANGOLIN_ROOT/etc/pangolin/pangolin-site.env"
+    printf 'NEW SITE CONFIG\n' >"$PANGOLIN_ROOT/etc/pangolin/site.json"
     return 1
   }
   if payload_main "$tmpd7/answers" >/dev/null 2>&1; then
@@ -422,6 +425,8 @@ if ! (
     { echo "failed replacement must restore the previous unit" >&2; exit 1; }
   grep -q 'OLD ENV' "$PANGOLIN_ROOT/etc/pangolin/pangolin-site.env" ||
     { echo "failed replacement must restore the previous env" >&2; exit 1; }
+  cmp -s "$tmpd7/original-site.json" "$PANGOLIN_ROOT/etc/pangolin/site.json" ||
+    { echo "failed replacement must restore the previous site config bytes" >&2; exit 1; }
 ); then
   exit 1
 fi
@@ -432,6 +437,7 @@ rm -rf "$tmpd7"
 tmpd8="$(mktemp -d)"
 mkdir -p "$tmpd8/answers" "$tmpd8/root/etc/systemd/system" "$tmpd8/root/etc/pangolin"
 printf 'OLD UNIT\n' >"$tmpd8/root/etc/systemd/system/pangolin-site.service"
+printf 'OLD SITE CONFIG\n' >"$tmpd8/root/etc/pangolin/site.json"
 printf 'SITE=1\nCLIENT=0\nRECONFIGURE=1\nTARGET=host\n' >"$tmpd8/answers/flags"
 write_private_file "$tmpd8/answers/site.json" \
   "$(site_config_static https://p.example new-id new-secret)"
@@ -461,6 +467,14 @@ if ! (
     echo "success must not restore the backup" >&2
     exit 1
   fi
+  grep -q '"id":"new-id"' "$PANGOLIN_ROOT/etc/pangolin/site.json" ||
+    { echo "success must keep the new site config" >&2; exit 1; }
+  if grep -q 'OLD SITE CONFIG' "$PANGOLIN_ROOT/etc/pangolin/site.json"; then
+    echo "success must not restore the old site config" >&2
+    exit 1
+  fi
+  grep -q 'OLD SITE CONFIG' "$SITE_INSTALL_BACKUP_DIR/site.json" ||
+    { echo "site config backup must hold the previous bytes" >&2; exit 1; }
 ); then
   exit 1
 fi

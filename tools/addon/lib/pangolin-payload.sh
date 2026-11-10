@@ -1143,9 +1143,10 @@ _service_is_active() {
   esac
 }
 
-# Back up the same-named upstream files for one component before the installer
-# replaces them. Only existing paths are included. Sets the matching
-# *_INSTALL_BACKUP_DIR and *_INSTALL_WAS_ACTIVE globals.
+# Back up the same-named upstream files for one component, including the site
+# configuration, before the installer replaces them. Only existing paths are
+# included. Sets the matching *_INSTALL_BACKUP_DIR and *_INSTALL_WAS_ACTIVE
+# globals.
 _backup_install_paths() {
   local backend="$1" scope="$2" path backup_dir="" was_active=0 name
   local -a paths=()
@@ -1155,7 +1156,8 @@ _backup_install_paths() {
     SITE_INSTALL_BACKUP_DIR=""
     SITE_INSTALL_WAS_ACTIVE=0
     for path in "$(p /etc/systemd/system/pangolin-site.service)" \
-      "$(p /etc/pangolin/pangolin-site.env)" "$(p /etc/init.d/pangolin-site)"; do
+      "$(p /etc/pangolin/pangolin-site.env)" "$(p /etc/pangolin/site.json)" \
+      "$(p /etc/init.d/pangolin-site)"; do
       if [[ -e "$path" || -L "$path" ]]; then
         paths+=("$path")
       fi
