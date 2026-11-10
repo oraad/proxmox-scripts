@@ -3,14 +3,9 @@
 import {
   ArrowLeft,
   BookOpenText,
-  Bot,
-  Cpu,
   ExternalLink,
   Globe,
-  HardDrive,
   Info,
-  MemoryStick,
-  Network,
   TerminalSquare,
   TriangleAlert,
   XCircle,
@@ -21,142 +16,138 @@ import { useMemo, useState } from "react";
 
 import { CopyButton } from "@/components/copy-button";
 import { ScriptBadges } from "@/components/scripts/script-badges";
-import { ScriptCard } from "@/components/scripts/script-card";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { githubRepo } from "@/config/site-config";
-import { formatDate, getRelatedScripts } from "@/lib/scripts";
+import { getRelatedScripts, typeLabel } from "@/lib/scripts";
 import { buildInstallCommand, methodLabel } from "@/lib/install-command";
 import type { Category, Script } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const noteConfig: Record<
   "info" | "warning" | "error",
-  { className: string; icon: React.ReactNode; title: string }
+  { className: string; icon: React.ReactNode }
 > = {
   info: {
     className: "border-blue-500/30 bg-blue-500/10 text-blue-900 dark:text-blue-100",
     icon: <Info className="mt-0.5 h-4 w-4 shrink-0" />,
-    title: "Info",
   },
   warning: {
     className: "border-amber-500/30 bg-amber-500/10 text-amber-950 dark:text-amber-100",
     icon: <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />,
-    title: "Warnings",
   },
   error: {
     className: "border-red-500/30 bg-red-500/10 text-red-950 dark:text-red-100",
     icon: <XCircle className="mt-0.5 h-4 w-4 shrink-0" />,
-    title: "Errors",
   },
+};
+
+const noteRank: Record<"info" | "warning" | "error", number> = {
+  warning: 0,
+  error: 1,
+  info: 2,
 };
 
 export function ScriptDetail({
   script,
   categories,
+  backHref = "/scripts",
 }: {
   script: Script;
   categories: Category[];
+  backHref?: string;
 }) {
   const [methodIndex, setMethodIndex] = useState(0);
   const method = script.install_methods[methodIndex] ?? script.install_methods[0];
   const command = method ? buildInstallCommand(method) : "";
   const related = useMemo(
-    () => getRelatedScripts(categories, script),
+    () => getRelatedScripts(categories, script, 3),
     [categories, script],
   );
+
+  const sortedNotes = useMemo(
+    () => script.notes.slice().sort((a, b) => noteRank[a.type] - noteRank[b.type]),
+    [script.notes],
+  );
+  const visibleNotes = sortedNotes.slice(0, 4);
+  const moreNotes = sortedNotes.slice(4);
+
   const sourcePath = method?.script;
   const sourceUrl = sourcePath ? `${githubRepo}/blob/main/${sourcePath}` : null;
-
-  const notesByType = useMemo(() => {
-    const groups: Record<"info" | "warning" | "error", Script["notes"]> = {
-      info: [],
-      warning: [],
-      error: [],
-    };
-    for (const note of script.notes) {
-      groups[note.type].push(note);
-    }
-    return groups;
-  }, [script.notes]);
 
   const hasCredentials =
     script.default_credentials.username !== null ||
     script.default_credentials.password !== null;
 
+  const resources = method?.resources;
+  const resourceItems = [
+    resources?.cpu != null ? `CPU ${resources.cpu}` : null,
+    resources?.ram != null ? `RAM ${formatRam(resources.ram)}` : null,
+    resources?.hdd != null ? `Disk ${resources.hdd} GB` : null,
+    script.interface_port != null ? `Port ${script.interface_port}` : null,
+  ].filter((item): item is string => item !== null);
+
   return (
-    <div className="space-y-10">
+    <div className="space-y-6">
       <Link
-        href="/scripts"
-        className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
+        href={backHref}
+        className="focus-surface inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-4 w-4" />
-        All scripts
+        Back
       </Link>
 
-      <section className="relative overflow-hidden rounded-2xl border border-border bg-card">
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_100%_at_top_right,hsl(var(--primary)/0.08),transparent_60%)]" />
-        <div className="relative flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:p-8">
-          {script.logo ? (
-            <Image
-              src={script.logo}
-              alt=""
-              width={72}
-              height={72}
-              className="rounded-xl border border-border bg-background p-2"
-              unoptimized
-            />
-          ) : (
-            <div className="flex h-[72px] w-[72px] items-center justify-center rounded-xl border border-border bg-muted text-xl font-semibold text-muted-foreground">
-              {script.name.slice(0, 2)}
-            </div>
-          )}
-          <div className="min-w-0 flex-1 space-y-3">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <h1 className="text-3xl font-semibold tracking-tight">{script.name}</h1>
-              {script.updateable ? <Badge variant="success">Updateable</Badge> : null}
-            </div>
+      <header className="flex items-start gap-3 sm:gap-4">
+        {script.logo ? (
+          <Image
+            src={script.logo}
+            alt=""
+            width={64}
+            height={64}
+            className="h-14 w-14 shrink-0 rounded-lg border border-border bg-background object-contain p-1 sm:h-16 sm:w-16"
+            unoptimized
+          />
+        ) : (
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-lg font-semibold text-muted-foreground sm:h-16 sm:w-16">
+            {script.name.slice(0, 2)}
+          </div>
+        )}
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{script.name}</h1>
             <ScriptBadges script={script} />
-            <div className="text-sm text-muted-foreground">
-              Date added:{" "}
-              <span className="font-medium text-foreground">{formatDate(script.date_created)}</span>
-              {script.config_path ? (
-                <>
-                  {" "}
-                  · Config:{" "}
-                  <code className="rounded bg-muted px-1.5 py-0.5">{script.config_path}</code>
-                </>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {script.website ? (
-                <LinkButton href={script.website} icon={<Globe className="h-4 w-4" />} label="Website" />
-              ) : null}
-              {script.documentation ? (
-                <LinkButton
-                  href={script.documentation}
-                  icon={<BookOpenText className="h-4 w-4" />}
-                  label="Documentation"
-                />
-              ) : null}
-              {sourceUrl ? (
-                <LinkButton href={sourceUrl} icon={<TerminalSquare className="h-4 w-4" />} label="Source" />
-              ) : null}
-            </div>
+            {script.updateable ? (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+                Updateable
+              </span>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+            {script.website ? (
+              <ExternalLinkItem href={script.website} icon={<Globe className="h-3.5 w-3.5" />} label="Website" />
+            ) : null}
+            {script.documentation ? (
+              <ExternalLinkItem
+                href={script.documentation}
+                icon={<BookOpenText className="h-3.5 w-3.5" />}
+                label="Documentation"
+              />
+            ) : null}
+            {sourceUrl ? (
+              <ExternalLinkItem
+                href={sourceUrl}
+                icon={<TerminalSquare className="h-3.5 w-3.5" />}
+                label="Source"
+              />
+            ) : null}
           </div>
         </div>
-      </section>
+      </header>
 
-      <section className="space-y-3">
-        <h2 className="text-xl font-semibold tracking-tight">About</h2>
-        <p className="max-w-3xl text-sm leading-7 text-muted-foreground">{script.description}</p>
-      </section>
+      <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{script.description}</p>
 
       {method ? (
-        <section className="space-y-4">
-          <h2 className="text-xl font-semibold tracking-tight">Install</h2>
+        <section className="space-y-2">
           {script.install_methods.length > 1 ? (
             <Tabs
               defaultValue="0"
@@ -172,167 +163,134 @@ export function ScriptDetail({
               </TabsList>
               {script.install_methods.map((item, index) => (
                 <TabsContent key={`${item.type}-${index}`} value={String(index)}>
-                  <InstallBlock
-                    command={buildInstallCommand(item)}
-                    type={script.type}
-                    name={script.name}
-                  />
+                  <InstallBlock command={buildInstallCommand(item)} />
                 </TabsContent>
               ))}
             </Tabs>
           ) : (
-            <InstallBlock command={command} type={script.type} name={script.name} />
+            <InstallBlock command={command} />
           )}
         </section>
       ) : null}
 
-      <section>
-        <h2 className="mb-4 text-xl font-semibold tracking-tight">Resources</h2>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <ResourceCard
-            icon={<Cpu className="h-4 w-4" />}
-            label="CPU"
-            value={method?.resources.cpu != null ? `${method.resources.cpu} cores` : "—"}
-          />
-          <ResourceCard
-            icon={<MemoryStick className="h-4 w-4" />}
-            label="RAM"
-            value={method?.resources.ram != null ? `${method.resources.ram} MB` : "—"}
-          />
-          <ResourceCard
-            icon={<HardDrive className="h-4 w-4" />}
-            label="Disk"
-            value={method?.resources.hdd != null ? `${method.resources.hdd} GB` : "—"}
-          />
-          <ResourceCard
-            icon={<Network className="h-4 w-4" />}
-            label="Port"
-            value={script.interface_port != null ? String(script.interface_port) : "—"}
-          />
-        </div>
-        {method?.resources.os || method?.resources.version ? (
-          <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
-            <Bot className="h-4 w-4" />
-            Default OS:{" "}
-            <span className="font-medium text-foreground">
-              {[method.resources.os, method.resources.version].filter(Boolean).join(" ")}
+      {resourceItems.length > 0 ? (
+        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+          {resourceItems.map((item, index) => (
+            <span key={item} className="flex items-center gap-3">
+              {index > 0 ? (
+                <span aria-hidden="true" className="text-border">
+                  ·
+                </span>
+              ) : null}
+              {item}
             </span>
-          </p>
-        ) : null}
-      </section>
+          ))}
+        </p>
+      ) : null}
 
-      {script.notes.length > 0 ? (
-        <section className="space-y-4">
-          <h2 className="text-xl font-semibold tracking-tight">Notes</h2>
-          {(["warning", "info", "error"] as const).map((type) =>
-            notesByType[type].length > 0 ? (
-              <div key={type} className="space-y-2">
-                <h3 className="flex items-center gap-2 text-sm font-medium">
-                  {noteConfig[type].icon}
-                  {noteConfig[type].title}
-                </h3>
-                {notesByType[type].map((note, index) => (
-                  <div
-                    key={`${type}-${index}`}
-                    className={cn(
-                      "flex gap-2 rounded-lg border px-4 py-3 text-sm leading-6",
-                      noteConfig[type].className,
-                    )}
-                  >
-                    {noteConfig[type].icon}
-                    <span>{note.text}</span>
-                  </div>
+      {script.config_path ? (
+        <details className="text-sm">
+          <summary className="focus-surface w-fit cursor-pointer text-muted-foreground hover:text-foreground">
+            Details
+          </summary>
+          <p className="mt-2 text-muted-foreground">
+            Config <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{script.config_path}</code>
+          </p>
+        </details>
+      ) : null}
+
+      {visibleNotes.length > 0 ? (
+        <section className="space-y-2">
+          {visibleNotes.map((note, index) => (
+            <NoteAlert key={`${note.type}-${index}`} note={note} />
+          ))}
+          {moreNotes.length > 0 ? (
+            <details>
+              <summary className="focus-surface w-fit cursor-pointer text-sm text-muted-foreground hover:text-foreground">
+                More notes ({moreNotes.length})
+              </summary>
+              <div className="mt-2 space-y-2">
+                {moreNotes.map((note, index) => (
+                  <NoteAlert key={`${note.type}-more-${index}`} note={note} />
                 ))}
               </div>
-            ) : null,
-          )}
+            </details>
+          ) : null}
         </section>
       ) : null}
 
       {hasCredentials ? (
-        <section className="space-y-3">
-          <h2 className="text-xl font-semibold tracking-tight">Default credentials</h2>
-          <Card>
-            <CardContent className="grid gap-3 p-4 sm:grid-cols-2">
-              <div>
-                <div className="text-xs uppercase tracking-wide text-muted-foreground">Username</div>
-                <div className="mt-1 font-mono text-sm">
-                  {script.default_credentials.username ?? "—"}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs uppercase tracking-wide text-muted-foreground">Password</div>
-                <div className="mt-1 font-mono text-sm">
-                  {script.default_credentials.password ?? "—"}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </section>
+        <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+          <span className="font-medium">Default credentials</span>
+          {script.default_credentials.username !== null ? (
+            <span className="text-muted-foreground">
+              User <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{script.default_credentials.username}</code>
+            </span>
+          ) : null}
+          {script.default_credentials.password !== null ? (
+            <span className="text-muted-foreground">
+              Password{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                {script.default_credentials.password}
+              </code>
+            </span>
+          ) : null}
+        </p>
       ) : null}
 
       {related.length > 0 ? (
-        <section className="space-y-4">
-          <Separator />
-          <h2 className="text-xl font-semibold tracking-tight">You might also like</h2>
-          <div className="grid gap-4 sm:grid-cols-2">
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium">Related</h2>
+          <ul className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border">
             {related.map((item) => (
-              <ScriptCard key={item.slug} script={item} />
+              <li key={item.slug}>
+                <Link
+                  href={`/scripts?id=${encodeURIComponent(item.slug)}`}
+                  className="focus-surface flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-accent"
+                >
+                  <span className="truncate">{item.name}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{typeLabel(item.type)}</span>
+                </Link>
+              </li>
             ))}
-          </div>
+          </ul>
         </section>
       ) : null}
     </div>
   );
 }
 
-function InstallBlock({
-  command,
-  type,
-  name,
-}: {
-  command: string;
-  type: Script["type"];
-  name: string;
-}) {
-  const isHostTool = type === "pve" || type === "addon";
-
+function InstallBlock({ command }: { command: string }) {
   return (
-    <div className="space-y-3 rounded-xl border border-border bg-card p-4">
-      <p className="text-sm leading-6 text-muted-foreground">
-        {isHostTool
-          ? `Run the command below in the Proxmox VE Shell to use ${name}.`
-          : `Run the command below in the Proxmox VE Shell to install ${name}.`}
-      </p>
-      <pre className="overflow-x-auto rounded-lg border border-border bg-background p-4 text-xs leading-6">
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-muted-foreground">Run in the Proxmox shell.</p>
+        <CopyButton text={command} />
+      </div>
+      <pre className="overflow-x-auto rounded-lg border border-border bg-card p-3 text-xs leading-5">
         {command}
       </pre>
-      <CopyButton text={command} />
     </div>
   );
 }
 
-function ResourceCard({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-}) {
+function NoteAlert({ note }: { note: Script["notes"][number] }) {
+  const config = noteConfig[note.type];
+
   return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="mb-2 inline-flex rounded-md bg-primary/10 p-2 text-primary">{icon}</div>
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
-        <div className="mt-1 text-lg font-medium">{value}</div>
-      </CardContent>
-    </Card>
+    <div
+      className={cn(
+        "flex gap-2 rounded-lg border px-3 py-2 text-sm leading-6",
+        config.className,
+      )}
+    >
+      {config.icon}
+      <span>{note.text}</span>
+    </div>
   );
 }
 
-function LinkButton({
+function ExternalLinkItem({
   href,
   icon,
   label,
@@ -346,11 +304,18 @@ function LinkButton({
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="focus-surface inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+      className="focus-surface inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
     >
       {icon}
       {label}
-      <ExternalLink className="h-3.5 w-3.5" />
+      <ExternalLink className="h-3 w-3" />
     </a>
   );
+}
+
+function formatRam(ram: number): string {
+  if (ram >= 1024 && ram % 1024 === 0) {
+    return `${ram / 1024} GB`;
+  }
+  return `${ram} MB`;
 }
