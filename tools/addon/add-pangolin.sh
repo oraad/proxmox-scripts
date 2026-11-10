@@ -50,6 +50,81 @@ validate_site_name() {
   return 0
 }
 
+# Succeed when a dotted version is at least a minimum dotted version.
+_os_version_ge() {
+  local have="$1" need="$2" i a b max=0
+  local -a h n
+  IFS='.' read -r -a h <<<"$have"
+  IFS='.' read -r -a n <<<"$need"
+  max=${#h[@]}
+  ((${#n[@]} > max)) && max=${#n[@]}
+  for ((i = 0; i < max; i++)); do
+    a="${h[i]:-0}"
+    b="${n[i]:-0}"
+    [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || return 1
+    a=$((10#$a))
+    b=$((10#$b))
+    if ((a > b)); then return 0; fi
+    if ((a < b)); then return 1; fi
+  done
+  return 0
+}
+
+# Succeed only for the supported distribution floors: Debian 12+, Ubuntu
+# 22.04+, and Alpine 3.20+. Unknown distributions are not supported.
+os_supported() {
+  local id="${1:-}" version="${2:-}" minimum
+  case "$id" in
+  debian) minimum="12" ;;
+  ubuntu) minimum="22.04" ;;
+  alpine) minimum="3.20" ;;
+  *) return 1 ;;
+  esac
+  [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+  _os_version_ge "$version" "$minimum"
+}
+
+# Print /etc/os-release content from the host or an LXC container.
+_target_os_release() {
+  local target="$1"
+  if [[ "$target" == host ]]; then
+    cat /etc/os-release 2>/dev/null
+  else
+    pct exec "$target" -- cat /etc/os-release 2>/dev/null
+  fi
+}
+
+# Print one unquoted field from /etc/os-release content.
+_release_field() {
+  local release="$1" key="$2" line
+  line="$(printf '%s\n' "$release" | sed -n "s/^$key=//p" | head -n 1)"
+  [[ -n "$line" ]] || return 1
+  line="${line%\"}"
+  line="${line#\"}"
+  printf '%s' "$line"
+}
+
+# Refuse an unsupported target before the payload is fetched or the target is
+# changed beyond starting a stopped container.
+_validate_target_os() {
+  local target="$1" release id version
+  if ! release="$(_target_os_release "$target")"; then
+    echo "Cannot read /etc/os-release on $target." >&2
+    return 1
+  fi
+  id="$(_release_field "$release" ID || true)"
+  version="$(_release_field "$release" VERSION_ID || true)"
+  if [[ -z "$id" || -z "$version" ]]; then
+    echo "Cannot determine the operating system of $target from /etc/os-release." >&2
+    return 1
+  fi
+  if ! os_supported "$id" "$version"; then
+    echo "Unsupported target OS: $id $version. Supported: Debian 12+, Ubuntu 22.04+, Alpine 3.20+." >&2
+    return 1
+  fi
+  echo "Target OS supported: $id $version."
+}
+
 # Print the enabled components for a mode as "SITE CLIENT" (each 0 or 1).
 components_from_mode() {
   case "${1:-}" in
@@ -396,10 +471,9 @@ _target_has_legacy_site() {
     'test -f /etc/pangolin/pangolin-site.env || test -f /etc/newt/newt.env'
 }
 
-# Start a stopped LXC and apply TUN passthrough for a client install. The
-# container is restarted gracefully only when the config actually changed.
-_prepare_lxc() {
-  local ctid="$1" need_tun="$2" status changed=0 i=0
+# Start a stopped LXC so its OS and configuration can be read.
+_ensure_lxc_running() {
+  local ctid="$1" status i=0
   if ! command -v pct >/dev/null 2>&1; then
     echo "pct is required to install into an LXC container" >&2
     return 1
@@ -408,41 +482,72 @@ _prepare_lxc() {
     echo "Cannot read the status of CTID $ctid" >&2
     return 1
   }
-  if [[ "$need_tun" == 1 ]]; then
-    TUN_CHANGED=0
-    ensure_tun_config "/etc/pve/lxc/$ctid.conf" || {
-      echo "Failed to add TUN passthrough to /etc/pve/lxc/$ctid.conf" >&2
-      return 1
-    }
-    changed="$TUN_CHANGED"
+  if [[ "$status" == *running* ]]; then
+    return 0
   fi
-  if [[ "$status" == *running* && "$changed" == 1 ]]; then
+  pct start "$ctid" || {
+    echo "Failed to start CTID $ctid" >&2
+    return 1
+  }
+  while ((i < 60)); do
+    if pct status "$ctid" 2>/dev/null | grep -q running; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "CTID $ctid did not reach the running state" >&2
+  return 1
+}
+
+# Apply TUN passthrough to a client LXC. The container is restarted gracefully
+# only when the config actually changed.
+_apply_lxc_tun() {
+  local ctid="$1" need_tun="$2" status i=0
+  [[ "$need_tun" == 1 ]] || return 0
+  TUN_CHANGED=0
+  ensure_tun_config "/etc/pve/lxc/$ctid.conf" || {
+    echo "Failed to add TUN passthrough to /etc/pve/lxc/$ctid.conf" >&2
+    return 1
+  }
+  [[ "$TUN_CHANGED" == 1 ]] || return 0
+  status="$(pct status "$ctid" 2>/dev/null)" || {
+    echo "Cannot read the status of CTID $ctid" >&2
+    return 1
+  }
+  if [[ "$status" == *running* ]]; then
     if ! pct shutdown "$ctid" --timeout 60; then
       echo "Failed to shut down CTID $ctid gracefully" >&2
       return 1
     fi
-    status="$(pct status "$ctid" 2>/dev/null || true)"
   fi
-  if [[ "$status" != *running* ]]; then
-    pct start "$ctid" || {
-      echo "Failed to start CTID $ctid" >&2
-      return 1
-    }
-    while ((i < 60)); do
-      if pct status "$ctid" 2>/dev/null | grep -q running; then
-        status="status: running"
-        break
-      fi
-      i=$((i + 1))
-      sleep 1
-    done
-    if [[ "$status" != *running* ]]; then
-      echo "CTID $ctid did not reach the running state" >&2
-      return 1
+  pct start "$ctid" || {
+    echo "Failed to start CTID $ctid" >&2
+    return 1
+  }
+  while ((i < 60)); do
+    if pct status "$ctid" 2>/dev/null | grep -q running; then
+      msg_ok "Restarted CTID $ctid after changing TUN passthrough."
+      return 0
     fi
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "CTID $ctid did not reach the running state" >&2
+  return 1
+}
+
+# Client mode on the host needs the TUN device. Load the module when it is not
+# present and fail before installing if the device still cannot be opened.
+_ensure_host_tun() {
+  local device="${1:-/dev/net/tun}"
+  [[ -e "$device" ]] && return 0
+  if command -v modprobe >/dev/null 2>&1; then
+    modprobe tun >/dev/null 2>&1 || true
   fi
-  if [[ "$changed" == 1 ]]; then
-    msg_ok "Restarted CTID $ctid after changing TUN passthrough."
+  if [[ ! -e "$device" ]]; then
+    echo "Client mode requires $device. Load the tun module (modprobe tun) or enable it on the host, then rerun." >&2
+    return 1
   fi
 }
 
@@ -610,6 +715,14 @@ main() {
     return 0
   fi
 
+  if [[ "$target" != host ]]; then
+    _ensure_lxc_running "$target" || return 1
+  fi
+  _validate_target_os "$target" || return 1
+  if [[ "$target" == host && "$client" == 1 ]]; then
+    _ensure_host_tun || return 1
+  fi
+
   if ! _ensure_curl; then
     echo "curl is required to fetch the Pangolin install payload" >&2
     return 1
@@ -643,7 +756,7 @@ main() {
   source "$ANSWERS_DIR/payload.sh"
 
   if [[ "$target" != host ]]; then
-    _prepare_lxc "$target" "$client" || return 1
+    _apply_lxc_tun "$target" "$client" || return 1
     _ensure_lxc_runtime "$target" || {
       msg_error "CTID $target does not have a usable bash and curl runtime"
       return 1

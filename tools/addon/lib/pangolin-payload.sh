@@ -21,6 +21,12 @@ LEGACY_SITE_FILES=()
 LEGACY_CLIENT_FILES=()
 LEGACY_SITE_BACKUP_DIR=""
 LEGACY_CLIENT_BACKUP_DIR=""
+# Pre-install backups of same-named upstream files, used only when a component
+# fails verification and the previous unit must be restored.
+SITE_INSTALL_BACKUP_DIR=""
+CLIENT_INSTALL_BACKUP_DIR=""
+SITE_INSTALL_WAS_ACTIVE=0
+CLIENT_INSTALL_WAS_ACTIVE=0
 
 PANGOLIN_BIN="${PANGOLIN_BIN:-$(p /usr/local/bin/pangolin)}"
 PANGOLIN_STATE_FILE="${PANGOLIN_STATE_FILE:-$(p /var/lib/pangolin/cli.json)}"
@@ -1125,6 +1131,113 @@ _install_client_component() {
   echo "Pangolin client service is installed and verified."
 }
 
+# Succeed when the named service is active. Never queries a service manager
+# under PANGOLIN_ROOT, so tests stay hermetic.
+_service_is_active() {
+  local backend="$1" name="$2"
+  [[ -z "$PANGOLIN_ROOT" ]] || return 1
+  case "$backend" in
+  systemd) systemctl is-active --quiet "$name" >/dev/null 2>&1 ;;
+  openrc) rc-service "$name" status >/dev/null 2>&1 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Back up the same-named upstream files for one component before the installer
+# replaces them. Only existing paths are included. Sets the matching
+# *_INSTALL_BACKUP_DIR and *_INSTALL_WAS_ACTIVE globals.
+_backup_install_paths() {
+  local backend="$1" scope="$2" path backup_dir="" was_active=0 name
+  local -a paths=()
+  case "$scope" in
+  site)
+    name=pangolin-site
+    SITE_INSTALL_BACKUP_DIR=""
+    SITE_INSTALL_WAS_ACTIVE=0
+    for path in "$(p /etc/systemd/system/pangolin-site.service)" \
+      "$(p /etc/pangolin/pangolin-site.env)" "$(p /etc/init.d/pangolin-site)"; do
+      if [[ -e "$path" || -L "$path" ]]; then
+        paths+=("$path")
+      fi
+    done
+    ;;
+  client)
+    name=pangolin-client
+    CLIENT_INSTALL_BACKUP_DIR=""
+    CLIENT_INSTALL_WAS_ACTIVE=0
+    for path in "$(p /etc/systemd/system/pangolin-client.service)" \
+      "$(p /etc/pangolin/pangolin-client.env)" "$(p /etc/init.d/pangolin-client)"; do
+      if [[ -e "$path" || -L "$path" ]]; then
+        paths+=("$path")
+      fi
+    done
+    ;;
+  *)
+    return 1
+    ;;
+  esac
+  if _service_is_active "$backend" "$name"; then
+    was_active=1
+  fi
+  if ((${#paths[@]} > 0)); then
+    backup_dir="$(backup_existing "${paths[@]}")" || return 1
+  fi
+  if [[ "$scope" == site ]]; then
+    SITE_INSTALL_BACKUP_DIR="$backup_dir"
+    SITE_INSTALL_WAS_ACTIVE="$was_active"
+  else
+    CLIENT_INSTALL_BACKUP_DIR="$backup_dir"
+    CLIENT_INSTALL_WAS_ACTIVE="$was_active"
+  fi
+}
+
+# Restore a pre-install backup and restart the previous service when it was
+# active. Called only after a failed replacement.
+_restore_install_paths() {
+  local backend="$1" scope="$2" backup_dir was_active name rc=0
+  case "$scope" in
+  site)
+    backup_dir="$SITE_INSTALL_BACKUP_DIR"
+    was_active="$SITE_INSTALL_WAS_ACTIVE"
+    name=pangolin-site
+    ;;
+  client)
+    backup_dir="$CLIENT_INSTALL_BACKUP_DIR"
+    was_active="$CLIENT_INSTALL_WAS_ACTIVE"
+    name=pangolin-client
+    ;;
+  *) return 1 ;;
+  esac
+  [[ -n "$backup_dir" ]] || return 0
+  if ! restore_backup "$backup_dir"; then
+    echo "Failed to restore the previous $name files from $backup_dir" >&2
+    return 1
+  fi
+  if [[ "$backend" == systemd && -z "$PANGOLIN_ROOT" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if [[ "$was_active" == 1 ]]; then
+    case "$backend" in
+    systemd)
+      systemctl restart "$name" || {
+        echo "Restored $name files but failed to restart the previous service" >&2
+        rc=1
+      }
+      ;;
+    openrc)
+      rc-service "$name" restart || {
+        echo "Restored $name files but failed to restart the previous service" >&2
+        rc=1
+      }
+      ;;
+    esac
+  fi
+  if ((rc == 0)); then
+    echo "Restored the previous $name unit and configuration."
+  fi
+  return "$rc"
+}
+
 # Install the selected components from a private answers directory. Components
 # are independent: a verified component stays installed when the other fails,
 # and the failed component is stopped without touching the earlier one.
@@ -1175,7 +1288,10 @@ payload_main() {
   fi
 
   if [[ "$site" == 1 ]]; then
-    if _install_site_component "$backend" "$answers" "$reconfigure" "$site_verified"; then
+    if ! _backup_install_paths "$backend" site; then
+      echo "Failed to back up the existing site unit; refusing to replace it." >&2
+      rc=1
+    elif _install_site_component "$backend" "$answers" "$reconfigure" "$site_verified"; then
       cleanup_legacy_addon site || {
         echo "The pangolin-site service is verified, but legacy site cleanup failed." >&2
         rc=1
@@ -1186,17 +1302,22 @@ payload_main() {
       }
     else
       stop_service "$backend" pangolin-site >/dev/null 2>&1 || true
+      _restore_install_paths "$backend" site || rc=1
       rc=1
     fi
   fi
   if [[ "$client" == 1 ]]; then
-    if _install_client_component "$backend" "$answers"; then
+    if ! _backup_install_paths "$backend" client; then
+      echo "Failed to back up the existing client unit; refusing to replace it." >&2
+      rc=1
+    elif _install_client_component "$backend" "$answers"; then
       cleanup_legacy_addon client || {
         echo "The pangolin-client service is verified, but legacy client cleanup failed." >&2
         rc=1
       }
     else
       stop_service "$backend" pangolin-client >/dev/null 2>&1 || true
+      _restore_install_paths "$backend" client || rc=1
       rc=1
     fi
   fi
