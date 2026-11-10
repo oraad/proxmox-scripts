@@ -1088,13 +1088,14 @@ _install_site_component() {
     echo "The pangolin-site service did not complete provisioning." >&2
     return 1
   fi
+  chmod 0600 "$config" || return 1
   echo "Pangolin site service is installed and verified."
 }
 
 # Install the client component from the private answers file. Client
 # credentials always replace the existing client service.
 _install_client_component() {
-  local backend="$1" answers="$2" cid csecret cendpoint
+  local backend="$1" answers="$2" cid csecret cendpoint client_env
   if [[ ! -f "$answers/client.env" ]]; then
     echo "No client credentials to install; client.env is missing." >&2
     return 1
@@ -1117,6 +1118,10 @@ _install_client_component() {
   openrc) install_client_openrc "$cid" "$csecret" "$cendpoint" || return 1 ;;
   *) return 1 ;;
   esac
+  client_env="$(p /etc/pangolin/pangolin-client.env)"
+  if [[ -f "$client_env" ]]; then
+    chmod 0600 "$client_env" || return 1
+  fi
   echo "Pangolin client service is installed and verified."
 }
 

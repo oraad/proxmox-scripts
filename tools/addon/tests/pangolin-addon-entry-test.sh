@@ -200,8 +200,13 @@ if ! (
       echo "client endpoint changed" >&2
       exit 1
     }
+    mkdir -p "$PANGOLIN_ROOT/etc/pangolin"
+    printf 'PANGOLIN_CLIENT_SECRET=x\n' >"$PANGOLIN_ROOT/etc/pangolin/pangolin-client.env"
+    chmod 644 "$PANGOLIN_ROOT/etc/pangolin/pangolin-client.env"
   }
-  payload_main "$tmpd6/answers" >/dev/null 2>&1
+  payload_main "$tmpd6/answers" >/dev/null 2>&1 || exit 1
+  [[ "$(stat -c '%a' "$PANGOLIN_ROOT/etc/pangolin/pangolin-client.env")" == "600" ]] ||
+    { echo "client env must be private" >&2; exit 1; }
 ); then
   exit 1
 fi
