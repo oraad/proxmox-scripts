@@ -219,6 +219,178 @@ service_backend() {
   backend_from_facts "$has_systemd" "$has_openrc" "$has_supervise"
 }
 
+# Succeed when a version is at least the given minimum version.
+_cli_version_ge() {
+  local version="$1" min="$2" i a b
+  local -a v m
+  IFS='.' read -r -a v <<<"$version"
+  IFS='.' read -r -a m <<<"$min"
+  for i in 0 1 2; do
+    a="${v[i]:-0}"
+    b="${m[i]:-0}"
+    [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || return 1
+    a=$((10#$a))
+    b=$((10#$b))
+    if ((a > b)); then return 0; fi
+    if ((a < b)); then return 1; fi
+  done
+  return 0
+}
+
+# Succeed when the state file records this version and the installed binary
+# still matches the recorded sha256.
+cli_state_matches() {
+  local version="$1" state_version state_sha
+  [[ -n "$version" && -f "$PANGOLIN_STATE_FILE" && -f "$PANGOLIN_BIN" ]] || return 1
+  state_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PANGOLIN_STATE_FILE" |
+    head -n 1)"
+  state_sha="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PANGOLIN_STATE_FILE" |
+    head -n 1)"
+  [[ "$state_version" == "$version" && -n "$state_sha" ]] || return 1
+  verify_sha256 "$PANGOLIN_BIN" "$state_sha"
+}
+
+# Record the accepted CLI artifact in PANGOLIN_STATE_FILE with mode 0644.
+write_cli_state() {
+  local version="$1" asset="$2" sha256="$3" dir tmp
+  dir="$(dirname "$PANGOLIN_STATE_FILE")"
+  install -d -m 0755 "$dir" || return 1
+  tmp="$(mktemp "$dir/.cli.json.XXXXXX")" || return 1
+  chmod 0644 "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  if ! printf '{"version":"%s","asset":"%s","sha256":"%s"}\n' \
+    "$(json_escape "$version")" "$(json_escape "$asset")" "$(json_escape "$sha256")" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$PANGOLIN_STATE_FILE"
+}
+
+# Print the Fossorial CLI release metadata.
+_cli_release_api() {
+  curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 10 --max-time 120 "$PANGOLIN_RELEASE_API"
+}
+
+# Install the Pangolin CLI only after its sha256 and version are verified.
+# Returns 1 on any failure and leaves the existing binary untouched.
+install_cli_binary() {
+  local target="${1:-latest}" pinned="${2:--}" version asset digest api_json="" latest
+  local tmp="" actual bin_dir arch
+  local min_version="0.21.0"
+
+  case "$target" in
+  latest) ;;
+  *)
+    if ! _cli_version_ge "$target" "$min_version"; then
+      echo "Unsupported Pangolin CLI version: $target (minimum $min_version)" >&2
+      return 1
+    fi
+    version="$target"
+    ;;
+  esac
+
+  arch="$(detect_arch)" || return 1
+  asset="pangolin-cli_linux_$arch"
+
+  if [[ "$target" == latest ]]; then
+    api_json="$(_cli_release_api)" || {
+      echo "Failed to fetch Pangolin CLI release metadata from $PANGOLIN_RELEASE_API" >&2
+      return 1
+    }
+    version="$(release_version "$api_json")" || {
+      echo "Pangolin CLI release metadata has no latestVersion" >&2
+      return 1
+    }
+  fi
+
+  if ! _cli_version_ge "$version" "$min_version"; then
+    echo "Unsupported Pangolin CLI version: $version (minimum $min_version)" >&2
+    return 1
+  fi
+
+  if cli_state_matches "$version"; then
+    echo "Pangolin CLI $version is already installed and verified."
+    return 0
+  fi
+
+  if [[ -n "$pinned" && "$pinned" != "-" ]]; then
+    digest="$pinned"
+  elif [[ -n "${var_pangolin_cli_sha256:-}" ]]; then
+    digest="$var_pangolin_cli_sha256"
+  else
+    if [[ -z "$api_json" ]]; then
+      api_json="$(_cli_release_api)" || {
+        echo "Failed to fetch Pangolin CLI release metadata from $PANGOLIN_RELEASE_API" >&2
+        return 1
+      }
+    fi
+    latest="$(release_version "$api_json")" || latest=""
+    if [[ -z "$latest" ]]; then
+      echo "Pangolin CLI release metadata has no latestVersion" >&2
+      return 1
+    fi
+    if [[ "$version" != "$latest" ]]; then
+      echo "Pinned Pangolin CLI version $version differs from latest $latest; set var_pangolin_cli_sha256." >&2
+      return 1
+    fi
+    digest="$(release_digest "$api_json" "$asset")" || {
+      echo "No sha256 for $asset in the Pangolin CLI release metadata" >&2
+      return 1
+    }
+  fi
+
+  if [[ -z "$digest" ]]; then
+    echo "Empty sha256 for $asset $version; refusing to install." >&2
+    return 1
+  fi
+
+  # Prepare both directories before replacing the live binary, so a bad state
+  # path fails while the old binary is still intact.
+  install -d -m 0755 "$(dirname "$PANGOLIN_STATE_FILE")" || return 1
+  bin_dir="$(dirname "$PANGOLIN_BIN")"
+  install -d -m 0755 "$bin_dir" || return 1
+  tmp="$(mktemp "$bin_dir/.pangolin-cli.XXXXXX")" || {
+    echo "Cannot create a temporary file beside $PANGOLIN_BIN" >&2
+    return 1
+  }
+  if ! curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 10 --max-time 120 \
+    "$PANGOLIN_RELEASE_BASE/$version/$asset" -o "$tmp"; then
+    rm -f "$tmp"
+    echo "Failed to download $asset $version" >&2
+    return 1
+  fi
+  if ! verify_sha256 "$tmp" "$digest"; then
+    rm -f "$tmp"
+    echo "sha256 mismatch for $asset $version; keeping the existing binary." >&2
+    return 1
+  fi
+  if ! chmod 755 "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! actual="$("$tmp" version 2>/dev/null)"; then
+    rm -f "$tmp"
+    echo "$asset $version does not run; keeping the existing binary." >&2
+    return 1
+  fi
+  if [[ "$actual" != "$version" ]]; then
+    rm -f "$tmp"
+    echo "$asset reports version $actual, expected $version; keeping the existing binary." >&2
+    return 1
+  fi
+  if ! mv -f "$tmp" "$PANGOLIN_BIN"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! write_cli_state "$version" "$asset" "$digest"; then
+    echo "Installed Pangolin CLI $version but failed to write $PANGOLIN_STATE_FILE" >&2
+    return 1
+  fi
+  echo "Installed Pangolin CLI $version"
+}
+
 # The full addon entry point is added in Task 10.
 payload_main() {
   echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2

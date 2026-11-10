@@ -119,3 +119,56 @@ systemd | openrc | none) ;;
 esac
 
 echo "Task 3 tests passed"
+
+# Task 4: verified CLI binary install with offline state.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin" "$tmpd/root/usr/local/bin" "$tmpd/root/var/lib/pangolin"
+cat >"$tmpd/pangolin" <<'EOF'
+#!/bin/sh
+[ "$1" = "version" ] && echo 0.21.0
+EOF
+chmod 755 "$tmpd/pangolin"
+fake_sha="$(sha256sum "$tmpd/pangolin" | awk '{print $1}')"
+api="{\"data\":{\"latestVersion\":\"0.21.0\",\"assetDigests\":{\"pangolin-cli_linux_amd64\":\"$fake_sha\"}}}"
+cat >"$tmpd/bin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$tmpd/curl.log"
+case "\$*" in
+  *api.fossorial.io*) printf '%s' '$api' ;;
+  *releases/download*) cp "$tmpd/pangolin" "\${@: -1}" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod 755 "$tmpd/bin/curl"
+
+old_path="$PATH"
+export PATH="$tmpd/bin:$PATH"
+export PANGOLIN_ROOT="$tmpd/root"
+export PANGOLIN_BIN="$tmpd/root/usr/local/bin/pangolin"
+export PANGOLIN_STATE_FILE="$tmpd/root/var/lib/pangolin/cli.json"
+install_cli_binary latest -
+[[ -x "$PANGOLIN_BIN" ]] || fail "binary should install"
+[[ "$("$PANGOLIN_BIN" version)" == "0.21.0" ]] || fail "binary version"
+cli_state_matches 0.21.0 || fail "state should match"
+[[ "$(stat -c '%a' "$PANGOLIN_STATE_FILE")" == "644" ]] || fail "state file mode"
+grep -q '"version":"0.21.0"' "$PANGOLIN_STATE_FILE" || fail "state version"
+grep -q "\"sha256\":\"$fake_sha\"" "$PANGOLIN_STATE_FILE" || fail "state digest"
+before="$(wc -l <"$tmpd/curl.log")"
+install_cli_binary 0.21.0 -
+after="$(wc -l <"$tmpd/curl.log")"
+[[ "$before" == "$after" ]] || fail "matching explicit version should skip network"
+
+# A version below the 0.21.0 floor is refused before any download.
+if install_cli_binary 0.20.9 - >/dev/null 2>&1; then fail "version below floor should fail"; fi
+# A pinned version that is not the API's latest needs an explicit digest.
+if install_cli_binary 0.21.1 - >/dev/null 2>&1; then fail "pinned version needs explicit digest"; fi
+[[ "$("$PANGOLIN_BIN" version)" == "0.21.0" ]] || fail "refused install must keep the binary"
+
+printf 'old' >"$PANGOLIN_BIN"
+if install_cli_binary latest deadbeef >/dev/null 2>&1; then fail "bad digest should fail"; fi
+[[ "$(cat "$PANGOLIN_BIN")" == "old" ]] || fail "bad digest must not replace binary"
+rm -rf "$tmpd"
+unset PANGOLIN_ROOT PANGOLIN_BIN PANGOLIN_STATE_FILE
+export PATH="$old_path"
+
+echo "Task 4 tests passed"
