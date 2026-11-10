@@ -145,10 +145,13 @@ old_path="$PATH"
 old_pangolin_root="$PANGOLIN_ROOT"
 old_pangolin_bin="$PANGOLIN_BIN"
 old_pangolin_state_file="$PANGOLIN_STATE_FILE"
+old_pangolin_selinux_enforce="$PANGOLIN_SELINUX_ENFORCE"
 export PATH="$tmpd/bin:$PATH"
 export PANGOLIN_ROOT="$tmpd/root"
 export PANGOLIN_BIN="$tmpd/root/usr/local/bin/pangolin"
 export PANGOLIN_STATE_FILE="$tmpd/root/var/lib/pangolin/cli.json"
+# Keep the install tests hermetic: no SELinux context restore by default.
+export PANGOLIN_SELINUX_ENFORCE="$tmpd/no-selinux"
 install_cli_binary latest -
 [[ -x "$PANGOLIN_BIN" ]] || fail "binary should install"
 [[ "$("$PANGOLIN_BIN" version)" == "0.21.0" ]] || fail "binary version"
@@ -191,10 +194,47 @@ case "$state_err" in
 esac
 [[ "$(cat "$PANGOLIN_BIN")" == "old" ]] || fail "failed state write must not replace binary"
 
+# SELinux context restore: an enforce file plus restorecon calls it with the path.
+enforce_file="$tmpd/selinux-enforce"
+: >"$enforce_file"
+cat >"$tmpd/bin/restorecon" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$tmpd/restorecon.log"
+EOF
+chmod 755 "$tmpd/bin/restorecon"
+export PANGOLIN_SELINUX_ENFORCE="$enforce_file"
+restore_selinux_context "$PANGOLIN_BIN" || fail "restore_selinux_context should succeed"
+[[ "$(cat "$tmpd/restorecon.log")" == "$PANGOLIN_BIN" ]] ||
+  fail "restorecon should receive the binary path"
+rm -f "$tmpd/restorecon.log"
+
+# Missing restorecon only warns; it must not fail.
+mkdir -p "$tmpd/empty-bin"
+if ! warning="$(PATH="$tmpd/empty-bin" restore_selinux_context "$PANGOLIN_BIN" 2>&1)"; then
+  fail "missing restorecon should not fail"
+fi
+case "$warning" in
+*restorecon*) ;;
+*) fail "missing restorecon should warn" ;;
+esac
+
+# Without an enforce file the helper does nothing.
+export PANGOLIN_SELINUX_ENFORCE="$tmpd/no-selinux"
+restore_selinux_context "$PANGOLIN_BIN" || fail "no SELinux should succeed"
+[[ ! -e "$tmpd/restorecon.log" ]] || fail "no enforce file should skip restorecon"
+
+# The install path restores the context after moving the verified binary.
+rm -f "$PANGOLIN_BIN" "$PANGOLIN_STATE_FILE"
+export PANGOLIN_SELINUX_ENFORCE="$enforce_file"
+install_cli_binary latest -
+[[ "$(cat "$tmpd/restorecon.log")" == "$PANGOLIN_BIN" ]] ||
+  fail "install should restore the binary's SELinux context"
+
 rm -rf "$tmpd"
 export PATH="$old_path"
 export PANGOLIN_ROOT="$old_pangolin_root"
 export PANGOLIN_BIN="$old_pangolin_bin"
 export PANGOLIN_STATE_FILE="$old_pangolin_state_file"
+export PANGOLIN_SELINUX_ENFORCE="$old_pangolin_selinux_enforce"
 
 echo "Task 4 tests passed"

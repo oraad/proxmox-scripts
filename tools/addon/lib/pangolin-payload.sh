@@ -14,6 +14,7 @@ PANGOLIN_BIN="${PANGOLIN_BIN:-$(p /usr/local/bin/pangolin)}"
 PANGOLIN_STATE_FILE="${PANGOLIN_STATE_FILE:-$(p /var/lib/pangolin/cli.json)}"
 PANGOLIN_RELEASE_API="${PANGOLIN_RELEASE_API:-https://api.fossorial.io/api/v1/versions/cli}"
 PANGOLIN_RELEASE_BASE="${PANGOLIN_RELEASE_BASE:-https://github.com/fosrl/cli/releases/download}"
+PANGOLIN_SELINUX_ENFORCE="${PANGOLIN_SELINUX_ENFORCE:-/sys/fs/selinux/enforce}"
 
 # Map a `uname -m` machine name to a release asset architecture.
 arch_from_uname() {
@@ -273,6 +274,21 @@ _cli_release_api() {
   curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 10 --max-time 120 "$PANGOLIN_RELEASE_API"
 }
 
+# Restore a file's SELinux context when SELinux is enforcing. A missing
+# restorecon is a warning, never an install failure.
+restore_selinux_context() {
+  local path="$1"
+  [[ -e "$PANGOLIN_SELINUX_ENFORCE" ]] || return 0
+  if ! command -v restorecon >/dev/null 2>&1; then
+    echo "SELinux is enforcing but restorecon is not installed; $path may not be executable by systemd." >&2
+    return 0
+  fi
+  if ! restorecon "$path"; then
+    echo "Failed to restore the SELinux context of $path" >&2
+  fi
+  return 0
+}
+
 # Install the Pangolin CLI only after its sha256 and version are verified.
 # Returns 1 on any failure and leaves the existing binary untouched.
 install_cli_binary() {
@@ -394,6 +410,7 @@ install_cli_binary() {
     echo "Failed to replace $PANGOLIN_BIN with Pangolin CLI $version" >&2
     return 1
   fi
+  restore_selinux_context "$PANGOLIN_BIN"
   echo "Installed Pangolin CLI $version"
 }
 
