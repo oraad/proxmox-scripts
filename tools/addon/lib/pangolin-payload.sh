@@ -19,6 +19,8 @@ LEGACY_NEWT_SECRET=""
 LEGACY_ENDPOINT=""
 LEGACY_SITE_FILES=()
 LEGACY_CLIENT_FILES=()
+LEGACY_SITE_BACKUP_DIR=""
+LEGACY_CLIENT_BACKUP_DIR=""
 
 PANGOLIN_BIN="${PANGOLIN_BIN:-$(p /usr/local/bin/pangolin)}"
 PANGOLIN_STATE_FILE="${PANGOLIN_STATE_FILE:-$(p /var/lib/pangolin/cli.json)}"
@@ -691,24 +693,60 @@ backup_existing() {
   printf '%s\n' "$dir"
 }
 
+# Validate a backup manifest before restore touches any destination. Every
+# non-empty line must be exactly two tab-separated, non-empty fields, the
+# stored name must be a plain basename, and the stored file must exist. A
+# corrupt manifest fails loudly instead of restoring only the parseable lines.
+_validate_backup_manifest() {
+  local dir="$1" line name rest
+  [[ -f "$dir/manifest" ]] || {
+    echo "restore_backup: $dir has no manifest" >&2
+    return 1
+  }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || {
+      echo "restore_backup: empty manifest line in $dir/manifest" >&2
+      return 1
+    }
+    [[ "$line" == *$'\t'* ]] || {
+      echo "restore_backup: malformed manifest line in $dir/manifest" >&2
+      return 1
+    }
+    name="${line%%$'\t'*}"
+    rest="${line#*$'\t'}"
+    [[ "$rest" != *$'\t'* ]] || {
+      echo "restore_backup: too many fields in $dir/manifest" >&2
+      return 1
+    }
+    [[ -n "$name" && -n "$rest" ]] || {
+      echo "restore_backup: empty manifest field in $dir/manifest" >&2
+      return 1
+    }
+    [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] || {
+      echo "restore_backup: unsafe backup name in $dir/manifest" >&2
+      return 1
+    }
+    [[ -e "$dir/$name" || -L "$dir/$name" ]] || {
+      echo "restore_backup: backup file $dir/$name is missing" >&2
+      return 1
+    }
+  done <"$dir/manifest"
+  return 0
+}
+
 # Copy every file in a backup directory back to the path recorded in its
 # manifest, preserving the original mode and ownership where permitted.
 restore_backup() {
   local dir="$1" line name src target parent
-  if [[ ! -d "$dir" || ! -f "$dir/manifest" ]]; then
+  if [[ ! -d "$dir" ]]; then
     echo "restore_backup: $dir is not a backup directory" >&2
     return 1
   fi
+  _validate_backup_manifest "$dir" || return 1
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ -n "$line" ]] || continue
     name="${line%%$'\t'*}"
     src="${line#*$'\t'}"
-    [[ -n "$name" && -n "$src" && "$name" != "$src" ]] || continue
     target="$dir/$name"
-    if [[ ! -e "$target" && ! -L "$target" ]]; then
-      echo "restore_backup: backup file $target is missing" >&2
-      return 1
-    fi
     parent="$(dirname "$src")"
     if [[ ! -d "$parent" ]]; then
       install -d -m 0755 "$parent" || return 1
@@ -843,10 +881,14 @@ _stop_legacy_client_service() {
 }
 
 # Remove the recorded legacy files for the components verified in this run.
-# An unknown scope fails before touching anything. Old client files are only
-# removed when the new client is verified; site and client are independent.
+# An unknown scope fails before touching anything. Each scope first backs up
+# the files it is about to remove, so the rollback path never depends on the
+# caller remembering to do it. If that backup fails, nothing is removed.
+# Old client files are only removed when the new client is verified; site and
+# client are independent.
 cleanup_legacy_addon() {
-  local scope="${1:-}" path rc=0 site_wrapper
+  local scope="${1:-}" path backup_dir rc=0 site_wrapper
+  local -a paths=()
   case "$scope" in
   site | client | both) ;;
   *)
@@ -855,9 +897,23 @@ cleanup_legacy_addon() {
     ;;
   esac
   if [[ "$scope" == site || "$scope" == both ]]; then
+    LEGACY_SITE_BACKUP_DIR=""
+    paths=()
     site_wrapper="$(p /usr/local/bin/pangolin-site-start)"
     if [[ ${#LEGACY_SITE_FILES[@]} -gt 0 ]]; then
       for path in "${LEGACY_SITE_FILES[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then
+          paths+=("$path")
+        fi
+      done
+    fi
+    if [[ ${#paths[@]} -gt 0 ]]; then
+      if ! backup_dir="$(backup_existing "${paths[@]}")"; then
+        echo "Failed to back up legacy site files; refusing to remove them" >&2
+        return 1
+      fi
+      LEGACY_SITE_BACKUP_DIR="$backup_dir"
+      for path in "${paths[@]}"; do
         if [[ "$path" == "$site_wrapper" ]]; then
           _remove_legacy_site_wrapper "$path" || rc=1
         elif ! rm -f "$path"; then
@@ -868,9 +924,23 @@ cleanup_legacy_addon() {
     fi
   fi
   if [[ "$scope" == client || "$scope" == both ]]; then
+    LEGACY_CLIENT_BACKUP_DIR=""
     _stop_legacy_client_service
+    paths=()
     if [[ ${#LEGACY_CLIENT_FILES[@]} -gt 0 ]]; then
       for path in "${LEGACY_CLIENT_FILES[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then
+          paths+=("$path")
+        fi
+      done
+    fi
+    if [[ ${#paths[@]} -gt 0 ]]; then
+      if ! backup_dir="$(backup_existing "${paths[@]}")"; then
+        echo "Failed to back up legacy client files; refusing to remove them" >&2
+        return 1
+      fi
+      LEGACY_CLIENT_BACKUP_DIR="$backup_dir"
+      for path in "${paths[@]}"; do
         if ! rm -f "$path"; then
           echo "Failed to remove $path" >&2
           rc=1
@@ -878,6 +948,9 @@ cleanup_legacy_addon() {
       done
     fi
     rmdir "$(p /etc/pangolin-cli)" 2>/dev/null || true
+    if [[ -z "$PANGOLIN_ROOT" ]] && command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
   fi
   return "$rc"
 }

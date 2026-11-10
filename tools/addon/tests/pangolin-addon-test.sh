@@ -546,6 +546,18 @@ chmod 644 "$old_site_env"
 restore_backup "$backup"
 [[ "$(cat "$site_unit")" == "UNIT" ]] || fail "restore"
 [[ "$(stat -c '%a' "$old_site_env")" == "600" ]] || fail "restore should keep the original mode"
+
+# A corrupt manifest must fail before restoring any valid earlier line.
+cp -a "$backup" "$tmpd/corrupt-backup"
+printf 'garbage\n' >>"$tmpd/corrupt-backup/manifest"
+printf 'STILL-CHANGED\n' >"$site_unit"
+if restore_backup "$tmpd/corrupt-backup" >/dev/null 2>&1; then
+  fail "a corrupt manifest should fail"
+fi
+[[ "$(cat "$site_unit")" == "STILL-CHANGED" ]] ||
+  fail "a corrupt manifest must not partially restore"
+restore_backup "$backup" || fail "restore after a corrupt manifest should work"
+
 if restore_backup "$tmpd/not-a-backup" >/dev/null 2>&1; then
   fail "restoring a directory that is not a backup should fail"
 fi
@@ -620,12 +632,26 @@ cleanup_legacy_addon client
 [[ -f "$old_site_env" ]] || fail "client cleanup must not remove site files"
 [[ -f "$new_client_env" ]] || fail "cleanup must keep the new client env"
 [[ -f "$new_site_json" ]] || fail "cleanup must keep the new site config"
+[[ -n "$LEGACY_CLIENT_BACKUP_DIR" ]] || fail "client cleanup should create a backup"
+[[ -f "$LEGACY_CLIENT_BACKUP_DIR/client.env" ]] ||
+  fail "client cleanup backup must keep the legacy client env"
+grep -q '^PANGOLIN_CLIENT_SECRET=csec$' "$LEGACY_CLIENT_BACKUP_DIR/client.env" ||
+  fail "client cleanup backup must keep the legacy secret"
+[[ "$(stat -c '%a' "$LEGACY_CLIENT_BACKUP_DIR/client.env")" == "600" ]] ||
+  fail "client cleanup backup must keep the secret mode"
 
 cleanup_legacy_addon site
 [[ ! -f "$old_site_env" ]] || fail "old site env should be removed after cleanup"
 [[ ! -f "$old_site_wrapper" ]] || fail "old site wrapper should be removed after cleanup"
 [[ -f "$new_client_env" ]] || fail "site cleanup must not remove client files"
 [[ -f "$new_site_json" ]] || fail "site cleanup must keep the new site config"
+[[ -n "$LEGACY_SITE_BACKUP_DIR" ]] || fail "site cleanup should create a backup"
+[[ -f "$LEGACY_SITE_BACKUP_DIR/pangolin-site.env" ]] ||
+  fail "site cleanup backup must keep the legacy site env"
+grep -q '^SITE_SECRET=oldsec$' "$LEGACY_SITE_BACKUP_DIR/pangolin-site.env" ||
+  fail "site cleanup backup must keep the legacy secret"
+[[ "$(stat -c '%a' "$LEGACY_SITE_BACKUP_DIR/pangolin-site.env")" == "600" ]] ||
+  fail "site cleanup backup must keep the secret mode"
 
 # The current OpenRC site wrapper must survive a repeated cleanup.
 printf '#!/bin/sh\nCONFIG_FILE=%s\nexport CONFIG_FILE\n' "$new_site_json" \
