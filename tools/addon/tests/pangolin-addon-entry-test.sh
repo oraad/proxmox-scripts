@@ -196,31 +196,95 @@ case "$equal_out" in
   ;;
 esac
 
-# An enabled native mode needs a run that writes the site configuration; a
-# reused or migrated config must not silently drop it.
+# An enabled native mode is accepted without new answers only when the existing
+# site configuration already holds the requested keys and names.
+native_root="$(mktemp -d)"
+mkdir -p "$native_root/etc/pangolin"
+old_pangolin_root="${PANGOLIN_ROOT:-}"
+export PANGOLIN_ROOT="$native_root"
+write_private_file "$native_root/etc/pangolin/site.json" \
+  "$(site_config_static https://p.example id secret 1 1 pangolin pangolin-main)"
 (
   var_site_native=1
-  var_site_native_main=0
-  _native_config_possible 1 1
-) || { echo "native toggles with new answers should pass" >&2; exit 1; }
+  var_site_native_main=1
+  var_site_interface=pangolin
+  var_site_interface_main=pangolin-main
+  _native_config_possible host 0
+) || { echo "a matching native config should allow reuse" >&2; exit 1; }
+
+if (
+  var_site_native=1
+  var_site_native_main=1
+  var_site_interface=pangolin
+  var_site_interface_main=wg-main
+  _native_config_possible host 0
+); then
+  echo "a mismatched native interface should fail reuse" >&2
+  exit 1
+fi
+
+rm -f "$native_root/etc/pangolin/site.json"
 if (
   var_site_native=1
   var_site_native_main=0
-  _native_config_possible 1 0
+  var_site_interface=pangolin
+  _native_config_possible host 0
 ); then
-  echo "native toggles without new answers should fail" >&2
+  echo "a missing site config should fail native reuse" >&2
   exit 1
 fi
+
+# Plain site reuse is unchanged and needs no target config.
 (
   var_site_native=0
   var_site_native_main=0
-  _native_config_possible 1 0
-) || { echo "disabled native toggles should pass" >&2; exit 1; }
+  _native_config_possible host 0
+) || { echo "plain site reuse should pass" >&2; exit 1; }
+
+# New answers never read the target.
 (
   var_site_native=1
+  var_site_native_main=1
+  var_site_interface=pangolin
+  var_site_interface_main=pangolin-main
+  _native_config_possible host 1
+) || { echo "new answers should pass without a target config" >&2; exit 1; }
+
+# A reused LXC configuration is read through pct and must match as well.
+lxc_tmpd="$(mktemp -d)"
+mkdir -p "$lxc_tmpd/bin"
+cat >"$lxc_tmpd/bin/pct" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+*"cat /etc/pangolin/site.json"*) printf '%s\n' "$FAKE_SITE_CONFIG" ;;
+esac
+EOF
+chmod 755 "$lxc_tmpd/bin/pct"
+if ! (
+  export PATH="$lxc_tmpd/bin:$PATH"
+  export FAKE_SITE_CONFIG='{"endpoint":"https://p.example","id":"id","secret":"secret","native":true,"interface":"pangolin"}'
+  var_site_native=1
   var_site_native_main=0
-  _native_config_possible 0 0
-) || { echo "client-only runs ignore site native toggles" >&2; exit 1; }
+  var_site_interface=pangolin
+  _native_config_possible 101 0
+); then
+  echo "a matching LXC native config should allow reuse" >&2
+  exit 1
+fi
+if (
+  export PATH="$lxc_tmpd/bin:$PATH"
+  export FAKE_SITE_CONFIG='{"endpoint":"https://p.example","id":"id","secret":"secret","native":true,"interface":"wg0"}'
+  var_site_native=1
+  var_site_native_main=0
+  var_site_interface=pangolin
+  _native_config_possible 101 0
+); then
+  echo "a mismatched LXC native config should fail reuse" >&2
+  exit 1
+fi
+rm -rf "$lxc_tmpd"
+export PANGOLIN_ROOT="$old_pangolin_root"
+rm -rf "$native_root"
 
 fetch_payload "$dir/payload.sh"
 cmp -s "$PANGOLIN_PAYLOAD" "$dir/payload.sh" || { echo "payload copy" >&2; exit 1; }
@@ -807,6 +871,26 @@ case "$dry_native_out" in
 *s3cr3t-DO-NOT-PRINT*) echo "native dry run printed the secret" >&2; exit 1 ;;
 esac
 [[ -z "$(ls -A "$dry/tmp")" ]] || { echo "native dry run wrote files" >&2; exit 1; }
+
+# With no new site form, reuse is only possible when the existing config matches;
+# the dry run says so instead of printing an unconditional success plan.
+if ! dry_reuse_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_native=1 bash "$ROOT/add-pangolin.sh" 2>&1
+)"; then
+  echo "native reuse dry run failed: $dry_reuse_out" >&2
+  exit 1
+fi
+case "$dry_reuse_out" in
+*"native interface settings are applied only on create or reconfigure"*var_reconfigure=1*) ;;
+*)
+  echo "native reuse dry run note missing: $dry_reuse_out" >&2
+  exit 1
+  ;;
+esac
+[[ -z "$(ls -A "$dry/tmp")" ]] || { echo "native reuse dry run wrote files" >&2; exit 1; }
+[[ ! -e "$dry/curl-ran" ]] || { echo "native reuse dry run used the network" >&2; exit 1; }
 
 # Invalid native values fail before any side effect, including a dry run.
 bad_flag_rc=0

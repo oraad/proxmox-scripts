@@ -432,14 +432,59 @@ _resolve_site_native() {
   var_site_interface_main="$interface_main"
 }
 
-# Succeed when the native toggles can take effect: either no site native mode is
-# enabled, or this run writes a new site configuration. A reused or migrated
-# configuration is never silently left without the requested native keys.
+# Print the site configuration on the target. Read-only; prints nothing when the
+# file is missing or cannot be read.
+_read_target_site_config() {
+  local target="$1"
+  if [[ "$target" == host ]]; then
+    cat "$(p /etc/pangolin/site.json)" 2>/dev/null || true
+  else
+    pct exec "$target" -- cat /etc/pangolin/site.json 2>/dev/null || true
+  fi
+}
+
+# Succeed when JSON content holds KEY with a true boolean value.
+_json_key_true() {
+  local content="$1" key="$2"
+  printf '%s' "$content" | grep -qE "\"$key\"[[:space:]]*:[[:space:]]*true"
+}
+
+# Succeed when JSON content holds KEY with exactly VALUE as a string.
+_json_key_string() {
+  local content="$1" key="$2" value="$3" escaped
+  escaped="$(printf '%s' "$value" | sed 's/[][\.*^$/]/\\&/g')"
+  printf '%s' "$content" | grep -qE "\"$key\"[[:space:]]*:[[:space:]]*\"$escaped\""
+}
+
+# Succeed when a site configuration already enables every requested native mode
+# with the requested interface names.
+_site_native_matches() {
+  local content="$1" native="$2" native_main="$3"
+  local interface="$4" interface_main="$5"
+  if [[ "$native" == 1 ]]; then
+    _json_key_true "$content" native || return 1
+    _json_key_string "$content" interface "$interface" || return 1
+  fi
+  if [[ "$native_main" == 1 ]]; then
+    _json_key_true "$content" nativeMain || return 1
+    _json_key_string "$content" interfaceMain "$interface_main" || return 1
+  fi
+}
+
+# Succeed when the native toggles can take effect: no site native mode is
+# enabled, this run writes a new site configuration, or the existing target
+# configuration already matches every requested native mode. A mismatched or
+# missing configuration fails so a requested mode is never silently dropped.
 _native_config_possible() {
-  local site="$1" answers="$2"
-  [[ "$site" == 1 ]] || return 0
+  local target="$1" answers="$2" content
   [[ "$answers" == 1 ]] && return 0
-  ! tun_required 0 "$var_site_native" "$var_site_native_main"
+  if ! tun_required 0 "${var_site_native-0}" "${var_site_native_main-0}"; then
+    return 0
+  fi
+  content="$(_read_target_site_config "$target")"
+  [[ -n "$content" ]] || return 1
+  _site_native_matches "$content" "${var_site_native-0}" "${var_site_native_main-0}" \
+    "${var_site_interface-pangolin}" "${var_site_interface_main-pangolin}"
 }
 
 # Print a component list for messages.
@@ -539,6 +584,10 @@ _print_dry_run() {
       "$native_label" "${var_site_interface-pangolin}"
     printf '  - Site native main tunnel: %s (interface %s)\n' \
       "$main_label" "${var_site_interface_main-pangolin}"
+    if [[ "$reconfigure" != 1 ]] && ! _has_site_form &&
+      [[ "$site_native" == 1 || "$site_native_main" == 1 ]]; then
+      printf '  - Note: native interface settings are applied only on create or reconfigure; reuse requires the existing site configuration to match, otherwise set var_reconfigure=1\n'
+    fi
     printf '  - Install the pangolin-site service and verify provisioning\n'
     printf '  - Check status with: %spangolin service status site\n' "$prefix"
   fi
@@ -970,8 +1019,8 @@ main() {
 
   if [[ "$site" == 1 ]]; then
     site_answers="$(_resolve_site_answers "$target" "$reconfigure")" || return 1
-    if ! _native_config_possible "$site" "$site_answers"; then
-      msg_error "Native site interfaces need a new site configuration; set var_reconfigure=1 or provide site credentials."
+    if ! _native_config_possible "$target" "$site_answers"; then
+      msg_error "Native site interfaces are enabled but the existing site configuration does not match; set var_reconfigure=1 to apply them."
       return 1
     fi
   fi
