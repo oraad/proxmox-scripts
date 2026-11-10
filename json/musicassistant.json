@@ -11,7 +11,7 @@
   "website": "https://www.music-assistant.io/",
   "logo": "https://www.music-assistant.io/favicon.ico",
   "config_path": "/opt/musicassistant/data",
-  "description": "Music Assistant is a free, open-source media library manager that connects streaming services and local music to a wide range of players. This script deploys the official Docker server in an LXC container with host networking for player discovery.",
+  "description": "Media library manager that connects streaming services and local music to many players. Deploys the official Docker server in an LXC with host networking for discovery.",
   "install_methods": [
     {
       "type": "default",
@@ -42,39 +42,27 @@
   },
   "notes": [
     {
-      "text": "Requires Docker with host networking inside the LXC. Enable nesting and keyctl (defaults in this script).",
+      "text": "Docker with host networking is mandatory. Enable nesting and keyctl (defaults here); MA, players, and HA must share one flat network/VLAN.",
       "type": "warning"
     },
     {
-      "text": "Music Assistant developers recommend the Home Assistant add-on. This is an unofficial Docker LXC install path.",
-      "type": "info"
-    },
-    {
-      "text": "Authentication: Music Assistant (schema 28+) requires a login. On first use you create an admin account at http://<container-ip>:8095/setup (via the admin wizard; do not lose these credentials — they cannot be recovered). Users can have admin or user role. Exposing the UI through Home Assistant's hass_ingress integration gates reachability behind the HA login, but MA still requires its own account login — it does not inherit the add-on's 'no password, auto-login from HA' behaviour (that is a Supervisor-internal feature unavailable to a standalone Docker LXC).",
-      "type": "info"
-    },
-    {
-      "text": "'Sign in with Home Assistant' option: MA shows this login button automatically when you configure the Home Assistant provider inside MA (Settings > Providers > Home Assistant) with your HA URL. Note this also imports your HA media players into MA as players (a side effect to be aware of), and it is configured from the MA UI, not the install script.",
-      "type": "info"
-    },
-    {
-      "text": "Web UI: http://<container-ip>:8095. Music Assistant requires layer-2 network access — MA, players, and Home Assistant should be on the same flat network or VLAN. Host networking is mandatory for the Docker container.",
-      "type": "info"
-    },
-    {
-      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update Music Assistant or Remove Unused Images. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update.",
-      "type": "info"
-    },
-    {
-      "text": "If host-network Docker fails on an unprivileged LXC, try privileged mode: `var_unprivileged=0 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/musicassistant.sh)\"`",
+      "text": "MA (schema 28+) requires its own login: create the admin at http://<ip>:8095/setup. Credentials cannot be recovered; hass_ingress does not bypass MA login.",
       "type": "warning"
     },
     {
-      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.24`. Download if missing: `pveam download local alpine-3.24-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.24 is not listed on an older Proxmox host.",
+      "text": "If host-network Docker fails on an unprivileged LXC, retry with `var_unprivileged=0`. Unprivileged media bind mounts may also need correct host ownership.",
+      "type": "warning"
+    },
+    {
+      "text": "'Sign in with Home Assistant' appears after you add the HA provider (Settings > Providers); it also imports HA media players into MA.",
       "type": "info"
     },
     {
-      "text": "Optional local music library: during Advanced install you can enter a host path (bind-mounted to `/media` in the LXC). Unattended: `var_media_path=/path/on/host bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/musicassistant.sh)\"`. Unprivileged bind mounts may require correct host directory ownership or `var_unprivileged=0`.",
+      "text": "Optional local library: `var_media_path=/path/on/host` bind-mounts to /media. UI: http://<container-ip>:8095.",
+      "type": "info"
+    },
+    {
+      "text": "Update: `update` inside the LXC or `pct exec <CTID> -- update`; PHS_SILENT=1 for unattended. The HA add-on is developer-recommended; this is an unofficial Docker LXC.",
       "type": "info"
     }
   ]

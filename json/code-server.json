@@ -13,7 +13,7 @@
   "website": "https://coder.com/",
   "logo": "https://raw.githubusercontent.com/coder/code-server/main/src/browser/media/pwa-icon-512.png",
   "config_path": "/root/.config/code-server/config.yaml",
-  "description": "code-server is a self-hosted Visual Studio Code served over the web, so you can use it from any browser on any device. This script installs the official Debian package natively in an LXC (no Docker) and runs it as a systemd user service on port 8680.",
+  "description": "Self-hosted VS Code in the browser. Installs the official Debian package natively in an LXC (no Docker) as a systemd user service on port 8680.",
   "install_methods": [
     {
       "type": "default",
@@ -33,31 +33,27 @@
   },
   "notes": [
     {
-      "text": "The web UI binds to 0.0.0.0:8680 with a generated random password (`auth: password`), printed once at the end of the install and stored in /root/.config/code-server/config.yaml. Set your own with `var_code_server_password=<pw>` at install, or edit the config and `systemctl restart code-server@root`. `auth: none` is only used when Home Assistant Ingress is enabled.",
+      "text": "UI binds 0.0.0.0:8680 with a generated password, printed once, stored in /root/.config/code-server/config.yaml. Set var_code_server_password, then restart code-server@root.",
       "type": "warning"
     },
     {
-      "text": "code-server ships Debian/Ubuntu .deb packages only, so this install uses the Debian 13 template (unprivileged LXC by default). The Alpine template is not available for this app.",
+      "text": "Debian/Ubuntu .deb packages only, so this uses the Debian 13 template (unprivileged). No Alpine install.",
       "type": "info"
     },
     {
-      "text": "Web UI: http://<container-ip>:8680",
+      "text": "Workspaces live in the login user's home. Add a non-root user and log in as them to sandbox projects; otherwise files land in /root.",
       "type": "info"
     },
     {
-      "text": "Workspaces live in the logging-in user's home directory. Add a non-root user inside the LXC and log in as them to sandbox projects, or copy your dotfiles into /root.",
+      "text": "HA Ingress (`var_hass_ingress=yes`) adds code-server to the HA sidebar with HA-session auth and disables its own auth; needs the hass_ingress HACS integration.",
       "type": "info"
     },
     {
-      "text": "Optional Home Assistant Ingress: expose code-server inside the HA sidebar with HA-session auth (no separate login, no exposed port). Requires the hass_ingress HACS integration (https://github.com/lovelylain/hass_ingress). Enable at install with `var_hass_ingress=yes bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/code-server.sh)\"` (or answer yes to the prompt). This disables code-server's own auth (HA becomes the auth boundary) and writes a ready-to-paste configuration.yaml snippet to /opt/code-server-ha-ingress.md inside the container.",
+      "text": "Ingress setup: a ready-to-paste configuration.yaml snippet is written to /opt/code-server-ha-ingress.md. Integration: https://github.com/lovelylain/hass_ingress.",
       "type": "info"
     },
     {
-      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update, Remove Unused Packages, or Restart. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update.",
-      "type": "info"
-    },
-    {
-      "text": "Config file: /root/.config/code-server/config.yaml. Upstream project: https://github.com/coder/code-server",
+      "text": "Update: `update` inside the LXC or `pct exec <CTID> -- update`; PHS_SILENT=1 for unattended. Web UI: http://<container-ip>:8680.",
       "type": "info"
     }
   ]

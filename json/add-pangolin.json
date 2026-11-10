@@ -14,7 +14,7 @@
   "website": "https://pangolin.net/",
   "logo": "https://pangolin.net/favicon.ico",
   "config_path": "/etc/pangolin",
-  "description": "Installs the official Pangolin CLI on the Proxmox host or into an existing LXC and enables Site mode (`pangolin up site` \u2014 the Newt replacement), Machine Client mode (`pangolin up client` \u2014 VPN), or both. One binary, two components. The CLI download is sha256-verified, services run through the upstream CLI, and existing addon or standalone Newt installs are migrated in place.",
+  "description": "Installs the official Pangolin CLI on the Proxmox host or an existing LXC and runs Site mode (`pangolin up site`) and/or Machine Client mode (`pangolin up client`).",
   "install_methods": [
     {
       "type": "default",
@@ -34,83 +34,27 @@
   },
   "notes": [
     {
-      "text": "Components: Site tunnel (expose private resources to Pangolin, userspace WireGuard, no TUN) and/or Machine client (join the host/LXC into the Pangolin network as a device, needs /dev/net/tun). The CLI binary installs once and both components can run side by side as separate services (`pangolin-site` and `pangolin-client`).",
+      "text": "Components: Site tunnel (userspace WireGuard, no TUN) and Machine client (needs /dev/net/tun). Target: Proxmox host or an existing Debian 12+/Ubuntu 22.04+/Alpine 3.20+ LXC.",
       "type": "info"
     },
     {
-      "text": "Targets: the Proxmox host or an existing LXC running Debian 12+, Ubuntu 22.04+, or Alpine 3.20+. Debian and Ubuntu use systemd; Alpine uses OpenRC with `supervise-daemon`.",
-      "type": "info"
-    },
-    {
-      "text": "Run on the Proxmox host (not inside a container). Choose Proxmox host or an existing LXC, then select which components and enter credentials.",
+      "text": "Run on the Proxmox host, not inside a container. A host install exposes everything the host can reach and joins the whole host to the VPN; prefer an existing LXC.",
       "type": "warning"
     },
     {
-      "text": "Host install: the host is directly connected to Pangolin (site can expose everything the host can reach; client joins the whole host to the VPN). Prefer an existing LXC for isolation.",
-      "type": "warning"
-    },
-    {
-      "text": "Site mode: use the Site ID + secret from the Pangolin dashboard (works on every Pangolin edition), or a site provisioning key (tier3/enterprise only; dashboard Settings \u2192 Provisioning \u2192 Keys). Unattended installs need \"approve new sites\" enabled, or the site must be approved during provisioning; with it disabled, the site stays pending until an operator approves it. A provisioning key also takes an optional site name (default: the target hostname).",
+      "text": "Site mode: use Site ID + secret, or a provisioning key (tier3/enterprise; Settings \u2192 Provisioning \u2192 Keys). Unattended needs \"approve new sites\" on, or approve during provisioning.",
       "type": "info"
     },
     {
-      "text": "Reconfiguring an existing site with a provisioning key creates a second server-side site; delete the old site in the dashboard. Set `var_reconfigure=1` to replace an existing local site configuration; without it a verified site is reused.",
-      "type": "warning"
-    },
-    {
-      "text": "Client mode: create a machine client in the Pangolin dashboard first, then copy the client ID, secret, and endpoint. On an LXC the addon adds /dev/net/tun passthrough and restarts the CT gracefully only when the config changes; on the host it loads the tun module and fails early when /dev/net/tun is unavailable.",
+      "text": "Client mode: create a machine client in the dashboard, then supply its ID, secret, and endpoint. Needs /dev/net/tun; the addon adds TUN passthrough to an LXC.",
       "type": "info"
     },
     {
-      "text": "Site native interfaces (optional, default off): `var_site_native=1` uses a kernel WireGuard interface for downstream client tunnels, and `var_site_native_main=1` for the main site tunnel. The addon writes the matching `native`/`interface` or `nativeMain`/`interfaceMain` keys to /etc/pangolin/site.json; `var_site_interface` and `var_site_interface_main` set the names (default `pangolin`, 1-15 characters, starting with a letter, using letters, digits, `_`, `-`, or `.`). With both modes on and the default name, the main interface becomes `pangolin-main`; any other shared name is rejected, so set distinct names. Native interfaces need /dev/net/tun and root or CAP_NET_ADMIN, so the addon adds TUN on the host or LXC like client mode. Unattended runs use the variables directly.",
+      "text": "Config: /etc/pangolin/site.json and /etc/pangolin/pangolin-client.env (0600); CLI at /usr/local/bin/pangolin is sha256-verified. Update: re-run tools/addon/add-pangolin.sh.",
       "type": "info"
     },
     {
-      "text": "The CLI is installed at /usr/local/bin/pangolin only from the official fosrl/cli release, after its sha256 digest and reported version are verified. The accepted artifact is recorded in /var/lib/pangolin/cli.json. Minimum CLI version 0.21.0. Pin `var_pangolin_cli_version` and supply `var_pangolin_cli_sha256` when pinning a version other than the latest.",
-      "type": "info"
-    },
-    {
-      "text": "Configuration: /etc/pangolin/site.json (mode 0600) and /etc/pangolin/pangolin-client.env (mode 0600, contains the client secret). Both components use /etc/pangolin. The CLI installs the systemd units; on Alpine the addon writes OpenRC units that run the CLI.",
-      "type": "info"
-    },
-    {
-      "text": "Service management: the upstream CLI commands `pangolin service status site|client`, `pangolin service logs site|client`, and `pangolin service uninstall site|client` are systemd-only. On Alpine the addon writes OpenRC units: check them with `rc-service pangolin-site status` / `rc-service pangolin-client status`, read logs at /var/log/pangolin-site.log and /var/log/pangolin-client.log, and remove one with `rc-update del pangolin-site default` followed by `rc-service pangolin-site stop` (same for `pangolin-client`). From the host for an LXC, prefix commands with `pct exec <CTID> --`.",
-      "type": "info"
-    },
-    {
-      "text": "Update by re-running the addon: it checks the latest release, reuses an already verified version, and downloads and verifies a different version before use. The old `update-pangolin-site` / `update-pangolin-cli` wrappers are deprecated and are not installed by new installs; they bypass the sha256 check, so do not rely on them.",
-      "type": "info"
-    },
-    {
-      "text": "Existing addon installs and standalone Newt installs (with /etc/newt/newt.env) are detected and migrated in place, reusing the existing credentials. Replaced files are backed up under /var/lib/pangolin/backup, and legacy cleanup runs only after the replacement component verifies.",
-      "type": "info"
-    },
-    {
-      "text": "Interactive: `bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin.sh)\"`",
-      "type": "info"
-    },
-    {
-      "text": "Unattended (site, host, provisioning key): `var_mode=site var_target=host var_pangolin_endpoint=https://pangolin.example.com var_site_provisioning_key=spk-... var_site_name=NAME bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin.sh)\"`",
-      "type": "info"
-    },
-    {
-      "text": "Unattended (site, host, site ID + secret): `var_mode=site var_target=host var_pangolin_endpoint=https://pangolin.example.com var_site_id=ID var_site_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin.sh)\"`",
-      "type": "info"
-    },
-    {
-      "text": "Unattended (client, LXC): `var_mode=client var_target=101 var_pangolin_endpoint=https://pangolin.example.com var_client_id=ID var_client_secret=SECRET bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/tools/addon/add-pangolin.sh)\"`",
-      "type": "info"
-    },
-    {
-      "text": "Unattended (both, LXC): use `var_mode=both` and supply `var_site_id`/`var_site_secret` (or `var_site_provisioning_key`) plus `var_client_id`/`var_client_secret`.",
-      "type": "info"
-    },
-    {
-      "text": "Other variables: `var_reconfigure=1` replaces an existing verified site configuration, `var_pangolin_cli_version` and `var_pangolin_cli_sha256` pin the binary, and `PANGOLIN_DRY_RUN=1` validates the inputs and prints the plan without changing the host.",
-      "type": "info"
-    },
-    {
-      "text": "Legacy aliases `var_newt_id` / `var_newt_secret` map to the site credentials. The deprecated wrapper URLs `tools/addon/add-pangolin-site.sh` (site), `tools/addon/add-pangolin-cli.sh` (client), and `tools/addon/add-newt.sh` (site alias) still work and call the unified addon.",
+      "text": "Unattended: `var_mode=site var_target=host var_pangolin_endpoint=https://pangolin.example.com var_site_id=ID var_site_secret=SECRET` when running tools/addon/add-pangolin.sh.",
       "type": "info"
     }
   ]

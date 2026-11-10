@@ -11,7 +11,7 @@
   "website": "https://netalertx.com/",
   "logo": "https://raw.githubusercontent.com/netalertx/NetAlertX/main/docs/img/NetAlertX_logo.png",
   "config_path": "/opt/netalertx/data",
-  "description": "NetAlertX is a network visibility and asset intelligence tool that discovers devices via ARP and passive protocols. This script deploys the official Docker image in an LXC with host networking for accurate scanning.",
+  "description": "Network visibility and asset intelligence that discovers devices via ARP and passive protocols. Deploys the official Docker image in a privileged LXC with host networking.",
   "install_methods": [
     {
       "type": "default",
@@ -42,35 +42,27 @@
   },
   "notes": [
     {
-      "text": "Defaults to a privileged LXC with nesting and keyctl so Docker can use host networking and ARP/raw sockets. Unprivileged mode often limits discovery: `var_unprivileged=1 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/netalertx.sh)\"`.",
+      "text": "Defaults to a privileged LXC with nesting and keyctl so Docker can use host networking and ARP/raw sockets. Unprivileged mode limits discovery (`var_unprivileged=1`).",
       "type": "warning"
     },
     {
-      "text": "Host networking is mandatory for the NetAlertX container (ARP scanning and passive discovery). The LXC should be on the same LAN/VLAN as the networks you want to monitor.",
+      "text": "Host networking is mandatory. Put the LXC on the same LAN/VLAN as the networks you monitor.",
       "type": "warning"
     },
     {
-      "text": "Web UI: http://<container-ip>:20211 (GraphQL API on 20212). Initial discovery can take 5–10 minutes.",
+      "text": "Web UI: http://<container-ip>:20211 (GraphQL API 20212). Initial discovery can take 5\u201310 minutes.",
       "type": "info"
     },
     {
-      "text": "Optional SCAN_SUBNETS at install: enter a CIDR and interface (e.g. 192.168.1.0/24 and eth0), or leave empty and set SCAN_SUBNETS in Settings after first start. Unattended: `var_scan_subnets=\"['192.168.1.0/24 --interface=eth0']\" bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/netalertx.sh)\"`.",
+      "text": "SCAN_SUBNETS at install takes a CIDR and interface, e.g. `var_scan_subnets=\"['192.168.1.0/24 --interface=eth0']\"`; otherwise set it in Settings.",
       "type": "info"
     },
     {
-      "text": "Upstream compose sysctls (arp_ignore / arp_announce) are omitted because they often fail inside LXC. Set them on the Proxmox host if you need ARP flux mitigation.",
+      "text": "Data: /opt/netalertx/data (config/, db/); image ghcr.io/netalertx/netalertx:latest. Upstream arp_ignore/arp_announce sysctls are omitted; set them on the Proxmox host.",
       "type": "info"
     },
     {
-      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. Interactive update shows Silent/Verbose/Cancel, then Update NetAlertX or Remove Unused Images. Unattended (`PHS_SILENT=1` or non-TTY) runs a silent app update.",
-      "type": "info"
-    },
-    {
-      "text": "Data lives under /opt/netalertx/data (config/ and db/). Official image: ghcr.io/netalertx/netalertx:latest.",
-      "type": "info"
-    },
-    {
-      "text": "Alpine template: run `pveam update`, then `pveam available --section system | grep alpine-3.24`. Download if missing: `pveam download local alpine-3.24-default_20260116_amd64.tar.xz` (use the exact name from `pveam available` on your arch). Fallback: `var_version=3.22` if 3.24 is not listed on an older Proxmox host.",
+      "text": "Update: `update` inside the LXC or `pct exec <CTID> -- update`; PHS_SILENT=1 for unattended.",
       "type": "info"
     }
   ]

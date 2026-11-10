@@ -11,7 +11,7 @@
   "website": "https://inventree.org/",
   "logo": "https://raw.githubusercontent.com/inventree/InvenTree/master/docs/docs/assets/logo.png",
   "config_path": "/etc/inventree/config.yaml",
-  "description": "InvenTree is an open-source inventory management system for tracking parts, stock, suppliers, manufacturers, and bills of materials, with a modern web interface and full REST API. This script installs the official InvenTree native apt package (packager.io) on a Debian 13 LXC — no Docker needed. The package provides systemd services (inventree-web, inventree-worker), a nginx reverse proxy on port 80, an auto-created admin account, and runs database migrations during setup.",
+  "description": "Open-source inventory management for parts, stock, suppliers, and BOMs, with a web UI and REST API. Installs the official InvenTree apt package on Debian 13 (nginx, port 80).",
   "install_methods": [
     {
       "type": "default",
@@ -31,35 +31,27 @@
   },
   "notes": [
     {
-      "text": "The admin password is auto-generated at install, shown once on screen, and saved to /etc/inventree/credentials.txt (mode 0600). If the package ever creates its own (it only does so when the password is auto-generated), it is stored in /etc/inventree/admin_password.txt.",
+      "text": "Admin password is generated at install, shown once, and saved to /etc/inventree/credentials.txt (0600); a package-generated fallback is /etc/inventree/admin_password.txt.",
       "type": "warning"
     },
     {
-      "text": "Native apt install requires a Debian 13 (trixie) LXC — the upstream installer supports Debian 13 and Ubuntu 24.04/26.04 only, so there is no Alpine install method for this script. If `var_version` is set below 13 the installer aborts.",
+      "text": "Web UI: http://<container-ip> (nginx 80 to gunicorn on localhost:6000). Site URL defaults to the container IP; set var_site_url or use `inventree config:set`. Nginx is HTTP only.",
+      "type": "warning"
+    },
+    {
+      "text": "Requires Debian 13 (trixie); upstream supports Debian 13 and Ubuntu 24.04/26.04 only, so there is no Alpine path. var_version below 13 aborts.",
       "type": "info"
     },
     {
-      "text": "Web UI: http://<container-ip> (nginx on port 80 proxying to gunicorn on localhost:6000). Site URL defaults to the container IP; override with `var_site_url=[...]` at install or later with `inventree config:set INVENTREE_SITE_URL=http://...`. The nginx site is /etc/nginx/sites-enabled/inventree.conf (HTTP only) — use a separate HTTPS site or terminate SSL at an external proxy.",
+      "text": "Data: SQLite at /opt/inventree/data/database.sqlite3; media, static, and backups under /opt/inventree/data. For PostgreSQL, set INVENTREE_DB_* before a fresh install.",
       "type": "info"
     },
     {
-      "text": "Default database backend is SQLite (/opt/inventree/data/database.sqlite3) — well suited to small/medium deployments and single-file backups. For PostgreSQL, set INVENTREE_DB_ENGINE=postgresql plus INVENTREE_DB_NAME/USER/PASSWORD/HOST/PORT before a fresh install. Media/static/backups live under /opt/inventree/data.",
+      "text": "Services: inventree-web, inventree-worker, nginx. Use `inventree logs` and `inventree restart`. Update: `update` in the LXC or `pct exec <CTID> -- update`.",
       "type": "info"
     },
     {
-      "text": "Services: `inventree` (main), `inventree-web`, `inventree-worker`, plus `nginx`. Control with `systemctl restart inventree` / `inventree restart`, follow logs with `inventree logs`, and run invoke tasks with `inventree run invoke <command>`.",
-      "type": "info"
-    },
-    {
-      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update`. Options: Update InvenTree (dist-upgrade then `apt-get install --only-upgrade inventree`, which runs migrations and backs up the database by default — log history in /opt/inventree/log), Remove Unused Packages, or Restart. To track the dev build, replace `stable` with `master` in /etc/apt/sources.list.d/inventree.list.",
-      "type": "info"
-    },
-    {
-      "text": "Unattended install overrides: `var_admin_user`, `var_admin_email`, `var_admin_password`, and `var_site_url`.",
-      "type": "info"
-    },
-    {
-      "text": "Template: Debian 13 standard template from the Proxmox repository — run `pveam update`, then `pveam available --section system | grep debian-13` and `pveam download local <template>` if missing.",
+      "text": "Unattended overrides: `var_admin_user`, `var_admin_email`, `var_admin_password`, `var_site_url`.",
       "type": "info"
     }
   ]

@@ -13,7 +13,7 @@
   "website": "https://openchamber.dev/",
   "logo": "https://openchamber.dev/favicon.ico",
   "config_path": "/etc/openchamber/openchamber.env",
-  "description": "OpenChamber is a web/PWA UI for the OpenCode AI coding agent. This script installs it natively via Node.js/npm on top of the OpenCode CLI in an LXC (no Docker) and runs it as root's systemd user service on port 3000 (lingering enabled, so it starts at boot) with a generated UI password.",
+  "description": "Web/PWA UI for the OpenCode AI coding agent. Installs natively via Node.js/npm on top of the OpenCode CLI in an LXC (no Docker) as root's systemd user service on port 3000.",
   "install_methods": [
     {
       "type": "default",
@@ -33,35 +33,27 @@
   },
   "notes": [
     {
-      "text": "The web UI binds to 0.0.0.0:3000 and requires UI auth (binding to 0.0.0.0 without a password is not allowed upstream). A password is auto-generated at install, shown once on screen, and saved to /etc/openchamber/openchamber.env (mode 0600) as OPENCHAMBER_UI_PASSWORD — it never appears on the command line. Recover/change it in that file and restart the service: `XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart openchamber`.",
+      "text": "UI binds 0.0.0.0:3000 and needs auth. Password is generated at install and saved in /etc/openchamber/openchamber.env (0600) as OPENCHAMBER_UI_PASSWORD.",
       "type": "warning"
     },
     {
-      "text": "Web UI: http://<container-ip>:3000 (installable as a PWA). Unauthenticated health endpoint: http://<container-ip>:3000/health.",
+      "text": "Web UI: http://<container-ip>:3000 (installable PWA); health: /health. Choose a password with `var_ui_password=...`.",
       "type": "info"
     },
     {
-      "text": "The OpenCode CLI v2 (>= 2.2.0, the version OpenChamber requires) is installed alongside via the v2 installer and symlinked to /usr/local/bin/opencode. OpenChamber starts and manages its own OpenCode server \u2014 do not run a separate opencode service. Configure provider API keys inside the container with `opencode auth login` \u2014 stored at /root/.local/share/opencode/auth.json.",
+      "text": "OpenCode CLI v2 (>= 2.2.0) is symlinked to /usr/local/bin/opencode; OpenChamber manages its own server \u2014 do not run a separate opencode service.",
       "type": "info"
     },
     {
-      "text": "Update an existing container: run `update` inside the LXC, or `pct exec <CTID> -- update` from the Proxmox host. The updater upgrades the base system, re-runs the OpenCode v2 installer (CLI upgrade), runs `npm install -g @openchamber/web@latest`, moves older system-service installs to root's systemd user service, restarts it, and waits for /health. The in-app Update button works too, because the service has a user session bus (dbus-user-session).",
+      "text": "Add provider keys with `opencode auth login` (/root/.local/share/opencode/auth.json). Runs as a user service with lingering; prefix commands with `XDG_RUNTIME_DIR=/run/user/0`.",
       "type": "info"
     },
     {
-      "text": "Unattended install with a custom UI password: `var_ui_password=\"your-secret\" bash -c \"$(curl -fsSL https://raw.githubusercontent.com/oraad/proxmox-scripts/main/ct/openchamber.sh)\"`.",
+      "text": "Debian only: needs Node.js >= 24.14.0, installed from NodeSource LTS. Pin with NODE_VERSION=24 at install. No Alpine path.",
       "type": "info"
     },
     {
-      "text": "Debian only: OpenChamber needs Node.js >= 24.14.0 and this script installs the latest Node.js LTS available at install time via the NodeSource APT-based setup_nodejs helper (26.x \"Lithium\" at the time of writing) — there is no Alpine path. Pin a major with NODE_VERSION=24 at install time if needed.",
-      "type": "info"
-    },
-    {
-      "text": "It runs as /root/.config/systemd/user/openchamber.service with lingering enabled for root (`loginctl enable-linger root`), so it starts at boot without a login. From `pct exec`/`pct enter`, prefix user-scope commands with `XDG_RUNTIME_DIR=/run/user/0` (e.g. `XDG_RUNTIME_DIR=/run/user/0 systemctl --user status openchamber`). Service logs: `XDG_RUNTIME_DIR=/run/user/0 journalctl --user -u openchamber`.",
-      "type": "info"
-    },
-    {
-      "text": "Upstream project: https://github.com/openchamber/openchamber — docs: https://docs.openchamber.dev/",
+      "text": "Update: `update` in the LXC or `pct exec <CTID> -- update`; upgrades the CLI, reinstalls @openchamber/web, restarts, and waits for /health.",
       "type": "info"
     }
   ]
