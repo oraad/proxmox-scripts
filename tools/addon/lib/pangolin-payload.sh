@@ -173,16 +173,19 @@ _tun_append() {
 
 # Add the TUN device cgroup rule and bind mount to an LXC config when missing.
 # Sets TUN_CHANGED to 1 when a line was appended, 0 when nothing changed.
+# Returns 1 without touching TUN_CHANGED when the config is missing or a
+# write fails, so callers never assume the device is configured.
 ensure_tun_config() {
   local conf="$1" changed=0
   local cgroup='lxc.cgroup2.devices.allow: c 10:200 rwm'
   local mount='lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file'
-  if ! grep -qE 'lxc\.cgroup2\.devices\.allow:[[:space:]]*c 10:200 rwm' "$conf"; then
-    _tun_append "$conf" "$cgroup"
+  [[ -f "$conf" ]] || return 1
+  if ! grep -qE 'lxc\.cgroup2\.devices\.allow:[[:space:]]*c 10:200 rwm' "$conf" 2>/dev/null; then
+    _tun_append "$conf" "$cgroup" || return 1
     changed=1
   fi
-  if ! grep -qE 'lxc\.mount\.entry:[[:space:]]*/dev/net/tun[[:space:]]+dev/net/tun[[:space:]]+none[[:space:]]+bind,create=file' "$conf"; then
-    _tun_append "$conf" "$mount"
+  if ! grep -qE 'lxc\.mount\.entry:[[:space:]]*/dev/net/tun[[:space:]]+dev/net/tun[[:space:]]+none[[:space:]]+bind,create=file' "$conf" 2>/dev/null; then
+    _tun_append "$conf" "$mount" || return 1
     changed=1
   fi
   TUN_CHANGED="$changed"

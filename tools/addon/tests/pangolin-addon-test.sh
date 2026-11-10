@@ -81,6 +81,33 @@ ensure_tun_config "$conf"
 [[ "$(grep -c 'lxc.mount.entry: /dev/net/tun' "$conf")" == "1" ]] || fail "no duplicate mount line"
 rm -f "$conf"
 
+# A last line without a trailing newline must not merge with the appended lines.
+conf="$(mktemp)"
+printf 'arch: amd64' >"$conf"
+TUN_CHANGED=0
+ensure_tun_config "$conf" || fail "unterminated last line should still succeed"
+assert_eq "$(grep -c '^arch: amd64$' "$conf")" 1
+grep -q 'lxc.cgroup2.devices.allow: c 10:200 rwm' "$conf" || fail "cgroup line after unterminated last line"
+grep -q 'lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file' "$conf" ||
+  fail "mount line after unterminated last line"
+rm -f "$conf"
+
+# Spaced variants count as present and are not duplicated.
+conf="$(mktemp)"
+printf 'lxc.cgroup2.devices.allow:   c 10:200 rwm\n' >"$conf"
+ensure_tun_config "$conf" || fail "spaced cgroup line should still succeed"
+assert_eq "$(grep -c 'c 10:200' "$conf")" 1
+rm -f "$conf"
+
+# A write to an unusable path must fail instead of claiming success.
+missing="$(mktemp -d)/no-such-dir/lxc.conf"
+TUN_CHANGED=0
+if ensure_tun_config "$missing" >/dev/null 2>&1; then
+  fail "missing parent directory should fail"
+fi
+[[ ! -e "$missing" ]] || fail "failed write should not create the file"
+rm -rf "$(dirname "$(dirname "$missing")")"
+
 assert_eq systemd "$(backend_from_facts 1 0 0)"
 assert_eq openrc "$(backend_from_facts 0 1 1)"
 assert_eq none "$(backend_from_facts 0 1 0)"
