@@ -27,6 +27,13 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["provisioningKey"] == "spk-1.key", d
 PY
+[[ "$(stat -c '%a' "$dir")" == "700" ]] || { echo "answers dir mode" >&2; exit 1; }
+[[ "$(stat -c '%a' "$dir/site.json")" == "600" ]] || { echo "site config mode" >&2; exit 1; }
+
+fetch_payload "$dir/payload.sh"
+cmp -s "$PANGOLIN_PAYLOAD" "$dir/payload.sh" || { echo "payload copy" >&2; exit 1; }
+[[ "$(stat -c '%a' "$dir/payload.sh")" == "600" ]] || { echo "payload mode" >&2; exit 1; }
+
 build_client_answers "$dir" "https://p.example" cid csecret
 grep -q 'PANGOLIN_CLIENT_ID=cid' "$dir/client.env" || { echo "client answers" >&2; exit 1; }
 [[ "$(stat -c '%a' "$dir/client.env")" == "600" ]] || { echo "client env mode" >&2; exit 1; }

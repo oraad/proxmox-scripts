@@ -132,10 +132,14 @@ site_config_has_credentials() {
 }
 
 # Write content to a private file, creating the parent directory if needed.
+# An existing parent keeps its mode; the caller owns the directory policy.
 write_private_file() {
-  local path="$1" content="$2"
-  install -d -m 0755 "$(dirname "$path")"
-  install -m 0600 /dev/null "$path"
+  local path="$1" content="$2" dir
+  dir="$(dirname "$path")"
+  if [[ ! -d "$dir" ]]; then
+    install -d -m 0755 "$dir" || return 1
+  fi
+  install -m 0600 /dev/null "$path" || return 1
   printf '%s\n' "$content" >"$path"
 }
 
