@@ -282,6 +282,42 @@ if wait_for_provisioning "$prov_cfg" 1 0; then
   fail "a provisioning key should not count as credentials"
 fi
 
+# Leading-zero attempt counts must be read as decimal, not rejected as bad
+# octal or misread as fewer attempts.
+if ! noise="$(wait_service_active systemd pangolin-site 08 0 2>&1)"; then
+  fail "leading-zero attempts should pass"
+fi
+[[ -z "$noise" ]] || fail "leading-zero attempts printed: $noise"
+if ! noise="$(wait_for_provisioning "$cfg" 08 0 2>&1)"; then
+  fail "leading-zero provisioning attempts should pass"
+fi
+[[ -z "$noise" ]] || fail "leading-zero provisioning attempts printed: $noise"
+
+# A site install that never activates must fail and must not report success.
+# Shadow the wait helper in a subshell so the real one stays available later.
+site_rc=0
+site_stdout="$(
+  wait_service_active() { return 1; }
+  install_site_systemd "$cfg" 2>/dev/null
+)" || site_rc=$?
+[[ "$site_rc" -ne 0 ]] || fail "inactive install should fail"
+[[ -z "$site_stdout" ]] || fail "inactive install should not report success"
+
+# A failing CLI install must fail without waiting for the service.
+cat >"$tmpd/bin/pangolin-fail" <<'EOF'
+#!/usr/bin/env bash
+echo "pangolin $*" >>"$FAKE_LOG"
+exit 1
+EOF
+chmod 755 "$tmpd/bin/pangolin-fail"
+install_rc=0
+install_stdout="$(
+  export PANGOLIN_BIN="$tmpd/bin/pangolin-fail"
+  install_site_systemd "$cfg" 2>/dev/null
+)" || install_rc=$?
+[[ "$install_rc" -ne 0 ]] || fail "failed CLI install should fail"
+[[ -z "$install_stdout" ]] || fail "failed CLI install should not report success"
+
 rm -rf "$tmpd"
 export PATH="$old_path"
 export PANGOLIN_BIN="$old_pangolin_bin"

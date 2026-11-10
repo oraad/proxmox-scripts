@@ -419,6 +419,7 @@ install_cli_binary() {
 wait_service_active() {
   local backend="$1" name="$2" attempts="$3" delay="$4" i=0
   [[ "$attempts" =~ ^[0-9]+$ ]] || return 1
+  attempts=$((10#$attempts))
   while ((i < attempts)); do
     case "$backend" in
     systemd)
@@ -448,6 +449,7 @@ wait_service_active() {
 wait_for_provisioning() {
   local config_path="$1" attempts="$2" delay="$3" i=0
   [[ "$attempts" =~ ^[0-9]+$ ]] || return 1
+  attempts=$((10#$attempts))
   while ((i < attempts)); do
     if site_config_has_credentials "$config_path"; then
       return 0
