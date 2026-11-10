@@ -491,3 +491,172 @@ export PANGOLIN_BIN="$old_pangolin_bin"
 if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
 
 echo "Task 7 tests passed"
+
+# Task 8: backups, restore, and migration of existing addon installs.
+tmpd="$(mktemp -d)"
+old_pangolin_root="$PANGOLIN_ROOT"
+export PANGOLIN_ROOT="$tmpd/root"
+mkdir -p "$tmpd/root/etc/systemd/system" "$tmpd/root/etc/pangolin" \
+  "$tmpd/root/etc/pangolin-cli" "$tmpd/root/etc/newt" "$tmpd/root/etc/init.d" \
+  "$tmpd/root/usr/local/bin" "$tmpd/root/usr/bin" "$tmpd/root/root" \
+  "$tmpd/root/var/lib/pangolin"
+site_unit="$tmpd/root/etc/systemd/system/pangolin-site.service"
+old_site_env="$tmpd/root/etc/pangolin/pangolin-site.env"
+old_client_env="$tmpd/root/etc/pangolin-cli/client.env"
+new_client_env="$tmpd/root/etc/pangolin/pangolin-client.env"
+new_site_json="$tmpd/root/etc/pangolin/site.json"
+newt_env="$tmpd/root/etc/newt/newt.env"
+old_client_unit="$tmpd/root/etc/systemd/system/pangolin-cli.service"
+old_client_wrapper="$tmpd/root/usr/local/bin/pangolin-cli-start"
+old_client_init="$tmpd/root/etc/init.d/pangolin-cli"
+old_site_wrapper="$tmpd/root/usr/local/bin/pangolin-site-start"
+legacy_marker="$tmpd/root/root/.pangolin-cli"
+
+printf 'UNIT\n' >"$site_unit"
+printf 'SITE_ID=old\nSITE_SECRET=oldsec\nPANGOLIN_ENDPOINT=https://p.example\n' \
+  >"$old_site_env"
+chmod 600 "$old_site_env"
+printf 'PANGOLIN_CLIENT_ID=cid\nPANGOLIN_CLIENT_SECRET=csec\nPANGOLIN_ENDPOINT=https://p.example\n' \
+  >"$old_client_env"
+chmod 600 "$old_client_env"
+printf 'NEWT_ID=nid\nNEWT_SECRET=nsec\nPANGOLIN_ENDPOINT=https://p.example\n' >"$newt_env"
+printf '[Unit]\n' >"$old_client_unit"
+printf '#!/bin/sh\n. /etc/pangolin-cli/client.env\nexec pangolin --attach\n' \
+  >"$old_client_wrapper"
+printf '#!/sbin/openrc-run\n' >"$old_client_init"
+printf '#!/bin/sh\n. /etc/pangolin/pangolin-site.env\nexec pangolin up site\n' \
+  >"$old_site_wrapper"
+printf '1.2.3\n' >"$legacy_marker"
+
+backup="$(backup_existing "$site_unit" "$old_site_env")"
+[[ -f "$backup/pangolin-site.service" ]] || fail "backup file"
+[[ -f "$backup/pangolin-site.env" ]] || fail "backup env file"
+case "$backup" in
+"$tmpd/root/var/lib/pangolin/backup/"*) ;;
+*) fail "backup should live under the state directory, got: $backup" ;;
+esac
+[[ "$(stat -c '%a' "$backup")" == "700" ]] || fail "backup directory mode"
+[[ "$(stat -c '%a' "$backup/pangolin-site.env")" == "600" ]] || fail "backup secret mode"
+backup2="$(backup_existing "$tmpd/root/no-such-file")"
+[[ "$backup2" != "$backup" ]] || fail "each backup should get its own directory"
+[[ ! -e "$backup2/no-such-file" ]] || fail "missing paths must not be backed up"
+
+printf 'CHANGED\n' >"$site_unit"
+chmod 644 "$old_site_env"
+restore_backup "$backup"
+[[ "$(cat "$site_unit")" == "UNIT" ]] || fail "restore"
+[[ "$(stat -c '%a' "$old_site_env")" == "600" ]] || fail "restore should keep the original mode"
+if restore_backup "$tmpd/not-a-backup" >/dev/null 2>&1; then
+  fail "restoring a directory that is not a backup should fail"
+fi
+
+LEGACY_NEWT_ID=""
+LEGACY_NEWT_SECRET=""
+LEGACY_ENDPOINT=""
+migrate_legacy_newt
+assert_eq "$LEGACY_NEWT_ID" "nid"
+assert_eq "$LEGACY_NEWT_SECRET" "nsec"
+assert_eq "$LEGACY_ENDPOINT" "https://p.example"
+[[ ! -e "$new_site_json" ]] || fail "legacy Newt migration must not write the site config"
+[[ -f "$newt_env" ]] || fail "legacy Newt migration must not remove the Newt env"
+
+migrate_existing_addon >"$tmpd/migrate.log" 2>&1
+assert_eq "$MIGRATED_OLD_SITE" "1"
+assert_eq "$MIGRATED_OLD_CLIENT" "1"
+python3 - "$new_site_json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["id"] == "old", d
+assert d["secret"] == "oldsec", d
+assert d["endpoint"] == "https://p.example", d
+PY
+[[ "$(stat -c '%a' "$new_site_json")" == "600" ]] || fail "migrated mode"
+[[ -f "$old_site_env" ]] || fail "old site env must survive migration"
+[[ -f "$old_client_env" ]] || fail "old client env must survive migration"
+[[ -f "$new_client_env" ]] || fail "new client env should be written"
+[[ "$(stat -c '%a' "$new_client_env")" == "600" ]] || fail "new client env mode"
+grep -q "^PANGOLIN_CLIENT_ID='cid'$" "$new_client_env" || fail "migrated client id"
+grep -q "^PANGOLIN_CLIENT_SECRET='csec'$" "$new_client_env" || fail "migrated client secret"
+grep -q "^PANGOLIN_ENDPOINT='https://p.example'$" "$new_client_env" ||
+  fail "migrated client endpoint"
+for secret in oldsec csec nsec; do
+  if grep -q "$secret" "$tmpd/migrate.log"; then
+    fail "migration must not print the secret $secret"
+  fi
+done
+
+# An existing site config wins over the old env file.
+original_site="$(cat "$new_site_json")"
+write_private_file "$new_site_json" \
+  "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1")"
+migrate_existing_addon >/dev/null 2>&1
+assert_eq "$MIGRATED_OLD_SITE" "0"
+grep -q '"provisioningKey"' "$new_site_json" ||
+  fail "migration must not overwrite an existing site config"
+write_private_file "$new_site_json" "$original_site"
+
+# An existing client env also wins over the old client file.
+original_client="$(cat "$new_client_env")"
+write_private_file "$new_client_env" "PANGOLIN_CLIENT_ID='newid'"
+migrate_existing_addon >/dev/null 2>&1
+assert_eq "$MIGRATED_OLD_CLIENT" "0"
+grep -q "^PANGOLIN_CLIENT_ID='newid'$" "$new_client_env" ||
+  fail "migration must not overwrite an existing client env"
+write_private_file "$new_client_env" "$original_client"
+
+if cleanup_legacy_addon bogus >/dev/null 2>&1; then
+  fail "an unknown cleanup scope should fail"
+fi
+[[ -f "$old_site_env" && -f "$old_client_env" ]] ||
+  fail "an invalid cleanup scope must not remove files"
+
+cleanup_legacy_addon client
+[[ ! -f "$old_client_env" ]] || fail "old client env should be removed after cleanup"
+[[ ! -f "$old_client_unit" ]] || fail "old client unit should be removed after cleanup"
+[[ ! -f "$old_client_wrapper" ]] || fail "old client wrapper should be removed after cleanup"
+[[ ! -f "$old_client_init" ]] || fail "old client init script should be removed after cleanup"
+[[ ! -d "$tmpd/root/etc/pangolin-cli" ]] || fail "old client directory should be removed"
+[[ ! -e "$legacy_marker" ]] || fail "legacy binary marker should be removed"
+[[ -f "$old_site_env" ]] || fail "client cleanup must not remove site files"
+[[ -f "$new_client_env" ]] || fail "cleanup must keep the new client env"
+[[ -f "$new_site_json" ]] || fail "cleanup must keep the new site config"
+
+cleanup_legacy_addon site
+[[ ! -f "$old_site_env" ]] || fail "old site env should be removed after cleanup"
+[[ ! -f "$old_site_wrapper" ]] || fail "old site wrapper should be removed after cleanup"
+[[ -f "$new_client_env" ]] || fail "site cleanup must not remove client files"
+[[ -f "$new_site_json" ]] || fail "site cleanup must keep the new site config"
+
+# The current OpenRC site wrapper must survive a repeated cleanup.
+printf '#!/bin/sh\nCONFIG_FILE=%s\nexport CONFIG_FILE\n' "$new_site_json" \
+  >"$old_site_wrapper"
+cleanup_legacy_addon site
+[[ -f "$old_site_wrapper" ]] || fail "cleanup must keep the current site wrapper"
+
+# A later migration plus both-scope cleanup removes both components' old files.
+mkdir -p "$tmpd/root/etc/pangolin-cli"
+printf 'SITE_ID=old\nSITE_SECRET=oldsec\nPANGOLIN_ENDPOINT=https://p.example\n' \
+  >"$old_site_env"
+printf 'PANGOLIN_CLIENT_ID=cid\nPANGOLIN_CLIENT_SECRET=csec\nPANGOLIN_ENDPOINT=https://p.example\n' \
+  >"$old_client_env"
+migrate_existing_addon >/dev/null 2>&1
+cleanup_legacy_addon both
+[[ ! -f "$old_site_env" && ! -f "$old_client_env" ]] ||
+  fail "both-scope cleanup should remove both old files"
+
+# Migration on a fresh root is a quiet no-op.
+mkdir -p "$tmpd/empty/root/etc/pangolin"
+export PANGOLIN_ROOT="$tmpd/empty/root"
+if ! noise="$(migrate_existing_addon 2>&1)"; then
+  fail "migration on a fresh root should succeed"
+fi
+[[ -z "$noise" ]] || fail "migration on a fresh root printed: $noise"
+assert_eq "$MIGRATED_OLD_SITE" "0"
+assert_eq "$MIGRATED_OLD_CLIENT" "0"
+[[ ! -e "$tmpd/empty/root/etc/pangolin/site.json" ]] ||
+  fail "fresh migration must not write a site config"
+
+rm -rf "$tmpd"
+export PANGOLIN_ROOT="$old_pangolin_root"
+
+echo "Task 8 tests passed"

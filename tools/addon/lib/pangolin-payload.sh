@@ -10,6 +10,16 @@
 PANGOLIN_ROOT="${PANGOLIN_ROOT:-}"
 p() { printf '%s%s' "$PANGOLIN_ROOT" "$1"; }
 
+# Migration state shared with the entry point. The legacy file lists record
+# what migrate_existing_addon saw, so cleanup only removes what it observed.
+MIGRATED_OLD_SITE=0
+MIGRATED_OLD_CLIENT=0
+LEGACY_NEWT_ID=""
+LEGACY_NEWT_SECRET=""
+LEGACY_ENDPOINT=""
+LEGACY_SITE_FILES=()
+LEGACY_CLIENT_FILES=()
+
 PANGOLIN_BIN="${PANGOLIN_BIN:-$(p /usr/local/bin/pangolin)}"
 PANGOLIN_STATE_FILE="${PANGOLIN_STATE_FILE:-$(p /var/lib/pangolin/cli.json)}"
 PANGOLIN_RELEASE_API="${PANGOLIN_RELEASE_API:-https://api.fossorial.io/api/v1/versions/cli}"
@@ -628,6 +638,248 @@ install_client_openrc() {
   local id="$1" secret="$2" endpoint="$3"
   write_client_openrc "$id" "$secret" "$endpoint" || return 1
   _start_openrc_service pangolin-client
+}
+
+# Print the value of KEY from a KEY=value file, removing one layer of matching
+# single or double quotes. Returns 1 when the key is absent or empty.
+_env_value() {
+  local file="$1" key="$2" line value
+  [[ -f "$file" ]] || return 1
+  line="$(sed -n "s/^[[:space:]]*$key=//p" "$file" | tail -n 1)"
+  [[ -n "$line" ]] || return 1
+  case "$line" in
+  \'*\') value="${line#\'}"; value="${value%\'}" ;;
+  \"*\") value="${line#\"}"; value="${value%\"}" ;;
+  *) value="$line" ;;
+  esac
+  printf '%s' "$value"
+}
+
+# Copy existing paths into a new timestamped directory under
+# /var/lib/pangolin/backup and print that directory. A manifest records each
+# original path so restore can put the file back where it came from. Missing
+# paths are skipped; names that collide are prefixed with a counter.
+backup_existing() {
+  local root stamp dir src base name n
+  root="$(p /var/lib/pangolin/backup)"
+  install -d -m 0700 "$root" || return 1
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  dir="$root/$stamp"
+  n=2
+  while [[ -e "$dir" ]]; do
+    dir="$root/$stamp-$n"
+    n=$((n + 1))
+  done
+  install -d -m 0700 "$dir" || return 1
+  : >"$dir/manifest" || return 1
+  chmod 0600 "$dir/manifest" || return 1
+  for src in "$@"; do
+    [[ -e "$src" || -L "$src" ]] || continue
+    base="$(basename "$src")"
+    name="$base"
+    n=2
+    while [[ -e "$dir/$name" ]]; do
+      name="$n-$base"
+      n=$((n + 1))
+    done
+    if ! cp -a "$src" "$dir/$name"; then
+      echo "Failed to back up $src" >&2
+      return 1
+    fi
+    printf '%s\t%s\n' "$name" "$src" >>"$dir/manifest" || return 1
+  done
+  printf '%s\n' "$dir"
+}
+
+# Copy every file in a backup directory back to the path recorded in its
+# manifest, preserving the original mode and ownership where permitted.
+restore_backup() {
+  local dir="$1" line name src target parent
+  if [[ ! -d "$dir" || ! -f "$dir/manifest" ]]; then
+    echo "restore_backup: $dir is not a backup directory" >&2
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    name="${line%%$'\t'*}"
+    src="${line#*$'\t'}"
+    [[ -n "$name" && -n "$src" && "$name" != "$src" ]] || continue
+    target="$dir/$name"
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      echo "restore_backup: backup file $target is missing" >&2
+      return 1
+    fi
+    parent="$(dirname "$src")"
+    if [[ ! -d "$parent" ]]; then
+      install -d -m 0755 "$parent" || return 1
+    fi
+    if [[ -d "$target" && ! -L "$target" && -d "$src" ]]; then
+      cp -a "$target/." "$src/" || return 1
+    else
+      cp -a "$target" "$src" || return 1
+    fi
+  done <"$dir/manifest"
+}
+
+# Record the legacy addon paths that exist, grouped by the component that owns
+# them. The current site wrapper has the same path on OpenRC, so cleanup checks
+# its content before removing it.
+_record_legacy_paths() {
+  local path
+  LEGACY_SITE_FILES=()
+  LEGACY_CLIENT_FILES=()
+  for path in "$(p /etc/pangolin/pangolin-site.env)" \
+    "$(p /usr/local/bin/pangolin-site-start)" \
+    "$(p /root/.pangolin-cli)"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      LEGACY_SITE_FILES+=("$path")
+    fi
+  done
+  for path in "$(p /etc/pangolin-cli/client.env)" \
+    "$(p /etc/systemd/system/pangolin-cli.service)" \
+    "$(p /etc/init.d/pangolin-cli)" \
+    "$(p /usr/local/bin/pangolin-cli-start)" \
+    "$(p /root/.pangolin-cli)"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      LEGACY_CLIENT_FILES+=("$path")
+    fi
+  done
+}
+
+# Read standalone Newt credentials for the entry point. Nothing is removed
+# here: Newt files are only cleaned after the replacement site is verified.
+migrate_legacy_newt() {
+  local env
+  LEGACY_NEWT_ID=""
+  LEGACY_NEWT_SECRET=""
+  LEGACY_ENDPOINT=""
+  env="$(p /etc/newt/newt.env)"
+  [[ -f "$env" ]] || return 0
+  LEGACY_NEWT_ID="$(_env_value "$env" NEWT_ID || true)"
+  LEGACY_NEWT_SECRET="$(_env_value "$env" NEWT_SECRET || true)"
+  LEGACY_ENDPOINT="$(_env_value "$env" PANGOLIN_ENDPOINT || true)"
+  return 0
+}
+
+# Convert the current addon's site and client files into the new layout. Old
+# files are only recorded, never removed; the entry point calls
+# cleanup_legacy_addon after each component verifies.
+migrate_existing_addon() {
+  local old_site new_site old_client new_client id secret endpoint cid csecret cendpoint
+  local content
+  MIGRATED_OLD_SITE=0
+  MIGRATED_OLD_CLIENT=0
+  _record_legacy_paths
+
+  old_site="$(p /etc/pangolin/pangolin-site.env)"
+  new_site="$(p /etc/pangolin/site.json)"
+  if [[ -f "$old_site" ]]; then
+    id="$(_env_value "$old_site" SITE_ID || true)"
+    secret="$(_env_value "$old_site" SITE_SECRET || true)"
+    endpoint="$(_env_value "$old_site" PANGOLIN_ENDPOINT || true)"
+    if [[ -n "$id" && -n "$secret" && -n "$endpoint" ]]; then
+      if [[ ! -f "$new_site" ]]; then
+        write_private_file "$new_site" "$(site_config_static "$endpoint" "$id" "$secret")" ||
+          return 1
+        MIGRATED_OLD_SITE=1
+      fi
+    else
+      echo "Legacy $old_site is incomplete; leaving it in place." >&2
+    fi
+  fi
+
+  old_client="$(p /etc/pangolin-cli/client.env)"
+  new_client="$(p /etc/pangolin/pangolin-client.env)"
+  if [[ -f "$old_client" ]]; then
+    cid="$(_env_value "$old_client" PANGOLIN_CLIENT_ID || true)"
+    csecret="$(_env_value "$old_client" PANGOLIN_CLIENT_SECRET || true)"
+    cendpoint="$(_env_value "$old_client" PANGOLIN_ENDPOINT || true)"
+    if [[ -n "$cid" && -n "$csecret" && -n "$cendpoint" ]]; then
+      if [[ ! -f "$new_client" ]]; then
+        content="$(printf 'PANGOLIN_CLIENT_ID=%s\nPANGOLIN_CLIENT_SECRET=%s\nPANGOLIN_ENDPOINT=%s' \
+          "$(_shell_single_quote "$cid")" "$(_shell_single_quote "$csecret")" \
+          "$(_shell_single_quote "$cendpoint")")"
+        write_private_file "$new_client" "$content" || return 1
+        MIGRATED_OLD_CLIENT=1
+      fi
+    else
+      echo "Legacy $old_client is incomplete; leaving it in place." >&2
+    fi
+  fi
+  return 0
+}
+
+# Remove the old site wrapper only when it still sources the legacy env file.
+# OpenRC installs the replacement at the same path, so its content decides.
+_remove_legacy_site_wrapper() {
+  local wrapper="$1"
+  [[ -f "$wrapper" ]] || return 0
+  if grep -q '/etc/pangolin/pangolin-site.env' "$wrapper" 2>/dev/null; then
+    if ! rm -f "$wrapper"; then
+      echo "Failed to remove $wrapper" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Stop and disable the old client service before its unit is removed. Skipped
+# under PANGOLIN_ROOT so tests never touch the host's service manager.
+_stop_legacy_client_service() {
+  [[ -z "$PANGOLIN_ROOT" ]] || return 0
+  if [[ -f "$(p /etc/systemd/system/pangolin-cli.service)" ]] &&
+    command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now pangolin-cli >/dev/null 2>&1 || true
+  fi
+  if [[ -f "$(p /etc/init.d/pangolin-cli)" ]]; then
+    if command -v rc-service >/dev/null 2>&1; then
+      rc-service pangolin-cli stop >/dev/null 2>&1 || true
+    fi
+    if command -v rc-update >/dev/null 2>&1; then
+      rc-update del pangolin-cli default >/dev/null 2>&1 || true
+    fi
+  fi
+  return 0
+}
+
+# Remove the recorded legacy files for the components verified in this run.
+# An unknown scope fails before touching anything. Old client files are only
+# removed when the new client is verified; site and client are independent.
+cleanup_legacy_addon() {
+  local scope="${1:-}" path rc=0 site_wrapper
+  case "$scope" in
+  site | client | both) ;;
+  *)
+    echo "cleanup_legacy_addon: expected site, client, or both" >&2
+    return 1
+    ;;
+  esac
+  if [[ "$scope" == site || "$scope" == both ]]; then
+    site_wrapper="$(p /usr/local/bin/pangolin-site-start)"
+    if [[ ${#LEGACY_SITE_FILES[@]} -gt 0 ]]; then
+      for path in "${LEGACY_SITE_FILES[@]}"; do
+        if [[ "$path" == "$site_wrapper" ]]; then
+          _remove_legacy_site_wrapper "$path" || rc=1
+        elif ! rm -f "$path"; then
+          echo "Failed to remove $path" >&2
+          rc=1
+        fi
+      done
+    fi
+  fi
+  if [[ "$scope" == client || "$scope" == both ]]; then
+    _stop_legacy_client_service
+    if [[ ${#LEGACY_CLIENT_FILES[@]} -gt 0 ]]; then
+      for path in "${LEGACY_CLIENT_FILES[@]}"; do
+        if ! rm -f "$path"; then
+          echo "Failed to remove $path" >&2
+          rc=1
+        fi
+      done
+    fi
+    rmdir "$(p /etc/pangolin-cli)" 2>/dev/null || true
+  fi
+  return "$rc"
 }
 
 # The full addon entry point is added in Task 10.
