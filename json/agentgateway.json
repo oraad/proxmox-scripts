@@ -50,7 +50,7 @@
       "type": "warning"
     },
     {
-      "text": "UI: http://<ip>:8080/ui (basic auth, user admin). MCP: http://<ip>:8080/mcp/http (also /mcp, /sse), Bearer key or basic auth. Snippet: /opt/agentgateway/mcp_client.json.",
+      "text": "UI: http://<ip>:8080/ui (user admin, password in /opt/agentgateway/.env). MCP: /mcp/http (also /mcp, /sse), Bearer key or basic auth. Snippet: /opt/agentgateway/mcp_client.json.",
       "type": "info"
     },
     {
@@ -58,11 +58,11 @@
       "type": "info"
     },
     {
-      "text": "Config /opt/agentgateway/config.yaml (0600); UI saves strip comments. Restart after config.* or session.key changes. Update: `update` or `pct exec <CTID> -- update`.",
+      "text": "Config /opt/agentgateway/config.yaml (0600); UI saves strip comments. Hashes: /opt/agentgateway/htpasswd. Restart after config.* or session.key changes.",
       "type": "info"
     },
     {
-      "text": "Unattended: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-<secret>' var_public_port=8080` (also var_ui_user, var_ui_password, var_api_key) with ct/agentgateway.sh.",
+      "text": "Unattended: `var_mcp_targets='home=http://192.168.1.21:8086/mcp-<secret>'` with ct/agentgateway.sh. Update: `update` or `pct exec <CTID> -- update`.",
       "type": "info"
     }
   ]

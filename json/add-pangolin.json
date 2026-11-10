@@ -34,15 +34,15 @@
   },
   "notes": [
     {
-      "text": "Components: Site tunnel (userspace WireGuard, no TUN) and Machine client (needs /dev/net/tun). Target: Proxmox host or an existing Debian 12+/Ubuntu 22.04+/Alpine 3.20+ LXC.",
-      "type": "info"
-    },
-    {
       "text": "Run on the Proxmox host, not inside a container. A host install exposes everything the host can reach and joins the whole host to the VPN; prefer an existing LXC.",
       "type": "warning"
     },
     {
-      "text": "Site mode: use Site ID + secret, or a provisioning key (tier3/enterprise; Settings \u2192 Provisioning \u2192 Keys). Unattended needs \"approve new sites\" on, or approve during provisioning.",
+      "text": "Site mode: Site ID + secret, or a provisioning key (tier3/enterprise). Unattended needs \"approve new sites\" on. Reconfiguring with a key creates a second server-side site.",
+      "type": "warning"
+    },
+    {
+      "text": "Components: Site tunnel (userspace WireGuard, no TUN) and Machine client (needs /dev/net/tun). Target: Proxmox host or an existing Debian 12+/Ubuntu 22.04+/Alpine 3.20+ LXC.",
       "type": "info"
     },
     {
@@ -50,11 +50,11 @@
       "type": "info"
     },
     {
-      "text": "Config: /etc/pangolin/site.json and /etc/pangolin/pangolin-client.env (0600); CLI at /usr/local/bin/pangolin is sha256-verified. Update: re-run tools/addon/add-pangolin.sh.",
+      "text": "Config: /etc/pangolin/site.json and /etc/pangolin/pangolin-client.env (0600); backups /var/lib/pangolin/backup. Logs: /var/log/pangolin-site.log, /var/log/pangolin-client.log.",
       "type": "info"
     },
     {
-      "text": "Unattended: `var_mode=site var_target=host var_pangolin_endpoint=https://pangolin.example.com var_site_id=ID var_site_secret=SECRET` when running tools/addon/add-pangolin.sh.",
+      "text": "Unattended: `var_mode=site var_target=host var_site_id=ID var_site_secret=SECRET var_pangolin_endpoint=URL` with tools/addon/add-pangolin.sh. Update: re-run the script.",
       "type": "info"
     }
   ]

@@ -50,11 +50,11 @@
       "type": "warning"
     },
     {
-      "text": "Never change POSTGRES_PASSWORD after first start unless you reset the postgres_data volume. Behind TLS, set NEXTAUTH_URL/APP_URL and enable the proxy toggle.",
+      "text": "Never change POSTGRES_PASSWORD after first start unless you reset the postgres_data volume. Behind TLS set var_nextauth_url or NEXTAUTH_URL/APP_URL, and enable the proxy toggle.",
       "type": "warning"
     },
     {
-      "text": "Web UI: http://<container-ip>:3000. Add Proxmox VE (8006) and PBS with API tokens. Config: /opt/proxcenter/.env (0600).",
+      "text": "Web UI: http://<container-ip>:3000; health: /api/health. Add Proxmox VE (8006) and PBS with API tokens. Config: /opt/proxcenter/.env (0600) and /opt/proxcenter/docker-compose.yml.",
       "type": "info"
     },
     {

@@ -35,7 +35,7 @@
       "type": "warning"
     },
     {
-      "text": "Web UI: http://<container-ip> (nginx 80 to gunicorn on localhost:6000). Site URL defaults to the container IP; set var_site_url or use `inventree config:set`. Nginx is HTTP only.",
+      "text": "Web UI: http://<container-ip> (nginx 80 to gunicorn:6000). Nginx config: /etc/nginx/sites-enabled/inventree.conf, HTTP only; terminate TLS externally.",
       "type": "warning"
     },
     {
@@ -43,15 +43,15 @@
       "type": "info"
     },
     {
-      "text": "Data: SQLite at /opt/inventree/data/database.sqlite3; media, static, and backups under /opt/inventree/data. For PostgreSQL, set INVENTREE_DB_* before a fresh install.",
+      "text": "Data: SQLite at /opt/inventree/data/database.sqlite3; media, static, backups under /opt/inventree/data. For PostgreSQL set INVENTREE_DB_NAME/USER/PASSWORD/HOST/PORT before install.",
       "type": "info"
     },
     {
-      "text": "Services: inventree-web, inventree-worker, nginx. Use `inventree logs` and `inventree restart`. Update: `update` in the LXC or `pct exec <CTID> -- update`.",
+      "text": "Site URL: `var_site_url` at install or `inventree config:set INVENTREE_SITE_URL=https://...`. Services: inventree-web, inventree-worker, nginx; logs with `inventree logs`.",
       "type": "info"
     },
     {
-      "text": "Unattended overrides: `var_admin_user`, `var_admin_email`, `var_admin_password`, `var_site_url`.",
+      "text": "Update: `update` in the LXC or `pct exec <CTID> -- update`. Unattended: `var_admin_user`, `var_admin_email`, `var_admin_password`, `var_site_url`.",
       "type": "info"
     }
   ]

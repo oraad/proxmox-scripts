@@ -46,7 +46,7 @@
       "type": "warning"
     },
     {
-      "text": "Web UI: http://<container-ip>:4096; OpenAPI spec at /doc. Attach with `opencode attach http://<container-ip>:4096` or `opencode run --attach ... \"<prompt>\"`.",
+      "text": "Web UI: http://<ip>:4096; spec at /doc. Attach: `opencode attach http://<ip>:4096` (or `run --attach`), using OPENCODE_SERVER_USERNAME/OPENCODE_SERVER_PASSWORD.",
       "type": "info"
     },
     {

@@ -33,7 +33,7 @@
   },
   "notes": [
     {
-      "text": "UI binds 0.0.0.0:8680 with a generated password, printed once, stored in /root/.config/code-server/config.yaml. Set var_code_server_password, then restart code-server@root.",
+      "text": "UI 0.0.0.0:8680; generated password printed once, in /root/.config/code-server/config.yaml. Set var_code_server_password at install, or edit the file and restart code-server@root.",
       "type": "warning"
     },
     {
