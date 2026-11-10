@@ -431,7 +431,9 @@ install_cli_binary() {
     rm -f "$tmp"
     return 1
   fi
-  if ! actual="$("$tmp" version 2>/dev/null)"; then
+  # `pangolin version` also prints a desktop-client banner on some releases.
+  # Take the last non-empty line, which is the actual version.
+  if ! actual="$("$tmp" version 2>/dev/null | tr -d '\r' | awk 'NF { last = $0 } END { print last }')"; then
     rm -f "$tmp"
     echo "$asset $version does not run; keeping the existing binary." >&2
     return 1
