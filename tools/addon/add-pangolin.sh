@@ -929,7 +929,6 @@ _prompt_inputs() {
       msg_warn "Ignoring new site credentials; the verified site configuration is reused. Set var_reconfigure=1 to replace it."
     fi
     if [[ "$enrolling" == 1 && "${NATIVE_PROMPTED:-0}" != 1 ]]; then
-      NATIVE_PROMPTED=1
       net_state="OFF"
       main_state="OFF"
       [[ "${var_site_native-0}" == 1 ]] && net_state="ON"
@@ -939,6 +938,9 @@ _prompt_inputs() {
         main "native main tunnel (kernel interface, needs TUN)" "$main_state" \
         client "native client tunnels (kernel interface, needs TUN)" "$net_state" \
         3>&1 1>&2 2>&3)" || return 1
+      # Only a completed checklist is shared; a cancel leaves it unasked for
+      # the next target.
+      NATIVE_PROMPTED=1
       var_site_native=0
       var_site_native_main=0
       case "$net_choice" in
@@ -1358,6 +1360,9 @@ main() {
     return 1
   fi
   _load_core
+  # Core helpers (load_functions/set_std_mode) can re-enable xtrace when
+  # DEV_MODE_TRACE is set. Never trace credential activation.
+  set +x
   # The banner is cosmetic; its header fetch must not add noise to the run.
   header_info 2>/dev/null || true
   if ! require_pve_host; then

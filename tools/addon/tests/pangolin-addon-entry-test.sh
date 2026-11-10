@@ -1153,7 +1153,10 @@ cat >"$loop/bin/whiptail" <<'EOF'
 printf '%s\n' "$*" >>"$FAKE_WHIPTAIL_LOG"
 case "$*" in
 *"Targets (space selects"*) printf '%s' "${FAKE_TARGETS_OUT:-}" >&2 ;;
-*"Site networking:"*) printf '%s' "${FAKE_NATIVE_OUT:-}" >&2 ;;
+*"Site networking:"*)
+  if [[ "${FAKE_NATIVE_CANCEL:-0}" == 1 ]]; then exit 1; fi
+  printf '%s' "${FAKE_NATIVE_OUT:-}" >&2
+  ;;
 *"Site credentials:"*) printf 'static' >&2 ;;
 *"Existing site"*) printf 'replace' >&2 ;;
 *"Select components"*) printf 'client' >&2 ;;
@@ -1246,6 +1249,35 @@ if ! (
   exit 1
 fi
 
+# A cancelled native checklist is not recorded as asked, so the next target is
+# prompted again instead of silently inheriting default toggles.
+: >"$loop/wlog2"
+if ! (
+  unset var_mode var_unattended var_targets var_target
+  unset var_pangolin_endpoint var_site_id var_site_secret
+  unset var_site_provisioning_key var_site_name var_site_native var_site_native_main
+  export PATH="$loop/bin:$PATH" FAKE_WHIPTAIL_LOG="$loop/wlog2"
+  export FAKE_NATIVE_OUT='"client"'
+  NATIVE_PROMPTED=0
+  _target_site_verified() { return 1; }
+  _target_has_legacy_site() { return 1; }
+  _default_site_name() { printf 'pve\n'; }
+  export FAKE_NATIVE_CANCEL=1
+  cancel_rc=0
+  _prompt_inputs host 1 0 >/dev/null 2>&1 || cancel_rc=$?
+  [[ "$cancel_rc" -ne 0 ]] || exit 1
+  [[ "$NATIVE_PROMPTED" == 0 ]] || exit 1
+  _reset_target_credentials
+  export FAKE_NATIVE_CANCEL=0
+  _prompt_inputs 101 1 0
+  [[ "$var_site_native" == 1 ]] || exit 1
+  [[ "$(grep -c 'Site networking:' "$FAKE_WHIPTAIL_LOG")" == 2 ]] || exit 1
+) >"$loop/cancel-out" 2>&1; then
+  echo "cancelled native checklist regression:" >&2
+  cat "$loop/cancel-out" >&2
+  exit 1
+fi
+
 # Run main with every host-touching step stubbed except the payload and tags.
 _run_loop() {
   (
@@ -1254,7 +1286,7 @@ _run_loop() {
     export FAKE_PAYLOAD="$loop/payload.sh" TMPDIR="$loop/tmp"
     export FAKE_WHIPTAIL_LOG="$loop/wlog"
     _ensure_curl() { :; }
-    _load_core() { :; }
+    _load_core() { if [[ "${FAKE_LOAD_CORE_TRACE:-0}" == 1 ]]; then set -x; fi; }
     require_pve_host() { return 0; }
     header_info() { :; }
     msg_info() { printf 'INFO:%s\n' "$*"; }
@@ -1404,6 +1436,29 @@ assert_eq "host" "$(cat "$loop/ran")"
   cat "$loop/wlog" >&2
   exit 1
 }
+
+# `_load_core` can re-enable xtrace through the core dev-mode helpers. The
+# install path must disable it again before credential activation.
+: >"$loop/fail-targets"
+: >"$loop/ran"
+: >"$loop/log"
+trace_install_rc=0
+trace_install_out="$(
+  FAKE_LOAD_CORE_TRACE=1 var_mode=client var_targets="host,101" \
+    var_pangolin_endpoint=https://p.example \
+    var_client_id_host=TRACE-ID-HOST var_client_secret_host=TRACE-SECRET-HOST \
+    var_client_id_101=TRACE-ID-101 var_client_secret_101=TRACE-SECRET-101 \
+    _run_loop 2>&1
+)" || trace_install_rc=$?
+[[ "$trace_install_rc" -eq 0 ]] ||
+  { echo "install path failed after a traced core load" >&2; exit 1; }
+assert_eq $'host\n101' "$(cat "$loop/ran")"
+case "$trace_install_out" in
+*TRACE-SECRET* | *TRACE-ID-*)
+  echo "a traced core load leaked a credential" >&2
+  exit 1
+  ;;
+esac
 
 # Failure before the payload: an LXC that cannot start, an unsupported OS, and
 # a failed TUN step each fail that target without running the payload or
