@@ -142,6 +142,9 @@ EOF
 chmod 755 "$tmpd/bin/curl"
 
 old_path="$PATH"
+old_pangolin_root="$PANGOLIN_ROOT"
+old_pangolin_bin="$PANGOLIN_BIN"
+old_pangolin_state_file="$PANGOLIN_STATE_FILE"
 export PATH="$tmpd/bin:$PATH"
 export PANGOLIN_ROOT="$tmpd/root"
 export PANGOLIN_BIN="$tmpd/root/usr/local/bin/pangolin"
@@ -167,8 +170,31 @@ if install_cli_binary 0.21.1 - >/dev/null 2>&1; then fail "pinned version needs 
 printf 'old' >"$PANGOLIN_BIN"
 if install_cli_binary latest deadbeef >/dev/null 2>&1; then fail "bad digest should fail"; fi
 [[ "$(cat "$PANGOLIN_BIN")" == "old" ]] || fail "bad digest must not replace binary"
+
+# A state write failure after verification must not replace the binary either.
+# Fail only the state-file temp creation; the download temp still works.
+# shellcheck disable=SC2317
+mktemp() {
+  case "${1:-}" in
+  *.cli.json.XXXXXX) return 1 ;;
+  esac
+  command mktemp "$@"
+}
+if state_err="$(install_cli_binary latest "$fake_sha" 2>&1 >/dev/null)"; then
+  unset -f mktemp
+  fail "failed state write should fail"
+fi
+unset -f mktemp
+case "$state_err" in
+*"failed to write"*) ;;
+*) fail "expected a state write failure, got: $state_err" ;;
+esac
+[[ "$(cat "$PANGOLIN_BIN")" == "old" ]] || fail "failed state write must not replace binary"
+
 rm -rf "$tmpd"
-unset PANGOLIN_ROOT PANGOLIN_BIN PANGOLIN_STATE_FILE
 export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+export PANGOLIN_BIN="$old_pangolin_bin"
+export PANGOLIN_STATE_FILE="$old_pangolin_state_file"
 
 echo "Task 4 tests passed"

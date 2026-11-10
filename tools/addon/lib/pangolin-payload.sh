@@ -380,12 +380,18 @@ install_cli_binary() {
     echo "$asset reports version $actual, expected $version; keeping the existing binary." >&2
     return 1
   fi
-  if ! mv -f "$tmp" "$PANGOLIN_BIN"; then
+  # Record the verified artifact before replacing the binary. If the state write
+  # fails the old binary stays in place. If the later mv fails, the orphan
+  # record cannot vouch for the old binary because cli_state_matches re-hashes
+  # PANGOLIN_BIN.
+  if ! write_cli_state "$version" "$asset" "$digest"; then
     rm -f "$tmp"
+    echo "Verified Pangolin CLI $version but failed to write $PANGOLIN_STATE_FILE; keeping the existing binary." >&2
     return 1
   fi
-  if ! write_cli_state "$version" "$asset" "$digest"; then
-    echo "Installed Pangolin CLI $version but failed to write $PANGOLIN_STATE_FILE" >&2
+  if ! mv -f "$tmp" "$PANGOLIN_BIN"; then
+    rm -f "$tmp"
+    echo "Failed to replace $PANGOLIN_BIN with Pangolin CLI $version" >&2
     return 1
   fi
   echo "Installed Pangolin CLI $version"
