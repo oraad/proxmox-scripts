@@ -35,3 +35,35 @@ if verify_sha256 "$tmp" deadbeef >/dev/null 2>&1; then fail "bad digest should f
 rm -f "$tmp"
 
 echo "Task 1 tests passed"
+
+assert_eq 'a\"b\\c' "$(json_escape 'a"b\c')"
+assert_eq 'a\nb' "$(json_escape "$(printf 'a\nb')")"
+
+static="$(site_config_static "https://p.example" "id1" "sec1")"
+python3 - "$static" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d == {"endpoint": "https://p.example", "id": "id1", "secret": "sec1"}, d
+PY
+
+prov="$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1")"
+python3 - "$prov" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert d == {"endpoint": "https://p.example", "provisioningKey": "spk-1.secret", "name": "pve-1"}, d
+PY
+
+tmpd="$(mktemp -d)"
+write_private_file "$tmpd/site.json" "$static"
+[[ "$(stat -c '%a' "$tmpd/site.json")" == "600" ]] || fail "site config mode"
+site_config_has_credentials "$tmpd/site.json" || fail "static config should have credentials"
+write_private_file "$tmpd/prov.json" "$prov"
+if site_config_has_credentials "$tmpd/prov.json"; then fail "provisioning config lacks credentials"; fi
+
+assert_eq "a;b" "$(add_tag "a;b" "b")"
+assert_eq "a;b;c" "$(add_tag "a;b;a" "c")"
+assert_eq "x" "$(add_tag "" "x")"
+assert_eq "a;b" "$(remove_tag "a;pangolin-cli;b" "pangolin-cli")"
+rm -rf "$tmpd"
+
+echo "Task 2 tests passed"

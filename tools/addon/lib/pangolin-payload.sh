@@ -87,6 +87,81 @@ verify_sha256() {
   [[ "$actual" == "$expected" ]]
 }
 
+# Escape a value for use inside a JSON string.
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+# Print a static-credential site configuration as JSON.
+site_config_static() {
+  printf '{"endpoint":"%s","id":"%s","secret":"%s"}\n' \
+    "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")"
+}
+
+# Print a provisioning-key site configuration as JSON.
+site_config_provisioning() {
+  printf '{"endpoint":"%s","provisioningKey":"%s","name":"%s"}\n' \
+    "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")"
+}
+
+# Succeed when a site configuration holds credentials and no provisioning key.
+site_config_has_credentials() {
+  local path="$1"
+  grep -q '"id"[[:space:]]*:' "$path" &&
+    grep -q '"secret"[[:space:]]*:' "$path" &&
+    ! grep -q '"provisioningKey"[[:space:]]*:' "$path"
+}
+
+# Write content to a private file, creating the parent directory if needed.
+write_private_file() {
+  local path="$1" content="$2"
+  install -d -m 0755 "$(dirname "$path")"
+  install -m 0600 /dev/null "$path"
+  printf '%s\n' "$content" >"$path"
+}
+
+# Add an exact tag to a semicolon-separated list without duplicates.
+add_tag() {
+  local current="$1" tag="$2" entry out="" found=0
+  local -a entries
+  IFS=';' read -r -a entries <<<"$current" || true
+  for entry in "${entries[@]}"; do
+    [[ -n "$entry" ]] || continue
+    if [[ "$entry" == "$tag" ]]; then
+      found=1
+    fi
+    case ";$out;" in
+    *";$entry;"*) ;;
+    *) out="${out:+$out;}$entry" ;;
+    esac
+  done
+  if [[ -n "$tag" && "$found" -eq 0 ]]; then
+    out="${out:+$out;}$tag"
+  fi
+  printf '%s' "$out"
+}
+
+# Remove an exact tag from a semicolon-separated list.
+remove_tag() {
+  local current="$1" tag="$2" entry out=""
+  local -a entries
+  IFS=';' read -r -a entries <<<"$current" || true
+  for entry in "${entries[@]}"; do
+    [[ -n "$entry" ]] || continue
+    if [[ "$entry" == "$tag" ]]; then
+      continue
+    fi
+    out="${out:+$out;}$entry"
+  done
+  printf '%s' "$out"
+}
+
 # The full addon entry point is added in Task 10.
 payload_main() {
   echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2
