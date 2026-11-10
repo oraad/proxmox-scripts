@@ -50,7 +50,7 @@
       "type": "warning"
     },
     {
-      "text": "Site mode: use the Site ID + secret from the Pangolin dashboard (works on every Pangolin edition), or a site provisioning key (tier3/enterprise only; dashboard Settings \u2192 Provisioning \u2192 Keys). With \"approve new sites\" disabled, the site stays pending until an operator approves it. A provisioning key also takes an optional site name (default: the target hostname).",
+      "text": "Site mode: use the Site ID + secret from the Pangolin dashboard (works on every Pangolin edition), or a site provisioning key (tier3/enterprise only; dashboard Settings \u2192 Provisioning \u2192 Keys). Unattended installs need \"approve new sites\" enabled, or the site must be approved during provisioning; with it disabled, the site stays pending until an operator approves it. A provisioning key also takes an optional site name (default: the target hostname).",
       "type": "info"
     },
     {
@@ -70,11 +70,11 @@
       "type": "info"
     },
     {
-      "text": "Inspect or remove the services with the upstream CLI: `pangolin service status site|client`, `pangolin service logs site|client`, `pangolin service uninstall site|client`. From the host for an LXC, prefix the command with `pct exec <CTID> --`.",
+      "text": "Service management: the upstream CLI commands `pangolin service status site|client`, `pangolin service logs site|client`, and `pangolin service uninstall site|client` are systemd-only. On Alpine the addon writes OpenRC units: check them with `rc-service pangolin-site status` / `rc-service pangolin-client status`, read logs at /var/log/pangolin-site.log and /var/log/pangolin-client.log, and remove one with `rc-update del pangolin-site default` followed by `rc-service pangolin-site stop` (same for `pangolin-client`). From the host for an LXC, prefix commands with `pct exec <CTID> --`.",
       "type": "info"
     },
     {
-      "text": "Update by re-running the addon; the latest CLI is downloaded and verified again, and an already verified version is reused. The old `update-pangolin-site` / `update-pangolin-cli` wrappers are deprecated and are not installed by new installs; they bypass the sha256 check, so do not rely on them.",
+      "text": "Update by re-running the addon: it checks the latest release, reuses an already verified version, and downloads and verifies a different version before use. The old `update-pangolin-site` / `update-pangolin-cli` wrappers are deprecated and are not installed by new installs; they bypass the sha256 check, so do not rely on them.",
       "type": "info"
     },
     {
