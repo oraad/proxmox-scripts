@@ -67,6 +67,27 @@ if _ensure_host_tun "$tun_tmpd/missing-tun" >/dev/null 2>&1; then
 fi
 rm -rf "$tun_tmpd"
 
+# Provisioning-key warnings cover the paid tier and reconfigure second site.
+if ! (
+  msg_warn() { printf 'WARN:%s\n' "$*" >&2; }
+  var_site_provisioning_key="spk-x"
+  warnings="$(_warn_provisioning_risks 1 1 2>&1)"
+  case "$warnings" in
+  *tier3*"approve new sites"*"second server-side site"*) ;;
+  *)
+    echo "provisioning warnings missing: $warnings" >&2
+    exit 1
+    ;;
+  esac
+  var_site_provisioning_key=""
+  [[ -z "$(_warn_provisioning_risks 0 1 2>&1)" ]] || {
+    echo "warnings without a provisioning key" >&2
+    exit 1
+  }
+); then
+  exit 1
+fi
+
 assert_eq "1 0" "$(components_from_mode site)"
 assert_eq "0 1" "$(components_from_mode client)"
 assert_eq "1 1" "$(components_from_mode both)"
@@ -179,6 +200,52 @@ rm -rf "$tmpd"
 export PATH="$old_path"
 if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
 
+# Only components recorded as verified are tagged on an LXC target.
+tagd="$(mktemp -d)"
+mkdir -p "$tagd/bin"
+printf 'site\n' >"$tagd/verified"
+cat >"$tagd/bin/pct" <<'EOF'
+#!/usr/bin/env bash
+echo "pct $*" >>"$FAKE_LOG"
+case "$1" in
+config) printf 'tags: old;pangolin-cli\n' ;;
+exec)
+  case "$*" in
+  *"/verified"*) cat "$FAKE_VERIFIED_FILE" ;;
+  *) exit 0 ;;
+  esac
+  ;;
+esac
+EOF
+chmod 755 "$tagd/bin/pct"
+old_path="$PATH"
+old_fake_log="${FAKE_LOG:-}"
+old_fake_verified="${FAKE_VERIFIED_FILE:-}"
+export PATH="$tagd/bin:$PATH"
+export FAKE_LOG="$tagd/log"
+export FAKE_VERIFIED_FILE="$tagd/verified"
+_apply_verified_tags 101 "$tagd"
+[[ "$VERIFIED_SITE" == "1" && "$VERIFIED_CLIENT" == "0" ]] ||
+  { echo "verified marker should select site only" >&2; exit 1; }
+grep -q 'pct set 101 -tags old;pangolin-site' "$FAKE_LOG" ||
+  { echo "partial tags should include site" >&2; exit 1; }
+if grep -q 'pct set .*pangolin-client' "$FAKE_LOG"; then
+  echo "failed client must not be tagged" >&2
+  exit 1
+fi
+printf 'client\n' >"$tagd/verified"
+_apply_verified_tags host "$tagd"
+[[ "$VERIFIED_SITE" == "0" && "$VERIFIED_CLIENT" == "1" ]] ||
+  { echo "host marker should select client only" >&2; exit 1; }
+export PATH="$old_path"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+if [[ -n "$old_fake_verified" ]]; then
+  export FAKE_VERIFIED_FILE="$old_fake_verified"
+else
+  unset FAKE_VERIFIED_FILE
+fi
+rm -rf "$tagd"
+
 # Partial result: site succeeds, client fails. Both components are tried and
 # the run fails, while the site install is not rolled back.
 tmpd2="$(mktemp -d)"
@@ -210,10 +277,20 @@ if ! (
     client_args="$1 $2 $3"
     return 1
   }
-  if payload_main "$tmpd2/answers" >/dev/null 2>&1; then
+  partial_rc=0
+  payload_main "$tmpd2/answers" >"$tmpd2/out" 2>&1 || partial_rc=$?
+  partial_out="$(cat "$tmpd2/out")"
+  if ((partial_rc == 0)); then
     echo "partial should fail" >&2
     exit 1
   fi
+  case "$partial_out" in
+  *"pangolin service logs client"*) ;;
+  *)
+    echo "failed client should print a log hint: $partial_out" >&2
+    exit 1
+    ;;
+  esac
   [[ "$site_called" == "1" && "$client_called" == "1" ]] ||
     { echo "both components tried" >&2; exit 1; }
   [[ "$newt_cleaned" == "1" ]] ||
@@ -223,6 +300,12 @@ if ! (
   [[ "$stopped" == "pangolin-client" ]] ||
     { echo "failed client should be stopped" >&2; exit 1; }
 ); then
+  exit 1
+fi
+grep -qx 'site' "$tmpd2/answers/verified" ||
+  { echo "verified marker should record the site" >&2; exit 1; }
+if grep -qx 'client' "$tmpd2/answers/verified"; then
+  echo "failed client must not be recorded as verified" >&2
   exit 1
 fi
 export PANGOLIN_ROOT="$old_pangolin_root"
@@ -289,10 +372,20 @@ if ! (
   wait_for_provisioning() { return 1; }
   stop_service() { stopped="$2"; }
   install_site_systemd() { installed=1; }
-  if payload_main "$tmpd3/answers" >/dev/null 2>&1; then
+  site_rc=0
+  payload_main "$tmpd3/answers" >"$tmpd3/out" 2>&1 || site_rc=$?
+  site_out="$(cat "$tmpd3/out")"
+  if ((site_rc == 0)); then
     echo "unprovisioned site should fail" >&2
     exit 1
   fi
+  case "$site_out" in
+  *"pangolin service logs site"*) ;;
+  *)
+    echo "failed site should print a log hint: $site_out" >&2
+    exit 1
+    ;;
+  esac
   [[ "$installed" == "1" && "$cleaned" == "0" && "$newt_cleaned" == "0" ]] ||
     { echo "cleanup must wait for verification" >&2; exit 1; }
   [[ "$stopped" == "pangolin-site" ]] ||
@@ -527,7 +620,97 @@ esac
 case "$dry_out" in
 *sec*) echo "dry run printed the secret" >&2; exit 1 ;;
 esac
+case "$dry_out" in
+*"Validate the target OS floor"*) ;;
+*) echo "dry run OS plan missing" >&2; exit 1 ;;
+esac
+
+if ! dry_client_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=client var_target=host var_pangolin_endpoint=https://p.example \
+    var_client_id=cid var_client_secret=csecret bash "$ROOT/add-pangolin.sh" 2>&1
+)"; then
+  echo "client dry run failed: $dry_client_out" >&2
+  exit 1
+fi
+case "$dry_client_out" in
+*"Ensure /dev/net/tun exists on the host"*) ;;
+*) echo "dry run host TUN plan missing" >&2; exit 1 ;;
+esac
+case "$dry_client_out" in
+*csecret*) echo "dry run printed the client secret" >&2; exit 1 ;;
+esac
+
+if ! dry_prov_out="$(
+  TMPDIR="$dry/tmp" PATH="$dry/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+    var_site_provisioning_key=spk-SECRET var_reconfigure=1 \
+    bash "$ROOT/add-pangolin.sh" 2>&1
+)"; then
+  echo "provisioning dry run failed: $dry_prov_out" >&2
+  exit 1
+fi
+case "$dry_prov_out" in
+*tier3*"approve new sites"*"second server-side site"*) ;;
+*) echo "dry run provisioning notes missing" >&2; exit 1 ;;
+esac
+case "$dry_prov_out" in
+*spk-SECRET*) echo "dry run printed the provisioning key" >&2; exit 1 ;;
+esac
+[[ -z "$(ls -A "$dry/tmp")" ]] || { echo "dry runs wrote files" >&2; exit 1; }
+[[ ! -e "$dry/curl-ran" ]] || { echo "dry runs used the network" >&2; exit 1; }
 rm -rf "$dry"
+
+# Dry run never opens whiptail: missing selectors fail with a required-values
+# list, and an invalid var_reconfigure is rejected.
+dry2="$(mktemp -d)"
+mkdir -p "$dry2/bin"
+cat >"$dry2/bin/whiptail" <<EOF
+#!/usr/bin/env bash
+printf called >>"$dry2/whiptail-ran"
+exit 1
+EOF
+chmod 755 "$dry2/bin/whiptail"
+missing_rc=0
+missing_out="$(
+  PATH="$dry2/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_pangolin_endpoint=https://p.example var_site_id=id var_site_secret=sec \
+    bash "$ROOT/add-pangolin.sh" 2>&1
+)" || missing_rc=$?
+[[ "$missing_rc" -ne 0 ]] || { echo "dry run without selectors should fail" >&2; exit 1; }
+case "$missing_out" in
+*"Missing required values:"*var_mode*var_target*) ;;
+*) echo "dry run missing-values message: $missing_out" >&2; exit 1 ;;
+esac
+[[ ! -e "$dry2/whiptail-ran" ]] || { echo "dry run opened whiptail" >&2; exit 1; }
+
+target_rc=0
+target_out="$(
+  PATH="$dry2/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 var_mode=site \
+    var_pangolin_endpoint=https://p.example var_site_id=id var_site_secret=sec \
+    bash "$ROOT/add-pangolin.sh" 2>&1
+)" || target_rc=$?
+[[ "$target_rc" -ne 0 ]] || { echo "dry run without var_target should fail" >&2; exit 1; }
+case "$target_out" in
+*"Missing required values:"*var_target*) ;;
+*) echo "dry run missing-target message: $target_out" >&2; exit 1 ;;
+esac
+[[ ! -e "$dry2/whiptail-ran" ]] || { echo "dry run opened whiptail" >&2; exit 1; }
+
+reconfigure_rc=0
+reconfigure_out="$(
+  PATH="$dry2/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+    var_mode=site var_target=host var_reconfigure=yes \
+    var_pangolin_endpoint=https://p.example var_site_id=id var_site_secret=sec \
+    bash "$ROOT/add-pangolin.sh" 2>&1
+)" || reconfigure_rc=$?
+[[ "$reconfigure_rc" -ne 0 ]] || { echo "invalid var_reconfigure should fail" >&2; exit 1; }
+case "$reconfigure_out" in
+*"Invalid var_reconfigure: yes"*) ;;
+*) echo "reconfigure validation message: $reconfigure_out" >&2; exit 1 ;;
+esac
+[[ ! -e "$dry2/whiptail-ran" ]] || { echo "dry run opened whiptail" >&2; exit 1; }
+rm -rf "$dry2"
 
 echo "Entry tests passed"
 echo "Orchestration tests passed"

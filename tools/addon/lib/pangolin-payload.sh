@@ -1241,11 +1241,35 @@ _restore_install_paths() {
   return "$rc"
 }
 
+# Record a component that verified in the answers directory. No secrets.
+_record_verified() {
+  local file="$1" component="$2"
+  if ! (umask 077 && printf '%s\n' "$component" >>"$file"); then
+    echo "Cannot record the verified $component component in $file" >&2
+    return 1
+  fi
+}
+
+# Point the operator at the failed component's log. Raw tails are deliberately
+# not printed: provisioning and client logs can contain credential material.
+_print_service_log_hint() {
+  local backend="$1" component="$2" service="pangolin-$2"
+  case "$backend" in
+  systemd)
+    echo "Service log: journalctl -u $service" >&2
+    ;;
+  openrc)
+    echo "Service log: $(p /var/log/$service.log)" >&2
+    ;;
+  esac
+  echo "Or run: pangolin service logs $component" >&2
+}
+
 # Install the selected components from a private answers directory. Components
 # are independent: a verified component stays installed when the other fails,
 # and the failed component is stopped without touching the earlier one.
 payload_main() {
-  local answers="${1:-}" flags backend site client reconfigure rc=0 site_verified=0
+  local answers="${1:-}" flags verified_file backend site client reconfigure rc=0 site_verified=0
   if [[ -z "$answers" || ! -d "$answers" ]]; then
     echo "payload_main: an answers directory is required" >&2
     return 1
@@ -1268,6 +1292,14 @@ payload_main() {
   fi
   if [[ "$reconfigure" != 1 ]]; then
     reconfigure=0
+  fi
+
+  # Record only the components that verify, so a partial run can still tag the
+  # ones that succeeded. The file holds component names, never credentials.
+  verified_file="$answers/verified"
+  if ! (umask 077 && : >"$verified_file"); then
+    echo "Cannot create $verified_file; LXC tags may be incomplete." >&2
+    rc=1
   fi
 
   backend="$(service_backend)" || {
@@ -1295,6 +1327,7 @@ payload_main() {
       echo "Failed to back up the existing site unit; refusing to replace it." >&2
       rc=1
     elif _install_site_component "$backend" "$answers" "$reconfigure" "$site_verified"; then
+      _record_verified "$verified_file" site || rc=1
       cleanup_legacy_addon site || {
         echo "The pangolin-site service is verified, but legacy site cleanup failed." >&2
         rc=1
@@ -1305,6 +1338,7 @@ payload_main() {
       }
     else
       stop_service "$backend" pangolin-site >/dev/null 2>&1 || true
+      _print_service_log_hint "$backend" site
       _restore_install_paths "$backend" site || rc=1
       rc=1
     fi
@@ -1314,12 +1348,14 @@ payload_main() {
       echo "Failed to back up the existing client unit; refusing to replace it." >&2
       rc=1
     elif _install_client_component "$backend" "$answers"; then
+      _record_verified "$verified_file" client || rc=1
       cleanup_legacy_addon client || {
         echo "The pangolin-client service is verified, but legacy client cleanup failed." >&2
         rc=1
       }
     else
       stop_service "$backend" pangolin-client >/dev/null 2>&1 || true
+      _print_service_log_hint "$backend" client
       _restore_install_paths "$backend" client || rc=1
       rc=1
     fi

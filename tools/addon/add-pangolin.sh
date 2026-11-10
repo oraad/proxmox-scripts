@@ -24,6 +24,9 @@ PANGOLIN_TEST="${PANGOLIN_TEST:-0}"
 # Read by the community-scripts core message and header helpers.
 APP="${APP:-Pangolin}"
 APP_TYPE="${APP_TYPE:-addon}"
+# Components the payload verified in this run; used for LXC tags and next steps.
+VERIFIED_SITE=0
+VERIFIED_CLIENT=0
 
 # Load the payload at source time when a local checkout is supplied. Tests use
 # this path so the entry helpers can be exercised without network access or a
@@ -422,6 +425,7 @@ _print_dry_run() {
   printf 'Mode: %s\n' "$mode"
   printf 'Components: %s\n' "$(_components_label "$site" "$client")"
   printf 'Actions:\n'
+  printf '  - Validate the target OS floor (Debian 12+, Ubuntu 22.04+, Alpine 3.20+)\n'
   printf '  - Install or verify the Pangolin CLI binary\n'
   if [[ "$site" == 1 ]]; then
     if [[ "$reconfigure" == 1 ]]; then
@@ -431,11 +435,19 @@ _print_dry_run() {
     else
       printf '  - Reuse the existing site configuration, or migrate a legacy site or Newt install\n'
     fi
+    if [[ -n "${var_site_provisioning_key:-}" ]]; then
+      printf '  - Note: provisioning keys require tier3/enterprise; with "approve new sites" off the site stays pending\n'
+      if [[ "$reconfigure" == 1 ]]; then
+        printf '  - Note: reconfiguring with a provisioning key creates a second server-side site\n'
+      fi
+    fi
     printf '  - Install the pangolin-site service and verify provisioning\n'
     printf '  - Check status with: %spangolin service status site\n' "$prefix"
   fi
   if [[ "$client" == 1 ]]; then
-    if [[ "$target" != host ]]; then
+    if [[ "$target" == host ]]; then
+      printf '  - Ensure /dev/net/tun exists on the host; load the tun module when missing\n'
+    else
       printf '  - Apply TUN passthrough and restart CTID %s gracefully when the config changes\n' \
         "$target"
     fi
@@ -691,22 +703,73 @@ _print_next_steps() {
   fi
 }
 
+# Warn about provisioning-key limitations before an install uses one. Covers
+# both interactive and unattended input because it runs after input resolution.
+_warn_provisioning_risks() {
+  local reconfigure="$1" site="$2"
+  [[ "$site" == 1 ]] || return 0
+  [[ -n "${var_site_provisioning_key:-}" ]] || return 0
+  msg_warn "Provisioning keys require Pangolin tier3/enterprise. If \"approve new sites\" is disabled, the site stays pending until an operator approves it." >&2
+  if [[ "$reconfigure" == 1 ]]; then
+    msg_warn "Reconfiguring with a provisioning key creates a second server-side site; delete the old site in the Pangolin dashboard." >&2
+  fi
+}
+
+# Read the payload's verified-component marker and tag an LXC target with only
+# the components that actually verified. Sets VERIFIED_SITE/VERIFIED_CLIENT.
+_apply_verified_tags() {
+  local target="$1" answers="$2" content="" line
+  VERIFIED_SITE=0
+  VERIFIED_CLIENT=0
+  if [[ "$target" == host ]]; then
+    content="$(cat "$answers/verified" 2>/dev/null || true)"
+  else
+    content="$(pct exec "$target" -- cat /root/.pangolin-addon/verified 2>/dev/null || true)"
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+    site) VERIFIED_SITE=1 ;;
+    client) VERIFIED_CLIENT=1 ;;
+    esac
+  done <<<"$content"
+  if [[ "$target" != host ]] && [[ "$VERIFIED_SITE" == 1 || "$VERIFIED_CLIENT" == 1 ]]; then
+    apply_lxc_tags "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT" || {
+      msg_warn "The install finished, but the LXC tags could not be updated." >&2
+    }
+  fi
+}
+
 # Full interactive or unattended flow. Secrets stay in the mode 0700 answers
 # directory and never enter a pct argument value or a log line.
 main() {
   local mode="" target="" site=0 client=0 reconfigure=0 site_answers=0
   local payload_rc=0 name=""
-  local -a runenv=()
+  local -a runenv=() missing=()
 
   ANSWERS_DIR=""
   REMOTE_TARGET=""
   PANGOLIN_DRY_RUN="${PANGOLIN_DRY_RUN:-0}"
 
+  reconfigure="${var_reconfigure:-0}"
+  if [[ "$reconfigure" != 0 && "$reconfigure" != 1 ]]; then
+    echo "Invalid var_reconfigure: $reconfigure (expected 0 or 1)" >&2
+    return 1
+  fi
+
+  # Dry run must never open whiptail: require the unattended selectors first.
+  if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
+    missing=()
+    [[ -n "${var_mode:-}" ]] || missing+=("var_mode")
+    [[ -n "${var_target:-}" ]] || missing+=("var_target")
+    if ((${#missing[@]} > 0)); then
+      echo "Missing required values: ${missing[*]}" >&2
+      return 1
+    fi
+  fi
+
   mode="$(_resolve_mode)" || return 1
   target="$(_resolve_target)" || return 1
   read -r site client <<<"$(components_from_mode "$mode")" || return 1
-  reconfigure="${var_reconfigure:-0}"
-  [[ "$reconfigure" == 1 ]] || reconfigure=0
   _apply_legacy_aliases
 
   if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
@@ -768,6 +831,7 @@ main() {
     [[ "$reconfigure" == 1 ]] || reconfigure=0
   fi
   _validate_plan "$site" "$client" "$reconfigure" || return 1
+  _warn_provisioning_risks "$reconfigure" "$site"
 
   if [[ "$site" == 1 ]]; then
     site_answers="$(_resolve_site_answers "$target" "$reconfigure")" || return 1
@@ -825,16 +889,16 @@ main() {
       bash /root/.pangolin-addon/payload.sh /root/.pangolin-addon || payload_rc=$?
   fi
 
+  _apply_verified_tags "$target" "$ANSWERS_DIR"
   if ((payload_rc != 0)); then
     msg_error "The Pangolin install failed. Components that were verified stay installed."
     return "$payload_rc"
   fi
-  if [[ "$target" != host ]]; then
-    apply_lxc_tags "$target" "$site" "$client" || {
-      msg_warn "The install succeeded, but the LXC tags could not be updated."
-    }
+  if [[ "$VERIFIED_SITE" == 0 && "$VERIFIED_CLIENT" == 0 ]]; then
+    VERIFIED_SITE="$site"
+    VERIFIED_CLIENT="$client"
   fi
-  _print_next_steps "$target" "$site" "$client"
+  _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT"
   return 0
 }
 
