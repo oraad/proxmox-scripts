@@ -414,6 +414,76 @@ install_cli_binary() {
   echo "Installed Pangolin CLI $version"
 }
 
+# Wait until the named service is active, or fail after the given attempts.
+# Sleeps delay seconds between attempts, with no sleep after the last one.
+wait_service_active() {
+  local backend="$1" name="$2" attempts="$3" delay="$4" i=0
+  [[ "$attempts" =~ ^[0-9]+$ ]] || return 1
+  while ((i < attempts)); do
+    case "$backend" in
+    systemd)
+      if systemctl is-active --quiet "$name" >/dev/null 2>&1; then
+        return 0
+      fi
+      ;;
+    openrc)
+      if rc-service "$name" status >/dev/null 2>&1; then
+        return 0
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+    esac
+    i=$((i + 1))
+    if ((i < attempts)); then
+      sleep "$delay"
+    fi
+  done
+  return 1
+}
+
+# Wait until the site configuration holds credentials instead of a
+# provisioning key, or fail after the given attempts.
+wait_for_provisioning() {
+  local config_path="$1" attempts="$2" delay="$3" i=0
+  [[ "$attempts" =~ ^[0-9]+$ ]] || return 1
+  while ((i < attempts)); do
+    if site_config_has_credentials "$config_path"; then
+      return 0
+    fi
+    i=$((i + 1))
+    if ((i < attempts)); then
+      sleep "$delay"
+    fi
+  done
+  return 1
+}
+
+# Stop the named service with the service manager that owns it.
+stop_service() {
+  local backend="$1" name="$2"
+  case "$backend" in
+  systemd) systemctl stop "$name" ;;
+  openrc) rc-service "$name" stop ;;
+  *) return 1 ;;
+  esac
+}
+
+# Install the site service with the verified CLI, then wait for it to become
+# active. Returns 1 without printing success when the install or wait fails.
+install_site_systemd() {
+  local config_path="$1"
+  if ! "$PANGOLIN_BIN" service install site --config-file "$config_path"; then
+    echo "Failed to install the pangolin-site service" >&2
+    return 1
+  fi
+  if ! wait_service_active systemd pangolin-site 30 1; then
+    echo "The pangolin-site service did not become active" >&2
+    return 1
+  fi
+}
+
 # The full addon entry point is added in Task 10.
 payload_main() {
   echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2

@@ -238,3 +238,54 @@ export PANGOLIN_STATE_FILE="$old_pangolin_state_file"
 export PANGOLIN_SELINUX_ENFORCE="$old_pangolin_selinux_enforce"
 
 echo "Task 4 tests passed"
+
+# Task 5: systemd site install and shared wait/stop helpers.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin"
+cat >"$tmpd/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$FAKE_LOG"
+if [[ "$1" == "is-active" && "${FAKE_INACTIVE:-0}" == "1" ]]; then exit 3; fi
+exit 0
+EOF
+cat >"$tmpd/bin/pangolin" <<'EOF'
+#!/usr/bin/env bash
+echo "pangolin $*" >>"$FAKE_LOG"
+EOF
+chmod 755 "$tmpd/bin/systemctl" "$tmpd/bin/pangolin"
+
+old_path="$PATH"
+old_pangolin_bin="$PANGOLIN_BIN"
+old_fake_log="${FAKE_LOG:-}"
+old_fake_inactive="${FAKE_INACTIVE:-}"
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_BIN="$tmpd/bin/pangolin"
+
+cfg="$tmpd/site.json"
+write_private_file "$cfg" "$(site_config_static "https://p.example" id1 sec1)"
+install_site_systemd "$cfg"
+grep -q "service install site --config-file $cfg" "$FAKE_LOG" || fail "site install args"
+grep -q "systemctl is-active.*pangolin-site" "$FAKE_LOG" || fail "active check"
+
+if wait_service_active systemd pangolin-site 1 0; then :; else fail "active should pass"; fi
+export FAKE_INACTIVE=1
+if wait_service_active systemd pangolin-site 1 0; then fail "inactive should fail"; fi
+unset FAKE_INACTIVE
+stop_service systemd pangolin-site
+grep -q "systemctl stop pangolin-site" "$FAKE_LOG" || fail "stop call"
+
+if wait_for_provisioning "$cfg" 1 0; then :; else fail "static credentials should pass"; fi
+prov_cfg="$tmpd/prov.json"
+write_private_file "$prov_cfg" "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1")"
+if wait_for_provisioning "$prov_cfg" 1 0; then
+  fail "a provisioning key should not count as credentials"
+fi
+
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+if [[ -n "$old_fake_inactive" ]]; then export FAKE_INACTIVE="$old_fake_inactive"; else unset FAKE_INACTIVE; fi
+
+echo "Task 5 tests passed"
