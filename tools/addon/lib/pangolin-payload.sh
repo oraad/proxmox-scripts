@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 Proxmox Custom Scripts contributors
+# License: MIT
+#
+# Shared Pangolin addon payload. Source this file; do not execute it.
+# It provides architecture detection, release metadata parsing, and sha256
+# verification used by the addon entry point and its tests.
+
+PANGOLIN_ROOT="${PANGOLIN_ROOT:-}"
+p() { printf '%s%s' "$PANGOLIN_ROOT" "$1"; }
+
+PANGOLIN_BIN="${PANGOLIN_BIN:-$(p /usr/local/bin/pangolin)}"
+PANGOLIN_STATE_FILE="${PANGOLIN_STATE_FILE:-$(p /var/lib/pangolin/cli.json)}"
+PANGOLIN_RELEASE_API="${PANGOLIN_RELEASE_API:-https://api.fossorial.io/api/v1/versions/cli}"
+PANGOLIN_RELEASE_BASE="${PANGOLIN_RELEASE_BASE:-https://github.com/fosrl/cli/releases/download}"
+
+# Map a `uname -m` machine name to a release asset architecture.
+arch_from_uname() {
+  case "$1" in
+  x86_64 | amd64) echo amd64 ;;
+  aarch64 | arm64) echo arm64 ;;
+  armv7l | armv7*) echo arm32 ;;
+  armv6l | armv6*) echo arm32v6 ;;
+  riscv64) echo riscv64 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Map a `dpkg --print-architecture` name to a release asset architecture.
+arch_from_dpkg() {
+  case "$1" in
+  amd64) echo amd64 ;;
+  arm64) echo arm64 ;;
+  armhf | armel) echo arm32 ;;
+  riscv64) echo riscv64 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Detect the release asset architecture, preferring dpkg when available.
+detect_arch() {
+  local arch machine
+  if command -v dpkg >/dev/null 2>&1; then
+    arch="$(dpkg --print-architecture 2>/dev/null || true)"
+    if [[ -n "$arch" ]]; then
+      arch_from_dpkg "$arch" && return 0
+      echo "Unsupported architecture: $arch" >&2
+      return 1
+    fi
+  fi
+  machine="$(uname -m)"
+  arch_from_uname "$machine" && return 0
+  echo "Unsupported architecture: $machine" >&2
+  return 1
+}
+
+# Print the latest CLI version from a Fossorial release API response.
+release_version() {
+  local version
+  version="$(printf '%s' "$1" | sed -n 's/.*"latestVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$version" ]] || return 1
+  printf '%s\n' "$version"
+}
+
+# Print the sha256 digest of one release asset from a Fossorial API response.
+release_digest() {
+  local json="$1" asset="$2" escaped digest
+  escaped="$(printf '%s' "$asset" | sed 's/[][\.*^$/]/\\&/g')"
+  digest="$(printf '%s' "$json" |
+    sed -n "s/.*\"$escaped\"[[:space:]]*:[[:space:]]*\"\([0-9a-fA-F]\{64\}\)\".*/\1/p" | head -n 1)"
+  [[ -n "$digest" ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+# Verify a file against an expected sha256 hex digest.
+verify_sha256() {
+  local path="$1" expected="$2" actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$path" | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$path" | cut -d' ' -f1)"
+  else
+    echo "No sha256 tool found (sha256sum or shasum)" >&2
+    return 1
+  fi
+  [[ "$actual" == "$expected" ]]
+}
+
+# The full addon entry point is added in Task 10.
+payload_main() {
+  echo "pangolin-payload.sh is a library. Run tools/addon/add-pangolin.sh instead." >&2
+  return 1
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  payload_main "$@"
+fi
