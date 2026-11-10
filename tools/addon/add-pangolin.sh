@@ -104,7 +104,8 @@ build_client_answers() {
     return 1
   fi
   content="$(printf 'PANGOLIN_CLIENT_ID=%s\nPANGOLIN_CLIENT_SECRET=%s\nPANGOLIN_ENDPOINT=%s' \
-    "$id" "$secret" "$endpoint")"
+    "$(_shell_single_quote "$id")" "$(_shell_single_quote "$secret")" \
+    "$(_shell_single_quote "$endpoint")")"
   install -d -m 0700 "$dir" || return 1
   write_private_file "$dir/client.env" "$content"
 }

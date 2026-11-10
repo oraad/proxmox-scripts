@@ -35,8 +35,29 @@ cmp -s "$PANGOLIN_PAYLOAD" "$dir/payload.sh" || { echo "payload copy" >&2; exit 
 [[ "$(stat -c '%a' "$dir/payload.sh")" == "600" ]] || { echo "payload mode" >&2; exit 1; }
 
 build_client_answers "$dir" "https://p.example" cid csecret
-grep -q 'PANGOLIN_CLIENT_ID=cid' "$dir/client.env" || { echo "client answers" >&2; exit 1; }
+grep -q "PANGOLIN_CLIENT_ID='cid'" "$dir/client.env" || { echo "client answers" >&2; exit 1; }
 [[ "$(stat -c '%a' "$dir/client.env")" == "600" ]] || { echo "client env mode" >&2; exit 1; }
+
+# Shell metacharacters in credentials must survive a source of client.env.
+hostile="s3cr\$et 'q' \"d\" \`id\` ; #hash
+line2"
+build_client_answers "$dir" "https://p.example" "$hostile" "$hostile"
+(
+  # shellcheck disable=SC1090,SC1091
+  source "$dir/client.env"
+  [[ "$PANGOLIN_CLIENT_ID" == "$hostile" ]] || {
+    echo "hostile client id" >&2
+    exit 1
+  }
+  [[ "$PANGOLIN_CLIENT_SECRET" == "$hostile" ]] || {
+    echo "hostile client secret" >&2
+    exit 1
+  }
+  [[ "$PANGOLIN_ENDPOINT" == "https://p.example" ]] || {
+    echo "hostile client endpoint" >&2
+    exit 1
+  }
+) || { echo "hostile client env" >&2; exit 1; }
 rm -rf "$dir"
 
 echo "Entry tests passed"
