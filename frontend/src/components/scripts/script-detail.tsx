@@ -51,10 +51,12 @@ export function ScriptDetail({
   script,
   categories,
   backHref = "/scripts",
+  categoryParam,
 }: {
   script: Script;
   categories: Category[];
   backHref?: string;
+  categoryParam?: string | null;
 }) {
   const [methodIndex, setMethodIndex] = useState(0);
   const method = script.install_methods[methodIndex] ?? script.install_methods[0];
@@ -63,6 +65,14 @@ export function ScriptDetail({
     () => getRelatedScripts(categories, script, 3),
     [categories, script],
   );
+
+  function scriptHref(slug: string) {
+    const params = new URLSearchParams({ id: slug });
+    if (categoryParam && /^\d+$/.test(categoryParam)) {
+      params.set("category", categoryParam);
+    }
+    return `/scripts?${params.toString()}`;
+  }
 
   const sortedNotes = useMemo(
     () => script.notes.slice().sort((a, b) => noteRank[a.type] - noteRank[b.type]),
@@ -194,7 +204,7 @@ export function ScriptDetail({
             Details
           </summary>
           <p className="mt-2 text-muted-foreground">
-            Config <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{script.config_path}</code>
+            Config <code className="break-all rounded bg-muted px-1.5 py-0.5 text-xs">{script.config_path}</code>
           </p>
         </details>
       ) : null}
@@ -224,13 +234,13 @@ export function ScriptDetail({
           <span className="font-medium">Default credentials</span>
           {script.default_credentials.username !== null ? (
             <span className="text-muted-foreground">
-              User <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{script.default_credentials.username}</code>
+              User <code className="break-all rounded bg-muted px-1.5 py-0.5 text-xs">{script.default_credentials.username}</code>
             </span>
           ) : null}
           {script.default_credentials.password !== null ? (
             <span className="text-muted-foreground">
               Password{" "}
-              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+              <code className="break-all rounded bg-muted px-1.5 py-0.5 text-xs">
                 {script.default_credentials.password}
               </code>
             </span>
@@ -245,7 +255,7 @@ export function ScriptDetail({
             {related.map((item) => (
               <li key={item.slug}>
                 <Link
-                  href={`/scripts?id=${encodeURIComponent(item.slug)}`}
+                  href={scriptHref(item.slug)}
                   className="focus-surface flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-accent"
                 >
                   <span className="truncate">{item.name}</span>
@@ -285,7 +295,7 @@ function NoteAlert({ note }: { note: Script["notes"][number] }) {
       )}
     >
       {config.icon}
-      <span>{note.text}</span>
+      <span className="min-w-0 break-words">{note.text}</span>
     </div>
   );
 }

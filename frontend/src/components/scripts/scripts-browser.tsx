@@ -29,6 +29,7 @@ export function ScriptsBrowser({
   const router = useRouter();
   const pathname = usePathname();
   const [query, setQuery] = useState("");
+  const [dismissedSlug, setDismissedSlug] = useState<string | null>(null);
 
   const filter: Filter =
     categoryParam && /^\d+$/.test(categoryParam) ? Number(categoryParam) : "all";
@@ -65,12 +66,38 @@ export function ScriptsBrowser({
 
   const hasFilters = Boolean(query.trim()) || filter !== "all";
   const backHref = filter === "all" ? "/scripts" : `/scripts?category=${filter}`;
+  const detailScript =
+    selectedScript && selectedScript.slug !== dismissedSlug ? selectedScript : null;
 
   function setFilter(next: Filter) {
+    setDismissedSlug(null);
     const params = new URLSearchParams();
     if (next !== "all") params.set("category", String(next));
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }
+
+  function handleQueryChange(value: string) {
+    setQuery(value);
+    if (!selectedScript || selectedScript.slug === dismissedSlug) return;
+
+    setDismissedSlug(selectedScript.slug);
+    const params = new URLSearchParams();
+    if (filter !== "all") params.set("category", String(filter));
+    const qs = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      qs ? `${window.location.pathname}?${qs}` : window.location.pathname,
+    );
+  }
+
+  function handleCardClick(slug: string) {
+    if (dismissedSlug !== slug) return;
+    setDismissedSlug(null);
+    const params = new URLSearchParams({ id: slug });
+    if (filter !== "all") params.set("category", String(filter));
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
   }
 
   function clearFilters() {
@@ -84,7 +111,7 @@ export function ScriptsBrowser({
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => handleQueryChange(event.target.value)}
           placeholder="Search scripts..."
           aria-label="Search scripts"
           className="h-9 pl-8 text-sm"
@@ -118,7 +145,7 @@ export function ScriptsBrowser({
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => handleQueryChange(event.target.value)}
               placeholder="Search scripts..."
               aria-label="Search scripts"
               className="h-9 pl-8 text-sm"
@@ -147,18 +174,19 @@ export function ScriptsBrowser({
       </aside>
 
       <div className="min-w-0 space-y-4">
-        {selectedScript ? (
+        {detailScript ? (
           <ScriptDetail
-            key={selectedScript.slug}
-            script={selectedScript}
+            key={detailScript.slug}
+            script={detailScript}
             categories={categories}
             backHref={backHref}
+            categoryParam={categoryParam}
           />
         ) : (
           <>
             {mobileControls}
 
-            {selectedSlug ? (
+            {selectedSlug && !selectedScript ? (
               <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
                 Script <code className="rounded bg-muted px-1.5 py-0.5">{selectedSlug}</code> was
                 not found.
@@ -194,6 +222,7 @@ export function ScriptsBrowser({
                     href={`/scripts?id=${encodeURIComponent(script.slug)}${
                       filter === "all" ? "" : `&category=${filter}`
                     }`}
+                    onClick={() => handleCardClick(script.slug)}
                   />
                 ))}
               </div>

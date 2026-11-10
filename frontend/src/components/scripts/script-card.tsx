@@ -5,10 +5,19 @@ import { ScriptBadges } from "@/components/scripts/script-badges";
 import { Card, CardContent } from "@/components/ui/card";
 import type { Script } from "@/lib/types";
 
-export function ScriptCard({ script, href }: { script: Script; href?: string }) {
+export function ScriptCard({
+  script,
+  href,
+  onClick,
+}: {
+  script: Script;
+  href?: string;
+  onClick?: () => void;
+}) {
   return (
     <Link
       href={href ?? `/scripts?id=${encodeURIComponent(script.slug)}`}
+      onClick={onClick}
       className="group block h-full"
     >
       <Card className="h-full transition-colors group-hover:border-primary/40">
