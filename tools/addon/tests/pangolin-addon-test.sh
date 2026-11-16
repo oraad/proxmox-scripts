@@ -1568,3 +1568,519 @@ export PANGOLIN_BIN="$old_pangolin_bin"
 if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
 
 echo "Multi-site Task 4 tests passed"
+
+# Multi-site Task 5: one-way legacy conversion and instance cleanup. The fakes
+# log every service-manager call so the conversion ordering is asserted, not
+# assumed. FAKE_INACTIVE_UNIT fails is-active/status for one named unit only.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin"
+cat >"$tmpd/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$FAKE_LOG"
+if [[ "$1" == "is-active" ]]; then
+  unit="${*: -1}"
+  [[ -z "${FAKE_INACTIVE_UNIT:-}" || "$unit" != "$FAKE_INACTIVE_UNIT" ]] || exit 3
+  [[ "${FAKE_INACTIVE:-0}" != "1" ]] || exit 3
+fi
+exit 0
+EOF
+cat >"$tmpd/bin/rc-service" <<'EOF'
+#!/usr/bin/env bash
+echo "rc-service $*" >>"$FAKE_LOG"
+if [[ "$2" == "status" ]]; then
+  [[ -z "${FAKE_INACTIVE_UNIT:-}" || "$1" != "$FAKE_INACTIVE_UNIT" ]] || exit 3
+  [[ "${FAKE_INACTIVE:-0}" != "1" ]] || exit 3
+fi
+exit 0
+EOF
+cat >"$tmpd/bin/rc-update" <<'EOF'
+#!/usr/bin/env bash
+echo "rc-update $*" >>"$FAKE_LOG"
+case "$1" in
+add) ln -sf "$PANGOLIN_ROOT/etc/init.d/$2" "$PANGOLIN_ROOT/etc/runlevels/default/$2" ;;
+del)
+  entry="$PANGOLIN_ROOT/etc/runlevels/default/$2"
+  if [[ -e "$entry" || -L "$entry" ]]; then rm -f "$entry"; else exit 1; fi
+  ;;
+esac
+exit 0
+EOF
+for c in supervise-daemon logrotate; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
+done
+printf '#!/usr/bin/env bash\necho "pangolin $*" >>"$FAKE_LOG"\nexit 0\n' >"$tmpd/bin/pangolin"
+chmod 755 "$tmpd"/bin/*
+
+old_path="$PATH"
+old_pangolin_root="$PANGOLIN_ROOT"
+old_pangolin_bin="$PANGOLIN_BIN"
+old_fake_log="${FAKE_LOG:-}"
+old_fake_inactive_unit="${FAKE_INACTIVE_UNIT:-}"
+old_newt_id="$LEGACY_NEWT_ID"
+old_newt_secret="$LEGACY_NEWT_SECRET"
+old_newt_endpoint="$LEGACY_ENDPOINT"
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_ROOT="$tmpd/root"
+export PANGOLIN_BIN="$tmpd/root/usr/local/bin/pangolin"
+export PANGOLIN_SERVICE_ATTEMPTS=1
+export PANGOLIN_SERVICE_DELAY=0
+
+t5_root="$tmpd/root"
+t5_reset_root() {
+  rm -rf "$t5_root"
+  mkdir -p "$t5_root/etc/systemd/system/multi-user.target.wants" \
+    "$t5_root/etc/init.d" "$t5_root/etc/runlevels/default" "$t5_root/usr/local/bin" \
+    "$t5_root/etc/pangolin" "$t5_root/etc/logrotate.d" "$t5_root/var/log" \
+    "$t5_root/var/lib/pangolin" "$t5_root/usr/bin"
+}
+t5_legacy_systemd() {
+  printf 'UNIT-ORIGINAL\n' >"$t5_root/etc/systemd/system/pangolin-site.service"
+  ln -sf ../pangolin-site.service \
+    "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site.service"
+}
+t5_legacy_openrc() {
+  printf '#!/sbin/openrc-run\nlegacy\n' >"$t5_root/etc/init.d/pangolin-site"
+  printf '#!/bin/sh\n. /etc/pangolin/pangolin-site.env\nexec pangolin up site\n' \
+    >"$t5_root/usr/local/bin/pangolin-site-start"
+  ln -sf "$t5_root/etc/init.d/pangolin-site" "$t5_root/etc/runlevels/default/pangolin-site"
+}
+t5_legacy_env() {
+  printf 'SITE_ID=oldid\nSITE_SECRET=oldsecret\nPANGOLIN_ENDPOINT=https://p.example\n' \
+    >"$t5_root/etc/pangolin/pangolin-site.env"
+  chmod 600 "$t5_root/etc/pangolin/pangolin-site.env"
+}
+t5_updater() {
+  printf '#!/bin/sh\nexec old-site-updater\n' >"$t5_root/usr/bin/update-pangolin-site"
+  chmod 755 "$t5_root/usr/bin/update-pangolin-site"
+}
+t5_marker() { printf '%s\n' "$1" >"$t5_root/var/lib/pangolin/site-layout"; }
+t5_default_cfg="$(site_config_path default)"
+t5_cred="$(site_config_static "https://p.example" id1 s3cr3t-static)"
+
+printf 'MULTI_SITE=1\n' >"$tmpd/flags-on"
+printf 'MULTI_SITE=0\n' >"$tmpd/flags-off"
+
+# (1) State detection: single, template, mixed. The detector is pure file
+# inspection: the fake log must stay empty across every call.
+t5_reset_root
+assert_eq single "$(site_conversion_state)"
+: >"$FAKE_LOG"
+
+t5_legacy_systemd
+assert_eq single "$(site_conversion_state)"
+printf 'SITE_ID=old\n' >"$t5_root/etc/pangolin/pangolin-site.env"
+assert_eq single "$(site_conversion_state)"
+rm -f "$t5_root/etc/pangolin/pangolin-site.env"
+printf '[Unit]\n' >"$t5_root/etc/systemd/system/pangolin-site@.service"
+assert_eq mixed "$(site_conversion_state)"
+rm -f "$t5_root/etc/systemd/system/pangolin-site.service"
+rm -f "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site.service"
+assert_eq template "$(site_conversion_state)"
+rm -f "$t5_root/etc/systemd/system/pangolin-site@.service"
+assert_eq single "$(site_conversion_state)"
+
+# OpenRC per-slug units mark the template layout; the legacy init or its
+# runlevel entry alongside a slug unit is mixed.
+printf '#!/sbin/openrc-run\n' >"$t5_root/etc/init.d/pangolin-site-orga"
+assert_eq template "$(site_conversion_state)"
+printf '#!/sbin/openrc-run\nlegacy\n' >"$t5_root/etc/init.d/pangolin-site"
+assert_eq mixed "$(site_conversion_state)"
+rm -f "$t5_root/etc/init.d/pangolin-site" "$t5_root/etc/init.d/pangolin-site-orga"
+assert_eq single "$(site_conversion_state)"
+ln -sf /nonexistent "$t5_root/etc/runlevels/default/pangolin-site"
+assert_eq single "$(site_conversion_state)"
+t5_marker template
+assert_eq mixed "$(site_conversion_state)"
+rm -f "$t5_root/etc/runlevels/default/pangolin-site"
+assert_eq template "$(site_conversion_state)"
+t5_marker single
+assert_eq single "$(site_conversion_state)"
+rm -f "$t5_root/var/lib/pangolin/site-layout"
+# A legacy wants symlink alone still counts as a legacy service artifact.
+ln -sf ../pangolin-site.service \
+  "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site.service"
+printf '[Unit]\n' >"$t5_root/etc/systemd/system/pangolin-site@.service"
+assert_eq mixed "$(site_conversion_state)"
+rm -f "$t5_root/etc/systemd/system/pangolin-site@.service" \
+  "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site.service"
+[[ ! -s "$FAKE_LOG" ]] || fail "detection must not call the service manager"
+
+# (1b) multi_site_requested: flags file, MULTI_SITE env, var_multi_sites.
+multi_site_requested "$tmpd/flags-on" || fail "MULTI_SITE=1 flags file should request conversion"
+if multi_site_requested "$tmpd/flags-off"; then fail "MULTI_SITE=0 must not request conversion"; fi
+if multi_site_requested "$tmpd/does-not-exist"; then fail "missing flags file must not request"; fi
+(export MULTI_SITE=1; multi_site_requested) || fail "MULTI_SITE env should request"
+(export var_multi_sites=1; multi_site_requested) || fail "var_multi_sites env should request"
+printf 'SITE=1\n' >"$tmpd/flags-none"
+(export MULTI_SITE=1; multi_site_requested "$tmpd/flags-none") ||
+  fail "a flags file without the key must fall back to the env"
+if (export MULTI_SITE=1; multi_site_requested "$tmpd/flags-off"); then
+  fail "an explicit MULTI_SITE=0 in flags must beat the env"
+fi
+if (unset MULTI_SITE var_multi_sites; multi_site_requested "$tmpd/flags-off"); then
+  fail "no flags and no env must not request"
+fi
+
+# (1c) Marker writer: 0644, validated value.
+write_site_conversion_marker template || fail "marker write should succeed"
+assert_eq "$(cat "$t5_root/var/lib/pangolin/site-layout")" "template"
+assert_eq "644" "$(stat -c '%a' "$t5_root/var/lib/pangolin/site-layout")"
+if write_site_conversion_marker bogus >/dev/null 2>&1; then fail "bad marker value should fail"; fi
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+write_site_conversion_marker single || fail "single marker write should succeed"
+assert_eq "single" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+rm -f "$t5_root/var/lib/pangolin/site-layout"
+
+# (2, 4, 5) systemd conversion success: import byte-for-byte mode 0600, stop
+# legacy before @default starts, retire legacy after verification, write the
+# marker, and never invoke the single-instance CLI install.
+t5_reset_root
+t5_legacy_systemd
+t5_legacy_env
+t5_updater
+printf '#!/bin/sh\n. /etc/pangolin/pangolin-site.env\nexec pangolin up site\n' \
+  >"$t5_root/usr/local/bin/pangolin-site-start"
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+: >"$FAKE_LOG"
+conv_out="$(convert_site_layout systemd "$tmpd/flags-on" 2>"$tmpd/conv.err")" ||
+  fail "systemd conversion should succeed: $(cat "$tmpd/conv.err")"
+[[ -f "$t5_default_cfg" ]] || fail "sites/default.json should be imported"
+cmp -s "$t5_root/etc/pangolin/site.json" "$t5_default_cfg" || fail "import must be byte-for-byte"
+assert_eq "600" "$(stat -c '%a' "$t5_default_cfg")"
+[[ -f "$t5_root/etc/pangolin/site.json" ]] || fail "conversion must keep the legacy site.json"
+stop_line="$(grep -n '^systemctl stop pangolin-site$' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+enable_line="$(grep -n '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ -n "$stop_line" && -n "$enable_line" ]] || fail "conversion must stop legacy and start @default"
+[[ "$stop_line" -lt "$enable_line" ]] || fail "legacy must stop before @default starts"
+if grep -q 'pangolin service install' "$FAKE_LOG"; then
+  fail "template conversion must not call the single-instance CLI install"
+fi
+if grep -q '^systemctl start pangolin-site$' "$FAKE_LOG"; then
+  fail "a successful conversion must not start the legacy service"
+fi
+[[ ! -e "$t5_root/etc/systemd/system/pangolin-site.service" ]] ||
+  fail "a verified conversion must retire the legacy unit"
+[[ ! -e "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site.service" ]] ||
+  fail "a verified conversion must remove the legacy wants symlink"
+[[ ! -e "$t5_root/etc/pangolin/pangolin-site.env" ]] ||
+  fail "a verified conversion must remove the legacy site env"
+[[ ! -e "$t5_root/usr/local/bin/pangolin-site-start" ]] ||
+  fail "a verified conversion must remove the legacy-content wrapper"
+grep -q 'exec /usr/local/bin/pangolin update' "$t5_root/usr/bin/update-pangolin-site" ||
+  fail "the updater keeps its compatibility wrapper"
+t5_backup="$(find "$t5_root/var/lib/pangolin/backup" -name pangolin-site.env -print -quit)"
+[[ -n "$t5_backup" ]] || fail "conversion must back up the legacy env before removing it"
+grep -q '^SITE_SECRET=oldsecret$' "$t5_backup" || fail "the env backup must keep the original"
+assert_eq "600" "$(stat -c '%a' "$t5_backup")"
+[[ -f "$t5_root/var/lib/pangolin/site-layout" ]] || fail "conversion must record the marker"
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+assert_eq "644" "$(stat -c '%a' "$t5_root/var/lib/pangolin/site-layout")"
+for secret in s3cr3t-static oldsecret; do
+  case "$conv_out$(cat "$tmpd/conv.err")" in
+  *"$secret"*) fail "conversion must not print the secret $secret" ;;
+  esac
+done
+
+# (3) Newt static credentials convert into sites/default.json when no JSON
+# exists, and a fresh root with no legacy service issues no legacy stop.
+t5_reset_root
+LEGACY_NEWT_ID=nid
+LEGACY_NEWT_SECRET=nsec
+LEGACY_ENDPOINT=https://p.example
+write_private_file "$(site_config_path orga)" \
+  "$(site_config_static "https://p.example" idorg secorg)"
+: >"$FAKE_LOG"
+# The fake reports an inactive legacy service, as a host without one really
+# would, so retire must not act on it.
+FAKE_INACTIVE_UNIT=pangolin-site convert_site_layout systemd "" orga ||
+  fail "Newt conversion should succeed"
+[[ -f "$t5_default_cfg" ]] || fail "Newt credentials must import to the default path"
+python3 - "$t5_default_cfg" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d == {"endpoint": "https://p.example", "id": "nid", "secret": "nsec"}, d
+PY
+assert_eq "600" "$(stat -c '%a' "$t5_default_cfg")"
+grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
+  fail "Newt conversion must start @default"
+grep -q '^systemctl enable --now pangolin-site@orga$' "$FAKE_LOG" ||
+  fail "Newt conversion must start the requested slug"
+if grep -q '^systemctl stop pangolin-site$' "$FAKE_LOG"; then
+  fail "a host with no legacy service must not receive a stop"
+fi
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+LEGACY_NEWT_ID=""
+LEGACY_NEWT_SECRET=""
+LEGACY_ENDPOINT=""
+
+# (2b) A provisioning-key and native-state config is copied byte-for-byte; the
+# import runs even when the instance install later fails.
+t5_reset_root
+prov_native="$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1" 1 1 pangorga pangmorga)"
+write_private_file "$t5_root/etc/pangolin/site.json" "$prov_native"
+conv_rc=0
+(
+  install_site_systemd_slug() {
+    echo "stub: instance failed" >&2
+    return 1
+  }
+  convert_site_layout systemd "$tmpd/flags-on" default
+) >/dev/null 2>&1 || conv_rc=$?
+[[ "$conv_rc" -ne 0 ]] || fail "conversion must fail when @default cannot install"
+cmp -s "$t5_root/etc/pangolin/site.json" "$t5_default_cfg" ||
+  fail "a provisioning import must stay byte-for-byte"
+grep -q '"provisioningKey"' "$t5_default_cfg" || fail "provisioning key must be preserved"
+grep -q '"nativeMain":true' "$t5_default_cfg" || fail "native state must be preserved"
+if [[ -e "$t5_root/var/lib/pangolin/site-layout" ]]; then
+  fail "the marker must not exist when @default never verified"
+fi
+
+# (6) A failing @default restores the legacy files, restarts the legacy
+# service, removes the half-built default instance, and never starts extras.
+t5_reset_root
+t5_legacy_systemd
+t5_legacy_env
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+write_private_file "$(site_config_path orgb)" \
+  "$(site_config_static "https://p.example" idb secb)"
+: >"$FAKE_LOG"
+conv_rc=0
+FAKE_INACTIVE_UNIT='pangolin-site@default' \
+  convert_site_layout systemd "$tmpd/flags-on" default orgb >/dev/null 2>&1 || conv_rc=$?
+[[ "$conv_rc" -ne 0 ]] || fail "conversion must fail when @default never activates"
+grep -q '^systemctl stop pangolin-site$' "$FAKE_LOG" || fail "legacy must be stopped first"
+grep -q '^systemctl disable pangolin-site@default$' "$FAKE_LOG" ||
+  fail "the failed default instance must be disabled so it cannot race legacy at boot"
+grep -q '^systemctl start pangolin-site$' "$FAKE_LOG" ||
+  fail "an active legacy service must be restarted after the failed default"
+if grep -q 'pangolin-site@orgb' "$FAKE_LOG"; then
+  fail "a failed default must not start extra slugs"
+fi
+[[ -f "$t5_root/etc/systemd/system/pangolin-site.service" ]] ||
+  fail "a failed default must keep the legacy unit (restore, never retire)"
+[[ "$(cat "$t5_root/etc/systemd/system/pangolin-site.service")" == "UNIT-ORIGINAL" ]] ||
+  fail "the restored legacy unit must match the backup"
+[[ -L "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site.service" ]] ||
+  fail "the failed path must restore the legacy wants symlink"
+[[ -f "$t5_root/etc/pangolin/pangolin-site.env" ]] ||
+  fail "the failed path must keep the legacy env (cleanup only after success)"
+[[ -f "$(site_config_path orgb)" ]] || fail "an unattempted slug config must survive"
+if [[ -e "$t5_root/var/lib/pangolin/site-layout" ]]; then
+  fail "the marker must not exist after a failed default"
+fi
+# The failed restore leaves the legacy env; the backup dir holds a copy.
+[[ -n "$(find "$t5_root/var/lib/pangolin/backup" -name pangolin-site.env -print -quit)" ]] ||
+  fail "conversion must back up the legacy env before attempting changes"
+
+# (7) An extra slug failure removes only that instance and leaves default.
+t5_reset_root
+t5_legacy_systemd
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+write_private_file "$(site_config_path orgb)" \
+  "$(site_config_static "https://p.example" idb secb)"
+: >"$FAKE_LOG"
+conv_rc=0
+FAKE_INACTIVE_UNIT='pangolin-site@orgb' \
+  convert_site_layout systemd "$tmpd/flags-on" default orgb >/dev/null 2>&1 || conv_rc=$?
+[[ "$conv_rc" -ne 0 ]] || fail "a failed extra slug must fail the run"
+grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
+  fail "default must install before extra slugs"
+orgb_enable="$(grep -n '^systemctl enable --now pangolin-site@orgb$' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+orgb_disable="$(grep -n '^systemctl disable pangolin-site@orgb$' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ -n "$orgb_enable" && -n "$orgb_disable" ]] || fail "the failed slug must be enabled then disabled"
+[[ "$orgb_enable" -lt "$orgb_disable" ]] || fail "the failed slug must be removed after its failure"
+if grep -qE '^systemctl (stop|disable) pangolin-site@default$' "$FAKE_LOG"; then
+  fail "a failed extra slug must leave the verified default running"
+fi
+if grep -q '^systemctl start pangolin-site$' "$FAKE_LOG"; then
+  fail "default verified, so the legacy service must not be started again"
+fi
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+[[ ! -e "$t5_root/etc/systemd/system/pangolin-site.service" ]] ||
+  fail "a verified default must still retire the legacy unit"
+[[ -f "$(site_config_path orgb)" ]] || fail "the failed slug config must stay for diagnostics"
+
+# (8) A rerun with the template marker is a quiet no-op: no re-import and no
+# rewrite of the default instance.
+write_private_file "$t5_root/etc/pangolin/site.json" "SENTINEL-LEGACY"
+write_private_file "$t5_default_cfg" "SENTINEL-DEFAULT"
+: >"$FAKE_LOG"
+convert_site_layout systemd "" default orgb || fail "a rerun on template state should succeed"
+[[ "$(cat "$t5_default_cfg")" == "SENTINEL-DEFAULT" ]] ||
+  fail "a rerun must not re-import or rewrite the default config"
+[[ "$(cat "$t5_root/etc/pangolin/site.json")" == "SENTINEL-LEGACY" ]] ||
+  fail "a rerun must not touch the legacy site.json"
+[[ ! -s "$FAKE_LOG" ]] || fail "a rerun on template state must not touch services"
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+
+# (9) A single non-default slug with no flag still triggers conversion.
+t5_reset_root
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+write_private_file "$(site_config_path orga)" \
+  "$(site_config_static "https://p.example" idorg secorg)"
+convert_site_layout systemd "" orga || fail "a nondefault slug must trigger conversion"
+cmp -s "$t5_root/etc/pangolin/site.json" "$t5_default_cfg" ||
+  fail "a nondefault trigger must still import the default config"
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+
+# (10) A mixed layout (interrupted conversion) is detected and repaired
+# without deleting configs or existing backups, even with only default asked.
+t5_reset_root
+t5_legacy_systemd
+t5_legacy_env
+write_private_file "$t5_root/etc/pangolin/site.json" \
+  "$(site_config_static "https://p.example" idA secretA)"
+printf '[Unit]\n' >"$t5_root/etc/systemd/system/pangolin-site@.service"
+write_private_file "$t5_default_cfg" "$(site_config_static "https://p.example" idM secretM)"
+write_private_file "$(site_config_path other)" "$(site_config_static "https://p.example" idO secretO)"
+write_private_file "$(site_config_path orgc)" "$(site_config_static "https://p.example" idC secretC)"
+mkdir -p "$t5_root/var/lib/pangolin/backup/20200101-000000"
+printf 'name\t/original\n' >"$t5_root/var/lib/pangolin/backup/20200101-000000/manifest"
+printf 'OLD\n' >"$t5_root/var/lib/pangolin/backup/20200101-000000/name"
+default_before="$(cat "$t5_default_cfg")"
+site_before="$(cat "$t5_root/etc/pangolin/site.json")"
+assert_eq mixed "$(site_conversion_state)"
+: >"$FAKE_LOG"
+convert_site_layout systemd "" default orgc || fail "mixed layout must repair cleanly"
+[[ "$(cat "$t5_default_cfg")" == "$default_before" ]] ||
+  fail "repair must not rewrite an existing default config"
+[[ "$(cat "$t5_root/etc/pangolin/site.json")" == "$site_before" ]] ||
+  fail "repair must keep the legacy site.json"
+[[ -f "$(site_config_path other)" ]] || fail "repair must keep unrelated slug configs"
+[[ -f "$t5_root/var/lib/pangolin/backup/20200101-000000/name" ]] ||
+  fail "repair must keep previous backups"
+[[ ! -e "$t5_root/etc/systemd/system/pangolin-site.service" ]] ||
+  fail "repair must retire the leftover legacy unit"
+[[ ! -e "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site.service" ]] ||
+  fail "repair must remove the legacy wants symlink"
+[[ -f "$t5_root/etc/systemd/system/pangolin-site@.service" ]] ||
+  fail "repair must keep the shared template"
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+grep -q '^systemctl enable --now pangolin-site@orgc$' "$FAKE_LOG" ||
+  fail "repair must still install the requested extra slug"
+
+# (11) OpenRC conversion: stop the legacy service before the default slug is
+# added to the runlevel; retire init, wrapper, and runlevel entry after.
+t5_reset_root
+t5_legacy_openrc
+t5_legacy_env
+t5_updater
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+: >"$FAKE_LOG"
+conv_out="$(convert_site_layout openrc "$tmpd/flags-on" 2>/dev/null)" ||
+  fail "OpenRC conversion should succeed"
+rc_stop="$(grep -n '^rc-service pangolin-site stop$' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+rc_add="$(grep -n '^rc-update add pangolin-site-default default$' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ -n "$rc_stop" && -n "$rc_add" ]] || fail "OpenRC must stop legacy and add the default slug"
+[[ "$rc_stop" -lt "$rc_add" ]] || fail "OpenRC legacy must stop before the slug is added"
+cmp -s "$t5_root/etc/pangolin/site.json" "$t5_default_cfg" ||
+  fail "OpenRC import must be byte-for-byte"
+[[ ! -e "$t5_root/etc/init.d/pangolin-site" ]] || fail "OpenRC retire must remove the legacy init"
+[[ ! -e "$t5_root/usr/local/bin/pangolin-site-start" ]] ||
+  fail "OpenRC retire must remove the legacy wrapper"
+[[ ! -e "$t5_root/etc/runlevels/default/pangolin-site" ]] ||
+  fail "OpenRC retire must remove the legacy runlevel entry"
+[[ -f "$t5_root/etc/init.d/pangolin-site-default" ]] || fail "the default slug unit must exist"
+[[ -f "$t5_root/usr/local/bin/pangolin-site-default-start" ]] || fail "the default wrapper must exist"
+grep -q "CONFIG_FILE='/etc/pangolin/sites/default.json'" \
+  "$t5_root/usr/local/bin/pangolin-site-default-start" ||
+  fail "the default wrapper must use the production config path"
+[[ ! -e "$t5_root/etc/pangolin/pangolin-site.env" ]] || fail "the legacy env must be removed"
+assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+case "$conv_out" in
+*"s3cr3t-static"* | *"oldsecret"*) fail "OpenRC conversion must not print secrets" ;;
+esac
+
+# OpenRC default failure: remove only the half-built default instance, keep
+# the legacy files, restart the active legacy service, and skip the marker.
+t5_reset_root
+t5_legacy_openrc
+t5_legacy_env
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+: >"$FAKE_LOG"
+conv_rc=0
+FAKE_INACTIVE_UNIT='pangolin-site-default' \
+  convert_site_layout openrc "$tmpd/flags-on" default orgb >/dev/null 2>&1 || conv_rc=$?
+[[ "$conv_rc" -ne 0 ]] || fail "an OpenRC default failure must fail the run"
+grep -q '^rc-update del pangolin-site-default default$' "$FAKE_LOG" ||
+  fail "the failed default instance must be removed from the runlevel"
+if grep -q 'pangolin-site-orgb' "$FAKE_LOG"; then
+  fail "a failed default must not start extra OpenRC slugs"
+fi
+[[ -f "$t5_root/etc/init.d/pangolin-site" ]] || fail "the legacy init must survive a failed default"
+[[ -f "$t5_root/usr/local/bin/pangolin-site-start" ]] ||
+  fail "the legacy wrapper must survive a failed default"
+grep -q '^rc-service pangolin-site start$' "$FAKE_LOG" ||
+  fail "an active legacy service must be restarted after the failed default"
+[[ ! -e "$t5_root/etc/init.d/pangolin-site-default" ]] ||
+  fail "the failed default unit file must be removed"
+[[ ! -e "$t5_root/usr/local/bin/pangolin-site-default-start" ]] ||
+  fail "the failed default wrapper must be removed"
+[[ ! -e "$t5_root/var/log/pangolin-site-default.log" ]] ||
+  fail "the failed default log must be removed"
+if [[ -e "$t5_root/var/lib/pangolin/site-layout" ]]; then fail "no marker after a failure"; fi
+
+# remove_site_openrc_slug and uninstall_site_slug: stop/disable, then remove
+# the slug's unit, wrapper, and log; keep the config and shared logrotate.
+t5_reset_root
+printf '#!/sbin/openrc-run\n' >"$t5_root/etc/init.d/pangolin-site-rem1"
+printf '#!/bin/sh\n' >"$t5_root/usr/local/bin/pangolin-site-rem1-start"
+printf 'log\n' >"$t5_root/var/log/pangolin-site-rem1.log"
+ln -sf "$t5_root/etc/init.d/pangolin-site-rem1" "$t5_root/etc/runlevels/default/pangolin-site-rem1"
+printf 'lr\n' >"$t5_root/etc/logrotate.d/pangolin"
+write_private_file "$(site_config_path rem1)" "$t5_cred"
+: >"$FAKE_LOG"
+uninstall_site_slug openrc rem1 || fail "OpenRC uninstall should succeed"
+grep -q '^rc-service pangolin-site-rem1 stop$' "$FAKE_LOG" || fail "uninstall must stop the slug"
+grep -q '^rc-update del pangolin-site-rem1 default$' "$FAKE_LOG" || fail "uninstall must disable the slug"
+[[ ! -e "$t5_root/etc/init.d/pangolin-site-rem1" ]] || fail "uninstall must remove the unit"
+[[ ! -e "$t5_root/usr/local/bin/pangolin-site-rem1-start" ]] || fail "uninstall must remove the wrapper"
+[[ ! -e "$t5_root/var/log/pangolin-site-rem1.log" ]] || fail "uninstall must remove the log"
+[[ -f "$(site_config_path rem1)" ]] || fail "uninstall must keep the per-slug config"
+[[ -f "$t5_root/etc/logrotate.d/pangolin" ]] || fail "uninstall must keep the shared logrotate file"
+# Idempotent repeat: no runlevel entry means no rc-update del and no error.
+: >"$FAKE_LOG"
+uninstall_site_slug openrc rem1 || fail "OpenRC uninstall must be idempotent"
+if grep -q '^rc-update del pangolin-site-rem1 default$' "$FAKE_LOG"; then
+  fail "a repeated uninstall must not re-del an absent runlevel entry"
+fi
+# systemd branch: disable the instance, keep the shared template.
+printf '[Unit]\n' >"$t5_root/etc/systemd/system/pangolin-site@.service"
+ln -sf ../pangolin-site@.service "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site@u1.service"
+: >"$FAKE_LOG"
+uninstall_site_slug systemd u1 || fail "systemd uninstall should succeed"
+grep -q '^systemctl disable pangolin-site@u1$' "$FAKE_LOG" || fail "systemd uninstall must disable"
+[[ ! -e "$t5_root/etc/systemd/system/multi-user.target.wants/pangolin-site@u1.service" ]] ||
+  fail "systemd uninstall must remove the instance symlink"
+[[ -f "$t5_root/etc/systemd/system/pangolin-site@.service" ]] ||
+  fail "systemd uninstall must keep the shared template"
+if uninstall_site_slug bogus u1 >/dev/null 2>&1; then fail "unknown backend must fail"; fi
+if uninstall_site_slug openrc "" >/dev/null 2>&1; then fail "an empty slug must fail"; fi
+if convert_site_layout bogus "" default >/dev/null 2>&1; then fail "unknown backend conversion must fail"; fi
+if convert_site_layout systemd "" 'bad slug' >/dev/null 2>&1; then fail "invalid slug must fail"; fi
+if convert_site_layout systemd "" host >/dev/null 2>&1; then fail "reserved host slug must fail"; fi
+
+# A single default with no request on an unconverted host converts nothing.
+t5_reset_root
+t5_legacy_systemd
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+: >"$FAKE_LOG"
+convert_site_layout systemd "$tmpd/flags-off" default || fail "no trigger must return success"
+[[ ! -s "$FAKE_LOG" ]] || fail "no trigger must not touch services"
+[[ ! -e "$t5_root/etc/systemd/system/pangolin-site@.service" ]] ||
+  fail "no trigger must not write the template"
+if [[ -e "$t5_root/var/lib/pangolin/site-layout" ]]; then fail "no trigger must not mark template"; fi
+
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+if [[ -n "$old_fake_inactive_unit" ]]; then export FAKE_INACTIVE_UNIT="$old_fake_inactive_unit"; else unset FAKE_INACTIVE_UNIT; fi
+export LEGACY_NEWT_ID="$old_newt_id"
+export LEGACY_NEWT_SECRET="$old_newt_secret"
+export LEGACY_ENDPOINT="$old_newt_endpoint"
+unset PANGOLIN_SERVICE_ATTEMPTS PANGOLIN_SERVICE_DELAY
+
+echo "Multi-site Task 5 tests passed"
