@@ -1124,9 +1124,14 @@ grep -q "systemctl disable pangolin-site@orga" "$FAKE_LOG" || fail "instance rem
 [[ -f "$unit_file" ]] || fail "remove must keep the shared template"
 
 # (9) A failure after enable reports no success and leaves the template for
-# rollback; the legacy unit stays untouched until the instance verifies.
+# rollback. The install helper never touches the legacy unit, even while a
+# legacy install is present and running.
+mkdir -p "$tmpd/root/etc/systemd/system/multi-user.target.wants"
+legacy_unit_file="$tmpd/root/etc/systemd/system/pangolin-site.service"
+legacy_link="$tmpd/root/etc/systemd/system/multi-user.target.wants/pangolin-site.service"
+printf '[Unit]\n' >"$legacy_unit_file"
+ln -sf "$legacy_unit_file" "$legacy_link"
 : >"$FAKE_LOG"
-printf '[Unit]\n' >"$tmpd/root/etc/systemd/system/pangolin-site.service"
 inst_rc=0
 inst_out="$(
   wait_service_active() { return 1; }
@@ -1135,32 +1140,57 @@ inst_out="$(
 [[ "$inst_rc" -ne 0 ]] || fail "an instance that never activates must fail"
 [[ -z "$inst_out" ]] || fail "a failed instance install must not report success"
 [[ -f "$unit_file" ]] || fail "a failed install must leave the template for rollback"
-if grep -qE "systemctl (stop|disable) pangolin-site$" "$FAKE_LOG"; then
+if grep -qE "systemctl (stop|disable|restart) pangolin-site$" "$FAKE_LOG"; then
   fail "a failed instance install must not touch the legacy unit"
 fi
+[[ -f "$legacy_unit_file" ]] || fail "a failed install must leave the legacy unit file"
+[[ -L "$legacy_link" ]] || fail "a failed install must leave the legacy wants symlink"
 
-# The success path writes the template, starts the instance, then stops and
-# disables the legacy single-instance unit after the instance verifies.
+# The success path writes the template, enables the instance, restarts a
+# previously-active one, and verifies. Legacy retirement is a separate,
+# caller-ordered step (Task 5 stops the legacy service before this starts and
+# calls retire_legacy_single_site_systemd after verification), so the install
+# helper leaves the legacy unit, its symlink, and the files on disk alone.
 : >"$FAKE_LOG"
 install_site_systemd_slug orga "$cfg" 1 || fail "slug install should succeed"
 grep -q "systemctl daemon-reload" "$FAKE_LOG" || fail "slug install must write the template"
 grep -q "systemctl enable --now pangolin-site@orga" "$FAKE_LOG" || fail "slug install must enable the instance"
 grep -q "systemctl restart pangolin-site@orga" "$FAKE_LOG" || fail "active slug must restart its instance"
-grep -q "systemctl stop pangolin-site$" "$FAKE_LOG" || fail "verified instance must stop the legacy unit"
-grep -q "systemctl disable pangolin-site$" "$FAKE_LOG" || fail "verified instance must disable the legacy unit"
-inst_active_line="$(grep -n "systemctl is-active --quiet pangolin-site@orga" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
-legacy_stop_line="$(grep -n "systemctl stop pangolin-site$" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
-[[ "$inst_active_line" -lt "$legacy_stop_line" ]] ||
-  fail "the legacy stop must follow the instance verification"
+grep -q "systemctl is-active --quiet pangolin-site@orga" "$FAKE_LOG" || fail "slug install must verify the instance"
+if grep -qE "systemctl (stop|disable|restart) pangolin-site$" "$FAKE_LOG"; then
+  fail "the instance install must never touch the legacy unit"
+fi
+[[ -f "$legacy_unit_file" ]] || fail "the instance install must not remove the legacy unit file"
+[[ -L "$legacy_link" ]] || fail "the instance install must not remove the legacy wants symlink"
 
-# With no legacy unit file and an inactive legacy service the instance install
-# leaves both alone; a fresh multi-slug host has no legacy to retire.
-rm -f "$tmpd/root/etc/systemd/system/pangolin-site.service"
+# retire_legacy_single_site_systemd stops an active legacy service, disables
+# it, removes the unit file and its wants symlink, and reloads systemd. The
+# per-slug config, the legacy site.json, the template, and install backups
+# stay in place for the caller.
+write_private_file "$tmpd/root/etc/pangolin/site.json" \
+  "$(site_config_static "https://p.example" id1 sec1)"
+LEGACY_SITE_BACKUP_DIR="$tmpd/pretend-backup"
 : >"$FAKE_LOG"
-FAKE_INACTIVE_UNIT=pangolin-site \
-  install_site_systemd_slug orga "$cfg" || fail "slug install without a legacy unit should succeed"
-if grep -qE "systemctl (stop|disable) pangolin-site$" "$FAKE_LOG"; then
-  fail "install must not touch an absent legacy unit"
+retire_legacy_single_site_systemd || fail "retire should succeed"
+grep -q "systemctl stop pangolin-site$" "$FAKE_LOG" || fail "retire must stop an active legacy unit"
+grep -q "systemctl disable pangolin-site$" "$FAKE_LOG" || fail "retire must disable the legacy unit"
+grep -q "systemctl daemon-reload" "$FAKE_LOG" || fail "retire must reload systemd"
+[[ ! -e "$legacy_unit_file" ]] || fail "retire must remove the legacy unit file"
+[[ ! -e "$legacy_link" ]] || fail "retire must remove the legacy wants symlink"
+[[ -f "$cfg" ]] || fail "retire must keep the per-slug config"
+[[ -f "$tmpd/root/etc/pangolin/site.json" ]] || fail "retire must keep the legacy site config"
+[[ -f "$unit_file" ]] || fail "retire must keep the shared template"
+assert_eq "$tmpd/pretend-backup" "$LEGACY_SITE_BACKUP_DIR"
+
+# On a host without a legacy install retire is a quiet no-op: no service
+# manager call beyond the state probe, and no files touched.
+rm -f "$legacy_link"
+: >"$FAKE_LOG"
+noise="$(FAKE_INACTIVE_UNIT=pangolin-site retire_legacy_single_site_systemd 2>&1)" ||
+  fail "retire on a fresh host should succeed"
+[[ -z "$noise" ]] || fail "retire on a fresh host printed: $noise"
+if grep -qE "systemctl (stop|disable|daemon-reload) pangolin-site$|systemctl daemon-reload" "$FAKE_LOG"; then
+  fail "retire must not act without a legacy unit"
 fi
 
 rm -rf "$tmpd"

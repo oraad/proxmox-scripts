@@ -725,26 +725,49 @@ remove_site_systemd_slug() {
   return 0
 }
 
-# Conversion entry point for one slug: write the template, enable and verify
-# the instance on the given configuration, and only then stop and disable the
-# legacy single-instance unit so the two never hold the same site credentials
-# at once. On any earlier failure the legacy unit stays untouched and the
-# template stays on disk for rollback.
+# Conversion building block for one slug: write the template, enable the
+# instance, restart a previously-active one, and verify the service and its
+# provisioning against the given configuration. This helper never touches the
+# legacy single-instance unit. The revised plan requires the legacy service
+# to be stopped *before* `pangolin-site@default` starts so the same site
+# credentials are never active at once; Task 5 owns that ordering and calls
+# retire_legacy_single_site_systemd only after `@default` verifies. On failure
+# the template stays on disk for rollback.
 install_site_systemd_slug() {
-  local slug="$1" config_path="$2" was_active="${3:-0}" legacy legacy_unit
+  local slug="$1" config_path="$2" was_active="${3:-0}"
   write_site_systemd_template || return 1
   _enable_site_instance "$(site_systemd_instance "$slug")" "$was_active" || return 1
-  verify_site_systemd_slug "$slug" "$config_path" || return 1
-  legacy=pangolin-site
-  legacy_unit="$(p "/etc/systemd/system/$legacy.service")"
+  verify_site_systemd_slug "$slug" "$config_path"
+}
+
+# Retire the legacy single-instance unit: stop it when still running, disable
+# it, and remove the unit file and its multi-user.target.wants symlink, then
+# reload systemd. Only the unit plumbing is touched: the per-slug and legacy
+# site configurations, credentials, and install backups stay for the caller.
+# A host without a legacy install returns quietly.
+retire_legacy_single_site_systemd() {
+  local legacy=pangolin-site unit link
+  unit="$(p "/etc/systemd/system/$legacy.service")"
+  link="$(p "/etc/systemd/system/multi-user.target.wants/$legacy.service")"
   if systemctl is-active --quiet "$legacy" >/dev/null 2>&1; then
     systemctl stop "$legacy" || {
       echo "Failed to stop the $legacy service" >&2
       return 1
     }
   fi
-  if [[ -e "$legacy_unit" || -L "$legacy_unit" ]] && ! systemctl disable "$legacy"; then
+  if [[ ! -e "$unit" && ! -L "$unit" && ! -e "$link" && ! -L "$link" ]]; then
+    return 0
+  fi
+  if ! systemctl disable "$legacy"; then
     echo "Failed to disable the $legacy service" >&2
+    return 1
+  fi
+  if ! rm -f "$unit" "$link"; then
+    echo "Failed to remove the $legacy unit files" >&2
+    return 1
+  fi
+  if ! systemctl daemon-reload; then
+    echo "Failed to reload systemd after removing the $legacy unit" >&2
     return 1
   fi
   return 0
