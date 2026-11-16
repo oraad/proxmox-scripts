@@ -195,18 +195,6 @@ site_config_path() {
   p "/etc/pangolin/sites/$slug.json"
 }
 
-# Print the default native interface name for a validated slug. The prefixes
-# make Pangolin ownership explicit; with the 10-character slug cap the names
-# never exceed Linux IFNAMSIZ (15 characters).
-default_site_interface() {
-  printf 'pang%s' "$1"
-}
-
-# Print the default native main-tunnel interface name for a validated slug.
-default_site_interface_main() {
-  printf 'pangm%s' "$1"
-}
-
 # Write content to a private file, creating the parent directory if needed.
 # An existing parent keeps its mode; the caller owns the directory policy.
 write_private_file() {

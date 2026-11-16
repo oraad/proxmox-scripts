@@ -23,8 +23,10 @@
 #   is selected.
 #   Multi-site: var_sites="orga org-b"    site labels per run (default
 #              "default", at most 8). var_sites_<host|CTID> overrides the list
-#              for one target. var_site_ssh_owner=default|<slug>|none picks the
-#              slug that keeps the embedded SSH daemon. var_site_native and
+#              for one target. var_multi_sites=1 (1/true/yes) requests the
+#              per-slug layout even with a single "default" slug.
+#              var_site_ssh_owner=default|<slug>|none picks the slug that keeps
+#              the embedded SSH daemon. var_site_native and
 #              var_site_native_main are shared booleans. Interface overrides
 #              resolve in order: var_site_interface_<slug>_<target>,
 #              var_site_interface_<slug>, var_site_interface_<target>,
@@ -813,6 +815,20 @@ _resolve_target_slug_plan() {
   fi
 }
 
+# Print the default native interface name for a validated slug. The prefixes
+# make Pangolin ownership explicit; with the 10-character slug cap the names
+# never exceed Linux IFNAMSIZ (15 characters). These pure generators live in
+# the entry so pre-payload validation and the dry run can name the interfaces
+# before any payload is fetched or sourced.
+default_site_interface() {
+  printf 'pang%s' "$1"
+}
+
+# Print the default native main-tunnel interface name for a validated slug.
+default_site_interface_main() {
+  printf 'pangm%s' "$1"
+}
+
 # Print the site SSH owner effective for a target's newline-delimited slug
 # list. var_site_ssh_owner wins; `default` (the default value) falls back to
 # the first selected slug when the list holds no `default` entry, because the
@@ -825,7 +841,9 @@ _site_ssh_owner() {
   if [[ "$owner" == default ]]; then
     while IFS= read -r line; do
       [[ -n "$line" ]] || continue
-      [[ -z "$first" ]] && first="$line"
+      if [[ -z "$first" ]]; then
+        first="$line"
+      fi
       if [[ "$line" == default ]]; then
         first=default
         break
@@ -851,20 +869,32 @@ _site_pair_endpoint() {
 }
 
 # Print the interface name for a (slug,target) pair. `kind` is client or
-# main. Resolution order: var_site_interface[_main]_<slug>_<target>,
-# <slug>, <target>, the operator-set shared variable, then the generated
-# per-slug default. The shared fallback uses the raw environment captured
-# before main() applies its defaults, so the legacy pangolin default never
-# collides across slugs.
+# main. Resolution order: var_site_interface[_main]_<slug>_<target>, then
+# <slug> (single target), then <target> (single slug), then the operator-set
+# shared variable, then the generated per-slug default. The shared variable
+# is read from the raw environment captured before main() applies its
+# `pangolin` default (SITE_INTERFACE_CAPTURED), so the single-site default
+# name never leaks into per-slug resolution and collide across slugs.
 _site_pair_interface() {
   local slug="$1" target="$2" st="$3" tt="$4" kind="$5"
-  local base value
+  local base suffix name value
   if [[ "$kind" == main ]]; then
     base="var_site_interface_main"
   else
     base="var_site_interface"
   fi
-  value="$(_site_value "$base" "$slug" "$target" "$st" "$tt")"
+  suffix="$(_slug_suffix "$slug")"
+  value=""
+  name="${base}_${suffix}_${target}"
+  value="${!name-}"
+  if [[ -z "$value" && "$tt" == 1 ]]; then
+    name="${base}_${suffix}"
+    value="${!name-}"
+  fi
+  if [[ -z "$value" && "$st" == 1 ]]; then
+    name="${base}_${target}"
+    value="${!name-}"
+  fi
   if [[ -z "$value" ]]; then
     if [[ "${SITE_INTERFACE_CAPTURED:-0}" == 1 ]]; then
       if [[ "$kind" == main ]]; then
@@ -873,7 +903,7 @@ _site_pair_interface() {
         value="${SITE_INTERFACE_RAW:-}"
       fi
     else
-      value="${!base:-}"
+      value="${!base-}"
     fi
   fi
   if [[ -z "$value" ]]; then
@@ -1807,6 +1837,12 @@ _prompt_inputs() {
             var_site_secret="$(_prompt_value "Site secret" "Site secret" "" 1)" || return 1
           fi
         fi
+        # Store the entered default credentials as per-pair state so a target
+        # that the layout probe later switches to the per-slug path (an
+        # already-converted host) still finds them; _activate_site_pair reads
+        # this before the environment, where unsuffixed globals would be
+        # ignored.
+        _store_site_pair default "$target"
       fi
     elif [[ "$SLUG_MULTI" != 1 ]] && [[ "$may_reuse" == 1 ]] && _has_site_form; then
       msg_warn "Ignoring new site credentials; the verified site configuration is reused. Set var_reconfigure=1 to replace it."
@@ -2264,41 +2300,49 @@ _install_target() {
   payload_rc=0
   _run_target_payload "$target" "$answers" || payload_rc=$?
 
-  # Only a successful payload may tag. A failed run can leave a partial marker
-  # behind, and that must not mark the target as installed.
-  if ((payload_rc == 0)); then
-    _apply_verified_tags "$target" "$answers"
-    if [[ "$multi" == 1 && "$site" == 1 ]]; then
-      local vslug vstatus entries=""
-      for vslug in "${SLUG_ARRAY[@]}"; do
-        vstatus=failed
-        if [[ " $VERIFIED_SLUGS " == *" $vslug "* ]]; then
-          vstatus=verified
-        fi
-        entries+="  site $vslug: $vstatus"$'\n'
-      done
-      TARGET_SLUG_STATUS[index]="${entries%$'\n'}"
-    fi
-  else
-    VERIFIED_SITE=0
-    VERIFIED_CLIENT=0
-    VERIFIED_SLUGS=""
+  # Read the markers even when the payload failed. A real multi-site partial
+  # failure records a backend:<name> and site:<slug> marker for every
+  # instance that verified before another slug failed, plus the legacy site
+  # marker for a verified default. Those verified instances stay tagged and
+  # summarized; an all-failed run records no markers and is not tagged. A
+  # stale marker from an earlier run was already removed before the payload.
+  _apply_verified_tags "$target" "$answers"
+  if [[ "$multi" == 1 && "$site" == 1 ]]; then
+    local vslug vstatus entries=""
+    for vslug in "${SLUG_ARRAY[@]}"; do
+      vstatus=failed
+      if [[ " $VERIFIED_SLUGS " == *" $vslug "* ]]; then
+        vstatus=verified
+      fi
+      entries+="  site $vslug: $vstatus"$'\n'
+    done
+    TARGET_SLUG_STATUS[index]="${entries%$'\n'}"
   fi
   # The remote copy is no longer needed once the marker is read.
   _remove_remote_answers "$target"
+
+  # Tag and print next steps for the instances that actually verified, on a
+  # full success and on a partial failure alike.
+  local steps_printed=0
+  if [[ "$VERIFIED_SITE" == 1 || "$VERIFIED_CLIENT" == 1 ]]; then
+    steps_printed=1
+    if [[ "$multi" == 1 && "$VERIFIED_SITE" == 1 && -n "$VERIFIED_SLUGS" ]]; then
+      _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT" \
+        "$VERIFIED_SLUGS" "$VERIFIED_BACKEND"
+    else
+      _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT"
+    fi
+  fi
   if ((payload_rc != 0)); then
     msg_error "The Pangolin install failed on $target. Components that were verified stay installed."
     return 1
   fi
 
-  if [[ "$VERIFIED_SITE" == 0 && "$VERIFIED_CLIENT" == 0 ]]; then
+  if ((steps_printed == 0)); then
+    # A payload that succeeded without recording markers (an older payload
+    # or a test stub): report the requested components.
     VERIFIED_SITE="$site"
     VERIFIED_CLIENT="$client"
-  fi
-  if [[ "$multi" == 1 && "$VERIFIED_SITE" == 1 && -n "$VERIFIED_SLUGS" ]]; then
-    _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT" \
-      "$VERIFIED_SLUGS" "$VERIFIED_BACKEND"
-  else
     _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT"
   fi
   return 0

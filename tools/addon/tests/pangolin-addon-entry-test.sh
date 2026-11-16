@@ -1327,7 +1327,7 @@ if grep -qx "\$target" "$loop/fail-targets" 2>/dev/null; then
   exit 1
 fi
 if grep -qx "\$target" "$loop/partial-targets" 2>/dev/null; then
-  printf 'site\n' >"\$answers/verified"
+  printf 'client\n' >"\$answers/verified"
   exit 1
 fi
 printf 'client\n' >"\$answers/verified"
@@ -1636,7 +1636,9 @@ fi
 [[ -z "$(ls -A "$loop/remote")" ]] || { echo "pre-payload run left remote answers" >&2; exit 1; }
 rm -f "$loop/fail-start" "$loop/fail-os" "$loop/fail-tun"
 
-# A failed payload can leave a partial verified marker. It must not be tagged.
+# A failed payload can still record verified components. The recorded client
+# is tagged and summarized even though the target failed, while the run exits
+# non-zero and the later target continues.
 printf '101\n' >"$loop/partial-targets"
 : >"$loop/ran"
 : >"$loop/log"
@@ -1653,8 +1655,10 @@ case "$partial_marker_out" in
 *"101: failed"*) ;;
 *) echo "partial marker target must fail: $partial_marker_out" >&2; exit 1 ;;
 esac
-if grep -q 'pct set 101' "$loop/log"; then
-  echo "a partial verified marker must not tag the failed target" >&2
+grep -q 'pct set 101 -tags.*pangolin-client' "$loop/log" ||
+  { echo "the verified client on the partial target must be tagged: $loop/log" >&2; exit 1; }
+if grep -q 'pct set 101 -tags.*pangolin-site' "$loop/log"; then
+  echo "an unverified component must not be tagged" >&2
   exit 1
 fi
 grep -q 'pct set 102 -tags' "$loop/log" ||
@@ -1739,10 +1743,15 @@ case "$partial_steps" in
 esac
 
 # Multi-site Task 2: interface defaults, SSH ownership mapping, and answers
-# written to an exact per-slug path.
+# written to an exact per-slug path. The generators live in the entry so the
+# dry run can name interfaces before any payload fetch.
 assert_eq pangorga "$(default_site_interface orga)"
 assert_eq pangmorga "$(default_site_interface_main orga)"
 assert_eq pangdefault "$(default_site_interface default)"
+assert_eq pangabcdefghij "$(default_site_interface abcdefghij)"
+assert_eq pangmabcdefghij "$(default_site_interface_main abcdefghij)"
+assert_eq "14" "$(printf '%s' "$(default_site_interface abcdefghij)" | wc -c)"
+assert_eq "15" "$(printf '%s' "$(default_site_interface_main abcdefghij)" | wc -c)"
 longest="$(default_site_interface_main abcdefghij)"
 [[ "${#longest}" -le 15 ]] || { echo "default interface exceeds IFNAMSIZ: $longest" >&2; exit 1; }
 validate_interface_name "$longest" ||
@@ -2060,7 +2069,7 @@ case "$*" in
 *"Site networking:"*) printf '%s' "${FAKE_NATIVE_OUT:-}" >&2 ;;
 *"Site credentials:"*) printf 'static' >&2 ;;
 *"Existing site"*) printf 'replace' >&2 ;;
-*"Select components"*) printf 'client' >&2 ;;
+*"Select components"*) printf '%s' "${FAKE_MODE_OUT:-client}" >&2 ;;
 *"Pangolin endpoint"*) printf '%s' "${FAKE_ENDPOINT_OUT:-https://p.example}" >&2 ;;
 *"Site ID"*) printf 'id' >&2 ;;
 *"Site secret"*) printf 'sec' >&2 ;;
@@ -2091,16 +2100,22 @@ if [[ "\$target" == "\$(cat "$s6/fail-target" 2>/dev/null)" ]]; then
   exit 1
 fi
 fail_slug="\$(cat "$s6/fail-slug" 2>/dev/null)"
+multi_fail=0
 {
   printf 'backend:systemd\n'
   if [[ "\$site" == 1 && "\$multi" == 1 ]]; then
     for slug in \$slugs; do
-      [[ "\$slug" == "\$fail_slug" ]] && continue
+      if [[ -n "\$fail_slug" && "\$slug" == "\$fail_slug" ]]; then
+        multi_fail=1
+        continue
+      fi
       printf 'site:%s\n' "\$slug"
     done
     for slug in \$slugs; do
       [[ "\$slug" == default ]] || continue
-      [[ "\$slug" == "\$fail_slug" ]] && continue
+      if [[ -n "\$fail_slug" && "\$slug" == "\$fail_slug" ]]; then
+        continue
+      fi
       printf 'site\n'
     done
   elif [[ "\$site" == 1 ]]; then
@@ -2110,6 +2125,9 @@ fail_slug="\$(cat "$s6/fail-slug" 2>/dev/null)"
     printf 'client\n'
   fi
 } >"\$answers/verified"
+if [[ "\$multi_fail" == 1 ]]; then
+  exit 1
+fi
 EOF
 : >"$s6/fail-target"
 : >"$s6/fail-slug"
@@ -2323,19 +2341,23 @@ esac
 [[ ! -s "$s6/log" ]] || { echo "E9 dry run used pct or ip" >&2; exit 1; }
 [[ -z "$(ls -A "$s6/tmp")" ]] || { echo "E9 dry run wrote files" >&2; exit 1; }
 
-# E10: markers with several site:<slug> lines still produce one pangolin-site
-# tag, and the summary reports each slug status.
+# E10: a real multi-site partial failure. The payload exits non-zero after
+# recording site:default and backend:systemd markers for the slug that did
+# verify. The verified default is still tagged (one pangolin-site) and
+# summarized, orgb is reported failed, the target is failed, and the run
+# exits non-zero while the remote answers are still cleaned up.
 _reset6
 printf 'orgb\n' >"$s6/fail-slug"
-if ! e10_out="$(var_mode=site var_targets=101 var_sites="default orgb" \
+e10_rc=0
+e10_out="$(var_mode=site var_targets=101 var_sites="default orgb" \
   var_pangolin_endpoint=https://p.example \
   var_site_id_default_101=x var_site_secret_default_101=y \
   var_site_id_orgb_101=i3 var_site_secret_orgb_101=s3 \
-  _run6 2>&1)"; then
-  echo "E10 tag run failed: $e10_out" >&2; exit 1
-fi
+  _run6 2>&1)" || e10_rc=$?
+[[ "$e10_rc" -ne 0 ]] || { echo "E10 a failing slug must fail the run" >&2; exit 1; }
 tag_line="$(grep 'pct set 101 -tags' "$s6/log")"
-[[ -n "$tag_line" ]] || { echo "E10 LXC must be tagged" >&2; exit 1; }
+[[ -n "$tag_line" ]] ||
+  { echo "E10 the verified default must still be tagged: $e10_out" >&2; exit 1; }
 assert_eq "1" "$(printf '%s' "$tag_line" | grep -o 'pangolin-site' | wc -l)"
 case "$e10_out" in
 *"site default: verified"*) ;;
@@ -2345,7 +2367,78 @@ case "$e10_out" in
 *"site orgb: failed"*) ;;
 *) echo "E10 summary missing failed slug: $e10_out" >&2; exit 1 ;;
 esac
+case "$e10_out" in
+*"101: failed"*) ;;
+*) echo "E10 the target itself must be reported failed: $e10_out" >&2; exit 1 ;;
+esac
+[[ -z "$(ls -A "$s6/remote")" ]] ||
+  { echo "E10 remote answers left after a partial failure" >&2; exit 1; }
 : >"$s6/fail-slug"
+
+# Regression: a dry run must plan the generated interface names before any
+# payload is fetched, so the name generators have to live in the entry.
+_reset6
+if ! nopay_dry="$(
+  TMPDIR="$s6/tmp" PATH="$s6/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 PANGOLIN_PAYLOAD= \
+    var_mode=site var_target=host var_sites=orga var_site_native=1 var_site_native_main=1 \
+    var_pangolin_endpoint=https://p.example \
+    var_site_id_orga=a1 var_site_secret_orga=b1 \
+    bash "$ROOT/add-pangolin.sh" 2>&1)"; then
+  echo "no-payload dry run failed: $nopay_dry" >&2; exit 1
+fi
+for token in "Sites: orga" "pangorga" "pangmorga"; do
+  case "$nopay_dry" in
+  *"$token"*) ;;
+  *) echo "no-payload dry run missing [$token]: $nopay_dry" >&2; exit 1 ;;
+  esac
+done
+case "$nopay_dry" in
+*"command not found"*)
+  echo "no-payload dry run missed an entry helper: $nopay_dry" >&2; exit 1
+  ;;
+esac
+case "$nopay_dry" in
+*a1* | *b1*) echo "no-payload dry run printed a secret" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/log" ]] || { echo "no-payload dry run used pct or ip" >&2; exit 1; }
+[[ -z "$(ls -A "$s6/tmp")" ]] || { echo "no-payload dry run wrote files" >&2; exit 1; }
+
+# Regression: credentials entered interactively for the default slug must
+# reach the per-slug plan when the first target is already converted. The
+# converted host uses sites/default.json with the typed values; the second,
+# unconverted target stays on the legacy site.json path.
+_reset6
+mkdir -p "$s6/fakeroot/etc/systemd/system"
+printf '[Unit]\n' >"$s6/fakeroot/etc/systemd/system/pangolin-site@.service"
+: >"$s6/wlog"
+if ! itc_out="$(
+  var_mode= var_targets= var_target= var_sites= var_site_ssh_owner= \
+    var_pangolin_endpoint= var_site_id= var_site_secret= \
+    FAKE_MODE_OUT=site FAKE_TARGETS_OUT='"host" "101"' _run6 2>&1)"; then
+  echo "interactive converted-host run failed: $itc_out" >&2; exit 1
+fi
+assert_eq $'host\n101' "$(cat "$s6/ran")"
+grep -qx 'MULTI_SITE=1' "$s6/snap/host/flags" ||
+  { echo "the converted host must use the per-slug layout: $itc_out" >&2; exit 1; }
+grep -qx 'SITE_SLUGS=default' "$s6/snap/host/flags" ||
+  { echo "the converted host must list the default slug" >&2; exit 1; }
+[[ -f "$s6/snap/host/sites/default.json" ]] ||
+  { echo "the converted host must write sites/default.json" >&2; exit 1; }
+grep -q '"id":"id"' "$s6/snap/host/sites/default.json" ||
+  { echo "the entered site id must reach the converted host" >&2; exit 1; }
+grep -q '"secret":"sec"' "$s6/snap/host/sites/default.json" ||
+  { echo "the entered site secret must reach the converted host" >&2; exit 1; }
+[[ ! -e "$s6/snap/host/site.json" ]] ||
+  { echo "the converted host must not write the legacy site.json" >&2; exit 1; }
+grep -qx 'MULTI_SITE=0' "$s6/snap/101/flags" ||
+  { echo "the unconverted target must stay on the legacy path" >&2; exit 1; }
+[[ -f "$s6/snap/101/site.json" ]] ||
+  { echo "the unconverted target must write site.json" >&2; exit 1; }
+case "$itc_out" in
+*"host: ok (site)"*) ;;
+*) echo "converted host summary missing: $itc_out" >&2; exit 1 ;;
+esac
+_reset6
 
 # E12: provisioning site names default to <hostname>-<slug> for one target and
 # <hostname>-<slug>-<target> for several.

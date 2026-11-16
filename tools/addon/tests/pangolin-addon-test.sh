@@ -975,14 +975,8 @@ assert_eq "$root_tmp/root/etc/pangolin/sites/default.json" "$(site_config_path d
 export PANGOLIN_ROOT="$old_root"
 rm -rf "$root_tmp"
 
-# Interface defaults stay within Linux IFNAMSIZ (15 characters) for the
-# maximum slug, and are valid interface names.
-assert_eq pangorga "$(default_site_interface orga)"
-assert_eq pangmorga "$(default_site_interface_main orga)"
-assert_eq pangabcdefghij "$(default_site_interface abcdefghij)"
-assert_eq pangmabcdefghij "$(default_site_interface_main abcdefghij)"
-assert_eq "14" "$(printf '%s' "$(default_site_interface abcdefghij)" | wc -c)"
-assert_eq "15" "$(printf '%s' "$(default_site_interface_main abcdefghij)" | wc -c)"
+# The interface-name generators moved to the entry so the dry run can use
+# them before any payload fetch. They are asserted in the entry suite.
 
 echo "Multi-site Task 2 tests passed"
 
