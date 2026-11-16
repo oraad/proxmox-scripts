@@ -1714,14 +1714,20 @@ multi_site_requested() {
 # several slugs are requested, when a non-default slug is requested, when
 # multi_site_requested says so, and always when the state is `mixed`, so an
 # interrupted conversion converges. With only `default` on an unconverted host
-# it returns quietly and the caller keeps the legacy single-site path.
+# it returns quietly and the caller keeps the legacy single-site path. In the
+# already-converted `template` state the import and legacy steps are skipped,
+# but requested non-default slugs are still installed and verified, so a
+# rerun after a failed extra slug converges instead of silently succeeding.
 #
 # Safety rules, asserted by the test suite:
 #   - the same site credentials are never active twice: the legacy service is
-#     stopped with stop_service *before* pangolin-site@default starts, and the
-#     legacy unit files are retired only after @default verifies;
-#   - a failing @default removes its own instance, restores the backup, brings
-#     the legacy service back when it was active, and starts no extra slug;
+#     stopped with stop_service *before* pangolin-site@default starts, the
+#     legacy unit files are retired only after @default verifies, and the
+#     rollback never starts the restored legacy service while an unverified
+#     @default instance is still reported active;
+#   - a failing @default removes its own instance, restores the backup, starts
+#     no extra slug, and restarts the legacy service only once @default is
+#     confirmed not active;
 #   - a failing extra slug is stopped, disabled, and removed alone, leaving
 #     every verified instance running;
 #   - the marker is written only after @default verified.
@@ -1735,7 +1741,7 @@ convert_site_layout() {
   local flags="${1:-}"
   if (($# > 0)); then shift; fi
   local -a slugs=("$@")
-  local slug path state rc=0
+  local slug path state rc=0 converted=0
   local default_cfg legacy_json backup_dir="" legacy_was_active=0 default_was_active=0
   local -a legacy_paths=()
   ((${#slugs[@]} > 0)) || slugs=(default)
@@ -1755,162 +1761,179 @@ convert_site_layout() {
   done
 
   state="$(site_conversion_state)"
-  if [[ "$state" == template ]]; then
-    return 0
-  fi
-  if [[ "$state" == single ]]; then
-    # Conversion triggers: several slugs, any non-default slug, or an explicit
-    # multi-site request. A `mixed` layout always repairs.
-    local need=0
-    ((${#slugs[@]} > 1)) && need=1
-    for slug in "${slugs[@]}"; do
-      [[ "$slug" == default ]] || need=1
-    done
-    if multi_site_requested "$flags"; then
-      need=1
-    fi
-    if ((need == 0)); then
+  local -a extra_slugs=()
+  for slug in "${slugs[@]}"; do
+    [[ "$slug" == default ]] || extra_slugs+=("$slug")
+  done
+
+  if [[ "$state" != template ]]; then
+    if [[ "$state" == single ]] && ((${#extra_slugs[@]} == 0)) &&
+      ! multi_site_requested "$flags"; then
+      # Conversion trigger: several slugs, any non-default slug, or an
+      # explicit multi-site request. A `mixed` layout always repairs.
       return 0
     fi
-  fi
 
-  # Step 1: import the default configuration. An existing per-slug file is
-  # authoritative, so a rerun or a mixed repair never re-imports.
-  default_cfg="$(site_config_path default)"
-  legacy_json="$(p /etc/pangolin/site.json)"
-  if [[ ! -e "$default_cfg" ]]; then
-    install -d -m 0700 "$(site_config_dir)" || return 1
-    if [[ -f "$legacy_json" ]]; then
-      # Byte-for-byte copy: credentials, provisioning key, and native state
-      # carry over untouched, and the legacy file stays in place.
-      install -m 0600 "$legacy_json" "$default_cfg" || return 1
-    elif [[ -n "$LEGACY_NEWT_ID" && -n "$LEGACY_NEWT_SECRET" && -n "$LEGACY_ENDPOINT" ]]; then
-      write_private_file "$default_cfg" \
-        "$(site_config_static "$LEGACY_ENDPOINT" "$LEGACY_NEWT_ID" "$LEGACY_NEWT_SECRET")" ||
+    # Step 1: import the default configuration. An existing per-slug file is
+    # authoritative, so a rerun or a mixed repair never re-imports.
+    default_cfg="$(site_config_path default)"
+    legacy_json="$(p /etc/pangolin/site.json)"
+    if [[ ! -e "$default_cfg" ]]; then
+      install -d -m 0700 "$(site_config_dir)" || return 1
+      if [[ -f "$legacy_json" ]]; then
+        # Byte-for-byte copy: credentials, provisioning key, and native state
+        # carry over untouched, and the legacy file stays in place.
+        install -m 0600 "$legacy_json" "$default_cfg" || return 1
+      elif [[ -n "$LEGACY_NEWT_ID" && -n "$LEGACY_NEWT_SECRET" && -n "$LEGACY_ENDPOINT" ]]; then
+        write_private_file "$default_cfg" \
+          "$(site_config_static "$LEGACY_ENDPOINT" "$LEGACY_NEWT_ID" "$LEGACY_NEWT_SECRET")" ||
+          return 1
+      else
+        echo "convert_site_layout: no site configuration to convert; provide $legacy_json or Newt credentials first." >&2
         return 1
-    else
-      echo "convert_site_layout: no site configuration to convert; provide $legacy_json or Newt credentials first." >&2
-      return 1
+      fi
     fi
-  fi
 
-  # Step 2: record what the legacy cleanup may remove once the conversion
-  # verifies, then back up the legacy unit, env, and wrapper so a failed
-  # default can restore the original files. A backup failure aborts before
-  # anything is stopped.
-  _record_legacy_paths
-  for path in "$(p /etc/systemd/system/pangolin-site.service)" \
-    "$(p /etc/systemd/system/multi-user.target.wants/pangolin-site.service)" \
-    "$(p /etc/init.d/pangolin-site)" \
-    "$(p /etc/runlevels/default/pangolin-site)" \
-    "$(p /usr/local/bin/pangolin-site-start)" \
-    "$(p /etc/pangolin/pangolin-site.env)"; do
-    if [[ -e "$path" || -L "$path" ]]; then
-      legacy_paths+=("$path")
+    # Step 2: record what the legacy cleanup may remove once the conversion
+    # verifies, then back up the legacy unit, env, and wrapper so a failed
+    # default can restore the original files. A backup failure aborts before
+    # anything is stopped.
+    _record_legacy_paths
+    for path in "$(p /etc/systemd/system/pangolin-site.service)" \
+      "$(p /etc/systemd/system/multi-user.target.wants/pangolin-site.service)" \
+      "$(p /etc/init.d/pangolin-site)" \
+      "$(p /etc/runlevels/default/pangolin-site)" \
+      "$(p /usr/local/bin/pangolin-site-start)" \
+      "$(p /etc/pangolin/pangolin-site.env)"; do
+      if [[ -e "$path" || -L "$path" ]]; then
+        legacy_paths+=("$path")
+      fi
+    done
+    if ((${#legacy_paths[@]} > 0)); then
+      if ! backup_dir="$(backup_existing "${legacy_paths[@]}")"; then
+        echo "convert_site_layout: failed to back up the legacy site files; refusing to convert." >&2
+        return 1
+      fi
     fi
-  done
-  if ((${#legacy_paths[@]} > 0)); then
-    if ! backup_dir="$(backup_existing "${legacy_paths[@]}")"; then
-      echo "convert_site_layout: failed to back up the legacy site files; refusing to convert." >&2
-      return 1
-    fi
-  fi
 
-  # Step 3: stop the legacy service before @default starts, never after.
-  if _site_legacy_service_present; then
-    case "$backend" in
-    systemd)
-      systemctl is-active --quiet pangolin-site >/dev/null 2>&1 && legacy_was_active=1
-      ;;
-    openrc)
-      rc-service pangolin-site status >/dev/null 2>&1 && legacy_was_active=1
-      ;;
-    esac
-  fi
-  if [[ "$legacy_was_active" == 1 ]]; then
-    echo "Converting the single-site service to per-slug instances; the site tunnel restarts briefly."
-    if ! stop_service "$backend" pangolin-site; then
-      echo "convert_site_layout: failed to stop the legacy pangolin-site service; the conversion did not run." >&2
-      return 1
-    fi
-  fi
-
-  # Step 4: install and verify @default. An already-running instance (a mixed
-  # repair) is restarted so the authoritative config applies.
-  case "$backend" in
-  systemd)
-    site_instance_was_active default >/dev/null 2>&1 && default_was_active=1
-    ;;
-  openrc)
-    site_instance_was_active_openrc default >/dev/null 2>&1 && default_was_active=1
-    ;;
-  esac
-  local install_default_ok=1
-  case "$backend" in
-  systemd) install_site_systemd_slug default "$default_cfg" "$default_was_active" || install_default_ok=0 ;;
-  openrc) install_site_openrc_slug default "$default_cfg" "$default_was_active" || install_default_ok=0 ;;
-  esac
-  if ((install_default_ok == 0)); then
-    # Roll back: the unverified instance must not stay enabled beside the
-    # legacy unit, then the original files are restored and, when the legacy
-    # service had been running, it runs again.
-    if ! uninstall_site_slug "$backend" default; then
-      echo "convert_site_layout: failed to remove the unverified default instance; check that it cannot start at boot." >&2
-    fi
-    if [[ -n "$backup_dir" ]] && ! restore_backup "$backup_dir"; then
-      echo "convert_site_layout: failed to restore the legacy files from $backup_dir; the legacy service needs operator attention." >&2
-      return 1
-    fi
-    if [[ "$backend" == systemd && -z "$PANGOLIN_ROOT" ]] && command -v systemctl >/dev/null 2>&1; then
-      systemctl daemon-reload >/dev/null 2>&1 || true
-    fi
-    if [[ "$legacy_was_active" == 1 ]]; then
-      echo "The pangolin-site@default instance failed verification; restarting the legacy service." >&2
+    # Step 3: stop the legacy service before @default starts, never after.
+    if _site_legacy_service_present; then
       case "$backend" in
       systemd)
-        systemctl start pangolin-site ||
-          echo "convert_site_layout: restored the legacy unit but failed to start it; it needs operator attention." >&2
+        systemctl is-active --quiet pangolin-site >/dev/null 2>&1 && legacy_was_active=1
         ;;
       openrc)
-        rc-service pangolin-site start ||
-          echo "convert_site_layout: restored the legacy service but failed to start it; it needs operator attention." >&2
+        rc-service pangolin-site status >/dev/null 2>&1 && legacy_was_active=1
         ;;
       esac
     fi
-    return 1
-  fi
+    if [[ "$legacy_was_active" == 1 ]]; then
+      echo "Converting the single-site service to per-slug instances; the site tunnel restarts briefly."
+      if ! stop_service "$backend" pangolin-site; then
+        echo "convert_site_layout: failed to stop the legacy pangolin-site service; the conversion did not run." >&2
+        return 1
+      fi
+    fi
 
-  # Step 5: @default verified. Retire the legacy service plumbing, run the
-  # recorded legacy cleanup (legacy-format env only, content-checked wrapper,
-  # updater compatibility policy), then record the marker. A failed retire or
-  # cleanup keeps the layout `mixed` for the next run to repair.
-  case "$backend" in
-  systemd)
-    if ! retire_legacy_single_site_systemd; then
-      echo "convert_site_layout: pangolin-site@default is verified, but retiring the legacy service failed; rerun the conversion to finish." >&2
+    # Step 4: install and verify @default. An already-running instance (a mixed
+    # repair) is restarted so the authoritative config applies.
+    case "$backend" in
+    systemd)
+      site_instance_was_active default >/dev/null 2>&1 && default_was_active=1
+      ;;
+    openrc)
+      site_instance_was_active_openrc default >/dev/null 2>&1 && default_was_active=1
+      ;;
+    esac
+    local install_default_ok=1
+    case "$backend" in
+    systemd) install_site_systemd_slug default "$default_cfg" "$default_was_active" || install_default_ok=0 ;;
+    openrc) install_site_openrc_slug default "$default_cfg" "$default_was_active" || install_default_ok=0 ;;
+    esac
+    if ((install_default_ok == 0)); then
+      # Rollback: the unverified instance must not stay enabled beside the
+      # legacy unit, so remove it, restore the original files, and bring the
+      # legacy service back when it had been running. The legacy start waits
+      # for proof the instance is gone: a verification timeout can leave the
+      # process alive, and starting the legacy unit then would run the same
+      # site credentials twice.
+      local instance_label default_still_active=0
+      case "$backend" in
+      systemd) instance_label="$(site_systemd_instance default)" ;;
+      openrc) instance_label="$(site_openrc_instance default)" ;;
+      esac
+      if ! uninstall_site_slug "$backend" default; then
+        echo "convert_site_layout: failed to remove the unverified $instance_label instance." >&2
+      fi
+      case "$backend" in
+      systemd) site_instance_was_active default >/dev/null 2>&1 && default_still_active=1 ;;
+      openrc) site_instance_was_active_openrc default >/dev/null 2>&1 && default_still_active=1 ;;
+      esac
+      if [[ -n "$backup_dir" ]] && ! restore_backup "$backup_dir"; then
+        echo "convert_site_layout: failed to restore the legacy files from $backup_dir; the legacy service needs operator attention." >&2
+        return 1
+      fi
+      if [[ "$backend" == systemd && -z "$PANGOLIN_ROOT" ]] && command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+      fi
+      if [[ "$legacy_was_active" == 1 ]]; then
+        if ((default_still_active == 1)); then
+          if [[ "$backend" == systemd ]]; then
+            echo "convert_site_layout: $instance_label is still active, so pangolin-site was restored but NOT started; the same site credentials must never run twice. Stop it first: systemctl stop $instance_label, then run: systemctl start pangolin-site" >&2
+          else
+            echo "convert_site_layout: $instance_label is still active, so pangolin-site was restored but NOT started; the same site credentials must never run twice. Stop it first: rc-service $instance_label stop, then run: rc-service pangolin-site start" >&2
+          fi
+          return 1
+        fi
+        echo "The $instance_label instance failed verification; restarting the legacy service." >&2
+        case "$backend" in
+        systemd)
+          systemctl start pangolin-site ||
+            echo "convert_site_layout: restored the legacy unit but failed to start it; it needs operator attention." >&2
+          ;;
+        openrc)
+          rc-service pangolin-site start ||
+            echo "convert_site_layout: restored the legacy service but failed to start it; it needs operator attention." >&2
+          ;;
+        esac
+      fi
+      return 1
+    fi
+    converted=1
+
+    # Step 5: @default verified. Retire the legacy service plumbing, run the
+    # recorded legacy cleanup (legacy-format env only, content-checked wrapper,
+    # updater compatibility policy), then record the marker. A failed retire or
+    # cleanup keeps the layout `mixed` for the next run to repair.
+    case "$backend" in
+    systemd)
+      if ! retire_legacy_single_site_systemd; then
+        echo "convert_site_layout: pangolin-site@default is verified, but retiring the legacy service failed; rerun the conversion to finish." >&2
+        rc=1
+      fi
+      ;;
+    openrc)
+      if ! retire_legacy_single_site_openrc; then
+        echo "convert_site_layout: pangolin-site@default is verified, but retiring the legacy service failed; rerun the conversion to finish." >&2
+        rc=1
+      fi
+      ;;
+    esac
+    if ! cleanup_legacy_addon site; then
+      echo "convert_site_layout: the site instances are verified, but legacy site cleanup failed." >&2
       rc=1
     fi
-    ;;
-  openrc)
-    if ! retire_legacy_single_site_openrc; then
-      echo "convert_site_layout: pangolin-site@default is verified, but retiring the legacy service failed; rerun the conversion to finish." >&2
+    if ! write_site_conversion_marker template; then
+      echo "convert_site_layout: failed to write the conversion marker; later runs may not detect the template layout." >&2
       rc=1
     fi
-    ;;
-  esac
-  if ! cleanup_legacy_addon site; then
-    echo "convert_site_layout: the site instances are verified, but legacy site cleanup failed." >&2
-    rc=1
-  fi
-  if ! write_site_conversion_marker template; then
-    echo "convert_site_layout: failed to write the conversion marker; later runs may not detect the template layout." >&2
-    rc=1
   fi
 
-  # Step 6: start the extra slugs. A failure removes only that instance and
-  # leaves every verified instance running; the run still fails.
-  for slug in "${slugs[@]}"; do
-    [[ "$slug" == default ]] && continue
+  # Step 6: reconcile the requested extra slugs. This runs on the template
+  # path too: a rerun after a failed extra slug must converge, not silently
+  # succeed while the slug is missing. A failure removes only that instance
+  # and leaves every verified instance running; the run still fails.
+  for slug in "${extra_slugs[@]}"; do
     local slug_cfg slug_was_active=0 slug_ok=1
     slug_cfg="$(site_config_path "$slug")"
     if [[ ! -f "$slug_cfg" ]]; then
@@ -1935,7 +1958,7 @@ convert_site_layout() {
     fi
   done
 
-  if ((rc == 0)); then
+  if ((rc == 0 && converted == 1)); then
     echo "Converted the single-site install to per-slug site services."
   fi
   return "$rc"

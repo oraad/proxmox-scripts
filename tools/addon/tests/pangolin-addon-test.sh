@@ -1582,6 +1582,7 @@ if [[ "$1" == "is-active" ]]; then
   [[ -z "${FAKE_INACTIVE_UNIT:-}" || "$unit" != "$FAKE_INACTIVE_UNIT" ]] || exit 3
   [[ "${FAKE_INACTIVE:-0}" != "1" ]] || exit 3
 fi
+if [[ "$1" == "disable" && "${FAKE_FAIL_UNIT:-}" == "${*: -1}" ]]; then exit 1; fi
 exit 0
 EOF
 cat >"$tmpd/bin/rc-service" <<'EOF'
@@ -1599,6 +1600,7 @@ echo "rc-update $*" >>"$FAKE_LOG"
 case "$1" in
 add) ln -sf "$PANGOLIN_ROOT/etc/init.d/$2" "$PANGOLIN_ROOT/etc/runlevels/default/$2" ;;
 del)
+  [[ "${FAKE_FAIL_SERVICE:-}" == "$2" ]] && exit 1
   entry="$PANGOLIN_ROOT/etc/runlevels/default/$2"
   if [[ -e "$entry" || -L "$entry" ]]; then rm -f "$entry"; else exit 1; fi
   ;;
@@ -1873,6 +1875,66 @@ fi
 [[ -n "$(find "$t5_root/var/lib/pangolin/backup" -name pangolin-site.env -print -quit)" ]] ||
   fail "conversion must back up the legacy env before attempting changes"
 
+# (6b) Rollback conflict guard (systemd): @default failed verification and its
+# removal fails while the unit still reports active. The legacy files must be
+# restored but the legacy service must NOT start, or the same site
+# credentials would run twice.
+t5_reset_root
+t5_legacy_systemd
+t5_legacy_env
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+: >"$FAKE_LOG"
+conv_rc=0
+conv_err="$(
+  verify_site_systemd_slug() { return 1; }
+  FAKE_FAIL_UNIT='pangolin-site@default' convert_site_layout systemd "$tmpd/flags-on" default 2>&1 >/dev/null
+)" || conv_rc=$?
+[[ "$conv_rc" -ne 0 ]] || fail "the conversion must still fail when the instance cannot be removed"
+grep -q '^systemctl stop pangolin-site@default$' "$FAKE_LOG" ||
+  fail "rollback must attempt to stop the still-active instance"
+grep -q '^systemctl disable pangolin-site@default$' "$FAKE_LOG" ||
+  fail "rollback must attempt to disable the instance"
+if grep -q '^systemctl start pangolin-site$' "$FAKE_LOG"; then
+  fail "the restored legacy service must not start while @default is still active"
+fi
+grep -q '^systemctl stop pangolin-site$' "$FAKE_LOG" || fail "legacy was stopped first"
+case "$conv_err" in
+*"pangolin-site@default is still active"*) ;;
+*) fail "expected an actionable conflict error, got: $conv_err" ;;
+esac
+case "$conv_err" in
+*"s3cr3t-static"* | *"oldsecret"*) fail "the conflict error must not print secrets" ;;
+esac
+[[ "$(cat "$t5_root/etc/systemd/system/pangolin-site.service")" == "UNIT-ORIGINAL" ]] ||
+  fail "the legacy unit must stay restored"
+if [[ -e "$t5_root/var/lib/pangolin/site-layout" ]]; then fail "no marker after a failed default"; fi
+
+# (6c) The same conflict guard on OpenRC: rc-update del fails and the service
+# still reports active, so the restored legacy service must not start.
+t5_reset_root
+t5_legacy_openrc
+t5_legacy_env
+write_private_file "$t5_root/etc/pangolin/site.json" "$t5_cred"
+: >"$FAKE_LOG"
+conv_rc=0
+conv_err="$(
+  verify_site_openrc_slug() { return 1; }
+  FAKE_FAIL_SERVICE='pangolin-site-default' convert_site_layout openrc "$tmpd/flags-on" default 2>&1 >/dev/null
+)" || conv_rc=$?
+[[ "$conv_rc" -ne 0 ]] || fail "the OpenRC conversion must still fail"
+grep -q '^rc-update del pangolin-site-default default$' "$FAKE_LOG" ||
+  fail "rollback must attempt to remove the instance from the runlevel"
+if grep -q '^rc-service pangolin-site start$' "$FAKE_LOG"; then
+  fail "the restored legacy service must not start while pangolin-site-default is still active"
+fi
+case "$conv_err" in
+*"pangolin-site-default is still active"*) ;;
+*) fail "expected an actionable conflict error, got: $conv_err" ;;
+esac
+[[ -f "$t5_root/etc/init.d/pangolin-site" ]] || fail "the legacy init must stay restored"
+[[ -f "$t5_root/usr/local/bin/pangolin-site-start" ]] || fail "the legacy wrapper must stay restored"
+if [[ -e "$t5_root/var/lib/pangolin/site-layout" ]]; then fail "no marker after a failed default"; fi
+
 # (7) An extra slug failure removes only that instance and leaves default.
 t5_reset_root
 t5_legacy_systemd
@@ -1901,18 +1963,28 @@ assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
   fail "a verified default must still retire the legacy unit"
 [[ -f "$(site_config_path orgb)" ]] || fail "the failed slug config must stay for diagnostics"
 
-# (8) A rerun with the template marker is a quiet no-op: no re-import and no
-# rewrite of the default instance.
+# (8) A rerun with the template marker and only default requested is a quiet
+# no-op: no re-import, no rewrite, and no service call at all.
 write_private_file "$t5_root/etc/pangolin/site.json" "SENTINEL-LEGACY"
 write_private_file "$t5_default_cfg" "SENTINEL-DEFAULT"
 : >"$FAKE_LOG"
-convert_site_layout systemd "" default orgb || fail "a rerun on template state should succeed"
+convert_site_layout systemd "" default || fail "a rerun on template state should succeed"
 [[ "$(cat "$t5_default_cfg")" == "SENTINEL-DEFAULT" ]] ||
   fail "a rerun must not re-import or rewrite the default config"
 [[ "$(cat "$t5_root/etc/pangolin/site.json")" == "SENTINEL-LEGACY" ]] ||
   fail "a rerun must not touch the legacy site.json"
-[[ ! -s "$FAKE_LOG" ]] || fail "a rerun on template state must not touch services"
+[[ ! -s "$FAKE_LOG" ]] || fail "a default-only rerun on template state must not touch services"
 assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
+
+# (8b) The rerun must still install a requested extra slug: after the failed
+# orgb of the conversion run, a template-state rerun with orgb converges by
+# starting the instance, without touching the default import.
+convert_site_layout systemd "" default orgb ||
+  fail "a template-state rerun must install the requested extra slug"
+grep -q '^systemctl enable --now pangolin-site@orgb$' "$FAKE_LOG" ||
+  fail "the rerun must start pangolin-site@orgb"
+[[ "$(cat "$t5_default_cfg")" == "SENTINEL-DEFAULT" ]] ||
+  fail "the extras path must not re-import the default config"
 
 # (9) A single non-default slug with no flag still triggers conversion.
 t5_reset_root
@@ -1991,6 +2063,20 @@ assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
 case "$conv_out" in
 *"s3cr3t-static"* | *"oldsecret"*) fail "OpenRC conversion must not print secrets" ;;
 esac
+
+# A template-state rerun on OpenRC installs a requested extra slug through the
+# slug unit without touching the (already retired) legacy service again.
+write_private_file "$(site_config_path orgd)" \
+  "$(site_config_static "https://p.example" idd secd)"
+: >"$FAKE_LOG"
+convert_site_layout openrc "" default orgd || fail "the OpenRC rerun must install the requested extra slug"
+grep -q '^rc-update add pangolin-site-orgd default$' "$FAKE_LOG" ||
+  fail "the rerun must add the slug service to the runlevel"
+[[ -f "$t5_root/etc/init.d/pangolin-site-orgd" ]] || fail "the slug unit must be written"
+[[ -f "$t5_root/usr/local/bin/pangolin-site-orgd-start" ]] || fail "the slug wrapper must be written"
+if grep -qE '^rc-(service|update) .* pangolin-site( |$)' "$FAKE_LOG"; then
+  fail "a template-state rerun must not touch the retired legacy service"
+fi
 
 # OpenRC default failure: remove only the half-built default instance, keep
 # the legacy files, restart the active legacy service, and skip the marker.
