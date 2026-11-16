@@ -42,11 +42,11 @@
       "type": "warning"
     },
     {
-      "text": "Components: Site tunnel (userspace WireGuard) and Machine client. Client or native mode needs /dev/net/tun (LXC passthrough added). Create the client in the dashboard first.",
+      "text": "Components: Site tunnel (userspace WireGuard) and Machine client. Client or native mode needs /dev/net/tun (passthrough added); native interfaces default to pang<slug>/pangm<slug>.",
       "type": "info"
     },
     {
-      "text": "Multi-site: var_sites lists up to 8 slug-keyed connectors per target. Native interfaces default to pang<slug>/pangm<slug>. var_site_ssh_owner (\"default\") alone keeps SSH.",
+      "text": "Multi-site: var_sites lists up to 8 slug-keyed connectors per target. var_site_ssh_owner (\"default\", else first slug) alone keeps SSH; a failed target never stops the others.",
       "type": "info"
     },
     {
@@ -54,7 +54,7 @@
       "type": "info"
     },
     {
-      "text": "Unattended: var_mode=site var_targets=101,102 var_pangolin_endpoint=URL var_sites=\"orga\" var_site_id_orga_101=ID var_site_secret_orga_101=SECRET. Creds take slug/target suffixes.",
+      "text": "Unattended: var_mode=site var_targets=101 var_pangolin_endpoint=URL var_sites=\"orga\" var_site_id_orga_101=ID var_site_secret_orga_101=SECRET. Each new slug/target pair needs creds.",
       "type": "info"
     }
   ]
