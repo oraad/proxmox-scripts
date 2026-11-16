@@ -1303,6 +1303,7 @@ case "$*" in
 *"Site credentials:"*) printf 'static' >&2 ;;
 *"Existing site"*) printf 'replace' >&2 ;;
 *"Select components"*) printf 'client' >&2 ;;
+*"manage multiple site labels"*) printf '%s' "${FAKE_SITEMODE_OUT:-one}" >&2 ;;
 *"Pangolin endpoint"*) printf '%s' "${FAKE_ENDPOINT_OUT:-https://p.example}" >&2 ;;
 *"Site ID"*) printf 'id' >&2 ;;
 *"Site secret"*) printf 'sec' >&2 ;;
@@ -1923,6 +1924,575 @@ if grep -q 'id\|secret' "$iface/log"; then
   echo "interface validation must not consult credentials" >&2; exit 1
 fi
 rm -rf "$iface"
+
+# ---------------------------------------------------------------------------
+# Multi-site Task 6: entry orchestration and the payload multi-slug loop.
+# ---------------------------------------------------------------------------
+
+# Slug resolution order: the per-target list wins, then the global list,
+# then `default`.
+assert_eq default "$(_sites_for_target host)"
+assert_eq $'orga\norgb' "$(var_sites='orga, orgb' _sites_for_target host)"
+assert_eq $'orgb\norgc' "$(var_sites='orga' var_sites_101='orgb orgc' _sites_for_target 101)"
+
+# Boolean normalization accepts the common spellings consistently.
+assert_eq 1 "$(_normalize_bool true)"
+assert_eq 1 "$(_normalize_bool yes)"
+assert_eq 1 "$(_normalize_bool 1)"
+assert_eq 0 "$(_normalize_bool 0)"
+assert_eq 0 "$(_normalize_bool false)"
+assert_eq 0 "$(_normalize_bool no)"
+assert_eq 0 "$(_normalize_bool '')"
+
+# Interface override resolution per (slug,target) pair, with the per-slug
+# generated default and the shared global fallback.
+assert_eq pangorga "$(_site_pair_interface orga host 1 1 client)"
+assert_eq pangmorga "$(_site_pair_interface orga host 1 1 main)"
+assert_eq myiface "$(var_site_interface_org_a=myiface _site_pair_interface org-a host 1 1 client)"
+assert_eq mainmy "$(var_site_interface_main_orga=mainmy _site_pair_interface orga host 1 1 main)"
+assert_eq shared "$(var_site_interface=shared _site_pair_interface orgb 101 2 2 client)"
+assert_eq "bt" "$(
+  var_site_interface_orgb_101=bt var_site_interface_orgb=ignored \
+    _site_pair_interface orgb 101 2 2 client
+)"
+
+# The enabled-interface collector emits exactly the enabled names, never an
+# empty line (validate_interface_names_on_target rejects trailing empties), and
+# prints nothing when no native mode is enabled.
+assert_eq "" "$(var_site_native=0 var_site_native_main=0 \
+  _collect_site_interfaces host 1 1 default orgb)"
+assert_eq $'pangdefault\npangmdefault\npangorgb\npangmorgb' "$(
+  var_site_native=1 var_site_native_main=1 _collect_site_interfaces host 1 1 default orgb
+)"
+assert_eq pangorgb "$(var_site_native=1 var_site_native_main=0 \
+  _collect_site_interfaces host 1 1 orgb)"
+
+# Carry-forward: a relative or dot-parent answers path must be rejected before
+# any mode change or write.
+rel6="$(mktemp -d)"
+if (cd "$rel6" && build_site_answers_to_path "sites/x.json" "https://p.example" - - id secret \
+  >/dev/null 2>&1); then
+  echo "relative answers path should fail" >&2; exit 1
+fi
+[[ ! -e "$rel6/sites" ]] || { echo "relative path must not create directories" >&2; exit 1; }
+if (cd "$rel6" && build_site_answers_to_path "./site.json" "https://p.example" - - id secret \
+  >/dev/null 2>&1); then
+  echo "dot-parent answers path should fail" >&2; exit 1
+fi
+rm -rf "$rel6"
+
+# Carry-forward: an SSH owner with control characters is sanitized so operator
+# input cannot forge a second log line.
+inj_rc=0
+inj_out="$(validate_site_ssh_owner $'evil\nFORGED-MARKER' $'default' 2>&1)" || inj_rc=$?
+[[ "$inj_rc" -ne 0 ]] || { echo "control-char owner should fail" >&2; exit 1; }
+case "$inj_out" in
+*FORGED-MARKER*) ;;
+*) echo "owner error should keep the sanitized marker: $inj_out" >&2; exit 1 ;;
+esac
+[[ "$(printf '%s' "$inj_out" | wc -l)" == 0 ]] ||
+  { echo "owner error must stay one line: $inj_out" >&2; exit 1; }
+
+# Multi-site loop fixture. The fake payload snapshots the answers directory per
+# target, emits per-slug verified markers, and honors one failing slug.
+s6="$(mktemp -d)"
+mkdir -p "$s6/bin" "$s6/tmp" "$s6/remote" "$s6/snap" "$s6/fakeroot"
+cat >"$s6/bin/pct" <<'EOF'
+#!/usr/bin/env bash
+echo "pct $*" >>"$FAKE_LOG"
+ctid="$2"
+case "$1" in
+config) printf 'tags: old;pangolin-cli\n' ;;
+list) printf 'VMID Status Lock Name\n101 running c1\n102 running c2\n' ;;
+set) exit 0 ;;
+status) printf 'status: running\n' ;;
+start | shutdown) exit 0 ;;
+push)
+  src="$3"
+  dst="${4#/root/.pangolin-addon/}"
+  mkdir -p "$FAKE_REMOTE_DIR/$ctid/$(dirname "$dst")"
+  cp "$src" "$FAKE_REMOTE_DIR/$ctid/$dst"
+  ;;
+exec)
+  shift 2
+  [[ "${1:-}" == "--" ]] && shift
+  dir="$FAKE_REMOTE_DIR/$ctid"
+  case "$*" in
+  *"rm -rf /root/.pangolin-addon"*) rm -rf "$dir" ;;
+  *"cat /root/.pangolin-addon/verified"*) cat "$dir/verified" 2>/dev/null ;;
+  *"mkdir -p /root/.pangolin-addon"*) mkdir -p "$dir" ;;
+  *chmod*) : ;;
+  *payload.sh*) bash "$dir/payload.sh" "$dir" ;;
+  *"ip link show "*[![:space:]]*)
+    name="${*##*ip link show }"
+    [[ " ${FAKE_CT_IP_EXISTS:-} " == *" $name "* ]]
+    ;;
+  *"ip link show"*) exit 1 ;;
+  *"test -f /etc/pangolin/sites/"*)
+    path="${*##*test -f }"
+    path="${path%% *}"
+    [[ -f "$FAKE_CT_ROOT/$ctid/$path" ]]
+    ;;
+  *site-layout*|*"pangolin-site@"*) printf '%s\n' "${FAKE_CT_LAYOUT:-single}" ;;
+  *hostname*) printf 'ct%s\n' "$ctid" ;;
+  *) exit 1 ;;
+  esac
+  ;;
+*) exit 1 ;;
+esac
+EOF
+cat >"$s6/bin/ip" <<'EOF'
+#!/usr/bin/env bash
+echo "ip $*" >>"$FAKE_LOG"
+[[ "${1:-} ${2:-}" == "link show" ]] || exit 1
+[[ -n "${3:-}" ]] || exit 1
+[[ " ${FAKE_IP_EXISTS:-} " == *" ${3:-} "* ]]
+EOF
+cat >"$s6/bin/whiptail" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FAKE_WHIPTAIL_LOG"
+case "$*" in
+*"manage multiple site labels"*) printf '%s' "${FAKE_SITEMODE_OUT:-one}" >&2 ;;
+*"Site labels"*checklist*|*--checklist*"Site labels"*) printf '%s' "${FAKE_SITES_OUT:-}" >&2 ;;
+*"New site label"*) printf '%s' "${FAKE_SLUG_ADD:-}" >&2 ;;
+*"Site SSH owner"*) printf '%s' "${FAKE_OWNER_OUT:-}" >&2 ;;
+*"Targets (space selects"*) printf '%s' "${FAKE_TARGETS_OUT:-}" >&2 ;;
+*"Site networking:"*) printf '%s' "${FAKE_NATIVE_OUT:-}" >&2 ;;
+*"Site credentials:"*) printf 'static' >&2 ;;
+*"Existing site"*) printf 'replace' >&2 ;;
+*"Select components"*) printf 'client' >&2 ;;
+*"Pangolin endpoint"*) printf '%s' "${FAKE_ENDPOINT_OUT:-https://p.example}" >&2 ;;
+*"Site ID"*) printf 'id' >&2 ;;
+*"Site secret"*) printf 'sec' >&2 ;;
+*"Site name"*) printf 'pve' >&2 ;;
+*"Machine client ID"*) printf 'cid' >&2 ;;
+*"Machine client secret"*) printf 'csec' >&2 ;;
+*) exit 1 ;;
+esac
+EOF
+chmod 755 "$s6/bin/pct" "$s6/bin/ip" "$s6/bin/whiptail"
+cat >"$s6/payload.sh" <<EOF
+#!/usr/bin/env bash
+# Sourced by main, executed per target.
+if [[ "\${BASH_SOURCE[0]:-}" != "\$0" ]]; then
+  return 0
+fi
+answers="\${1:-}"
+flags="\$answers/flags"
+target="\$(sed -n 's/^TARGET=//p' "\$flags" 2>/dev/null)"
+site="\$(sed -n 's/^SITE=//p' "\$flags" 2>/dev/null)"
+client="\$(sed -n 's/^CLIENT=//p' "\$flags" 2>/dev/null)"
+multi="\$(sed -n 's/^MULTI_SITE=//p' "\$flags" 2>/dev/null)"
+slugs="\$(sed -n 's/^SITE_SLUGS=//p' "\$flags" 2>/dev/null)"
+printf '%s\n' "\$target" >>"$s6/ran"
+mkdir -p "$s6/snap/\$target"
+cp -a "\$answers"/. "$s6/snap/\$target/"
+if [[ "\$target" == "\$(cat "$s6/fail-target" 2>/dev/null)" ]]; then
+  exit 1
+fi
+fail_slug="\$(cat "$s6/fail-slug" 2>/dev/null)"
+{
+  printf 'backend:systemd\n'
+  if [[ "\$site" == 1 && "\$multi" == 1 ]]; then
+    for slug in \$slugs; do
+      [[ "\$slug" == "\$fail_slug" ]] && continue
+      printf 'site:%s\n' "\$slug"
+    done
+    for slug in \$slugs; do
+      [[ "\$slug" == default ]] || continue
+      [[ "\$slug" == "\$fail_slug" ]] && continue
+      printf 'site\n'
+    done
+  elif [[ "\$site" == 1 ]]; then
+    printf 'site\n'
+  fi
+  if [[ "\$client" == 1 ]]; then
+    printf 'client\n'
+  fi
+} >"\$answers/verified"
+EOF
+: >"$s6/fail-target"
+: >"$s6/fail-slug"
+
+_run6() {
+  (
+    export PATH="$s6/bin:$PATH"
+    export FAKE_LOG="$s6/log" FAKE_REMOTE_DIR="$s6/remote" TMPDIR="$s6/tmp"
+    export FAKE_WHIPTAIL_LOG="$s6/wlog" PANGOLIN_ROOT="$s6/fakeroot"
+    _ensure_curl() { :; }
+    _load_core() { :; }
+    require_pve_host() { return 0; }
+    header_info() { :; }
+    msg_info() { printf 'INFO:%s\n' "$*"; }
+    msg_ok() { printf 'OK:%s\n' "$*"; }
+    msg_warn() { printf 'WARN:%s\n' "$*" >&2; }
+    msg_error() { printf 'ERROR:%s\n' "$*" >&2; }
+    _ensure_lxc_running() { :; }
+    _validate_target_os() { :; }
+    _apply_lxc_tun() { :; }
+    _ensure_lxc_runtime() { :; }
+    _ensure_host_tun() { :; }
+    fetch_payload() { install -m 0600 "$s6/payload.sh" "$1"; }
+    main
+  )
+}
+_reset6() {
+  rm -rf "$s6/snap" "$s6/remote" "$s6/fakeroot"
+  mkdir -p "$s6/snap" "$s6/remote" "$s6/fakeroot"
+  : >"$s6/log"
+  : >"$s6/ran"
+}
+
+# E1: the default single-slug variables still write site.json and take the
+# legacy payload path.
+_reset6
+if ! e1_out="$(var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+  var_site_id=e1id var_site_secret=e1sec _run6 2>&1)"; then
+  echo "E1 single-slug run failed: $e1_out" >&2; exit 1
+fi
+grep -qx 'MULTI_SITE=0' "$s6/snap/host/flags" ||
+  { echo "E1 legacy run must set MULTI_SITE=0" >&2; exit 1; }
+[[ -f "$s6/snap/host/site.json" ]] || { echo "E1 site.json missing" >&2; exit 1; }
+[[ ! -e "$s6/snap/host/sites" ]] || { echo "E1 must not write sites/" >&2; exit 1; }
+
+# E2: two slugs generate per-slug answers per target with MULTI_SITE=1.
+_reset6
+if ! e2_out="$(var_mode=site var_targets="host 101" var_sites="default orgb" \
+  var_pangolin_endpoint=https://p.example \
+  var_site_id_default_host=did var_site_secret_default_host=dsec \
+  var_site_id_orgb_host=oid var_site_secret_orgb_host=osec \
+  var_site_id_default_101=di1 var_site_secret_default_101=dis1 \
+  var_site_id_orgb_101=oi1 var_site_secret_orgb_101=ois1 _run6 2>&1)"; then
+  echo "E2 multi-slug run failed: $e2_out" >&2; exit 1
+fi
+for snapdir in host 101; do
+  f="$s6/snap/$snapdir/flags"
+  grep -qx 'SITE_SLUGS=default orgb' "$f" || { echo "E2 SITE_SLUGS missing" >&2; exit 1; }
+  grep -qx 'MULTI_SITE=1' "$f" || { echo "E2 MULTI_SITE=1 missing" >&2; exit 1; }
+  grep -qx 'SSH_OWNER=default' "$f" || { echo "E2 SSH_OWNER missing" >&2; exit 1; }
+  [[ -f "$s6/snap/$snapdir/sites/default.json" ]] ||
+    { echo "E2 sites/default.json missing" >&2; exit 1; }
+  [[ -f "$s6/snap/$snapdir/sites/orgb.json" ]] ||
+    { echo "E2 sites/orgb.json missing" >&2; exit 1; }
+  [[ ! -e "$s6/snap/$snapdir/site.json" ]] ||
+    { echo "E2 must not write the legacy site.json" >&2; exit 1; }
+  if [[ "$snapdir" == host ]]; then
+    # The host snapshot copies the real local answers tree. The remote copy
+    # goes through the fake pct push, which does not model directory modes.
+    [[ "$(stat -c '%a' "$s6/snap/$snapdir/sites")" == "700" ]] ||
+      { echo "E2 sites dir mode" >&2; exit 1; }
+  fi
+done
+python3 - "$s6/snap/host/sites/orgb.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["disableSsh"] is True, d
+assert d["id"] == "oid", d
+PY
+python3 - "$s6/snap/host/sites/default.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "disableSsh" not in d, d
+assert d["id"] == "did", d
+PY
+# Cleanup: every remote answers directory is gone after the multi-slug run.
+[[ -z "$(ls -A "$s6/remote")" ]] || { echo "E2 remote answers left" >&2; exit 1; }
+[[ -z "$(ls -A "$s6/tmp")" ]] || { echo "E2 local answers left" >&2; exit 1; }
+grep -q 'pct exec 101 -- rm -rf /root/.pangolin-addon' "$s6/log" ||
+  { echo "E2 remote cleanup missing" >&2; exit 1; }
+if grep -q 'osec\|ois1\|dsec\|dis1' "$s6/log"; then
+  echo "E2 secret reached the pct log" >&2; exit 1
+fi
+
+# E3: var_sites_101 overrides the global list for one target.
+_reset6
+if ! e3_out="$(var_mode=site var_targets="host 101" var_sites="orga" var_sites_101="orgb" \
+  var_pangolin_endpoint=https://p.example \
+  var_site_id_orga_host=a1 var_site_secret_orga_host=as1 \
+  var_site_id_orgb_101=b1 var_site_secret_orgb_101=bs1 _run6 2>&1)"; then
+  echo "E3 per-target slug list failed: $e3_out" >&2; exit 1
+fi
+grep -qx 'SITE_SLUGS=orga' "$s6/snap/host/flags" ||
+  { echo "E3 host slug list wrong" >&2; exit 1; }
+grep -qx 'SITE_SLUGS=orgb' "$s6/snap/101/flags" ||
+  { echo "E3 101 slug list wrong" >&2; exit 1; }
+[[ -f "$s6/snap/host/sites/orga.json" && -f "$s6/snap/101/sites/orgb.json" ]] ||
+  { echo "E3 per-target configs missing" >&2; exit 1; }
+
+# E5: a duplicate static site ID across slug/target pairs fails before any
+# pct call or payload run.
+_reset6
+e5_rc=0
+e5_out="$(var_mode=site var_target=101 var_sites="orga orgb" \
+  var_pangolin_endpoint=https://p.example \
+  var_site_id_orga=dup var_site_secret_orga=s1 var_site_id_orgb=dup var_site_secret_orgb=s2 \
+  _run6 2>&1)" || e5_rc=$?
+[[ "$e5_rc" -ne 0 ]] || { echo "E5 duplicate site id should fail" >&2; exit 1; }
+case "$e5_out" in
+*"Duplicate site ID"*dup*) ;;
+*) echo "E5 duplicate site id message: $e5_out" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/ran" ]] || { echo "E5 payload ran despite duplicate" >&2; exit 1; }
+[[ ! -s "$s6/log" ]] || { echo "E5 pct touched before validation" >&2; exit 1; }
+
+# E6: one shared provisioning key across two targets still succeeds.
+_reset6
+if ! e6_out="$(var_mode=site var_targets="host 101" var_pangolin_endpoint=https://p.example \
+  var_site_provisioning_key_host=spk-shared var_site_provisioning_key_101=spk-shared \
+  _run6 2>&1)"; then
+  echo "E6 shared provisioning key failed: $e6_out" >&2; exit 1
+fi
+assert_eq $'host\n101' "$(cat "$s6/ran")"
+grep -qx 'MULTI_SITE=0' "$s6/snap/host/flags" ||
+  { echo "E6 must stay on the legacy path" >&2; exit 1; }
+python3 - "$s6/snap/host/site.json" "$s6/snap/101/site.json" <<'PY'
+import json, sys
+for path in sys.argv[1:]:
+    d = json.load(open(path))
+    assert d["provisioningKey"] == "spk-shared", d
+PY
+
+# E7: duplicate client IDs fail before any side effect.
+_reset6
+e7_rc=0
+e7_out="$(var_mode=client var_targets="host 101" var_pangolin_endpoint=https://p.example \
+  var_client_id_host=dupcid var_client_secret_host=s1 \
+  var_client_id_101=dupcid var_client_secret_101=s2 _run6 2>&1)" || e7_rc=$?
+[[ "$e7_rc" -ne 0 ]] || { echo "E7 duplicate client id should fail" >&2; exit 1; }
+case "$e7_out" in
+*"Duplicate client ID"*dupcid*) ;;
+*) echo "E7 duplicate client id message: $e7_out" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/ran" ]] || { echo "E7 payload ran despite duplicate" >&2; exit 1; }
+[[ ! -s "$s6/log" ]] || { echo "E7 pct touched before validation" >&2; exit 1; }
+
+# E8: the SSH owner must exist among the selected slugs or be none.
+_reset6
+e8_rc=0
+e8_out="$(var_mode=site var_target=101 var_sites="orga orgb" var_site_ssh_owner=orgc \
+  var_pangolin_endpoint=https://p.example \
+  var_site_id_orga=i1 var_site_secret_orga=s1 var_site_id_orgb=i2 var_site_secret_orgb=s2 \
+  _run6 2>&1)" || e8_rc=$?
+[[ "$e8_rc" -ne 0 ]] || { echo "E8 unknown owner should fail" >&2; exit 1; }
+case "$e8_out" in
+*"Invalid site SSH owner: orgc"*) ;;
+*) echo "E8 owner message: $e8_out" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/ran" && ! -s "$s6/log" ]] ||
+  { echo "E8 owner validation must run first" >&2; exit 1; }
+
+# E8b: two slugs overriding to the same interface name fail before any side
+# effect.
+e8b_rc=0
+e8b_out="$(var_mode=site var_target=101 var_sites="orga orgb" var_site_native=1 \
+  var_site_interface_orga=dupiface var_site_interface_orgb=dupiface \
+  var_pangolin_endpoint=https://p.example \
+  var_site_id_orga=i1 var_site_secret_orga=s1 var_site_id_orgb=i2 var_site_secret_orgb=s2 \
+  _run6 2>&1)" || e8b_rc=$?
+[[ "$e8b_rc" -ne 0 ]] || { echo "E8b interface collision should fail" >&2; exit 1; }
+case "$e8b_out" in
+*"Duplicate interface name: dupiface"*) ;;
+*) echo "E8b collision message: $e8b_out" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/ran" && ! -s "$s6/log" ]] ||
+  { echo "E8b interface validation must run first" >&2; exit 1; }
+
+# E9: the multi-target x multi-slug dry run lists slugs, owner, and interface
+# names, prints no secret, and touches no network, pct, or ip.
+_reset6
+if ! e9_out="$(TMPDIR="$s6/tmp" PATH="$s6/bin:/usr/bin:/bin" PANGOLIN_DRY_RUN=1 \
+  var_mode=site var_targets="host,101" var_sites="orga orgb" var_site_ssh_owner=orga \
+  var_site_native=1 var_site_native_main=1 var_pangolin_endpoint=https://p.example \
+  var_site_id_orga_host=a1 var_site_secret_orga_host=DRY-SEC-A1 \
+  var_site_id_orgb_host=b1 var_site_secret_orgb_host=DRY-SEC-B1 \
+  var_site_id_orga_101=a2 var_site_secret_orga_101=DRY-SEC-A2 \
+  var_site_id_orgb_101=b2 var_site_secret_orgb_101=DRY-SEC-B2 \
+  bash "$ROOT/add-pangolin.sh" 2>&1)"; then
+  echo "E9 multi-slug dry run failed: $e9_out" >&2; exit 1
+fi
+for token in "Sites: orga orgb" "SSH owner: orga" "pangorga" "pangmorga" "pangorgb" "pangmorgb"; do
+  case "$e9_out" in
+  *"$token"*) ;;
+  *) echo "E9 dry run missing [$token]: $e9_out" >&2; exit 1 ;;
+  esac
+done
+assert_eq "2" "$(printf '%s\n' "$e9_out" | grep -c '^Target: ')"
+case "$e9_out" in
+*DRY-SEC*) echo "E9 dry run printed a secret" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/log" ]] || { echo "E9 dry run used pct or ip" >&2; exit 1; }
+[[ -z "$(ls -A "$s6/tmp")" ]] || { echo "E9 dry run wrote files" >&2; exit 1; }
+
+# E10: markers with several site:<slug> lines still produce one pangolin-site
+# tag, and the summary reports each slug status.
+_reset6
+printf 'orgb\n' >"$s6/fail-slug"
+if ! e10_out="$(var_mode=site var_targets=101 var_sites="default orgb" \
+  var_pangolin_endpoint=https://p.example \
+  var_site_id_default_101=x var_site_secret_default_101=y \
+  var_site_id_orgb_101=i3 var_site_secret_orgb_101=s3 \
+  _run6 2>&1)"; then
+  echo "E10 tag run failed: $e10_out" >&2; exit 1
+fi
+tag_line="$(grep 'pct set 101 -tags' "$s6/log")"
+[[ -n "$tag_line" ]] || { echo "E10 LXC must be tagged" >&2; exit 1; }
+assert_eq "1" "$(printf '%s' "$tag_line" | grep -o 'pangolin-site' | wc -l)"
+case "$e10_out" in
+*"site default: verified"*) ;;
+*) echo "E10 summary missing verified slug: $e10_out" >&2; exit 1 ;;
+esac
+case "$e10_out" in
+*"site orgb: failed"*) ;;
+*) echo "E10 summary missing failed slug: $e10_out" >&2; exit 1 ;;
+esac
+: >"$s6/fail-slug"
+
+# E12: provisioning site names default to <hostname>-<slug> for one target and
+# <hostname>-<slug>-<target> for several.
+_reset6
+if ! e12_out="$(var_mode=site var_targets="host 101" var_sites=orga \
+  var_pangolin_endpoint=https://p.example \
+  var_site_provisioning_key_orga_host=spk-h var_site_provisioning_key_orga_101=spk-1 \
+  _run6 2>&1)"; then
+  echo "E12 name default run failed: $e12_out" >&2; exit 1
+fi
+hn="$(hostname 2>/dev/null || printf 'pve')"
+python3 - "$s6/snap/host/sites/orga.json" "$hn" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["name"] == f"{sys.argv[2]}-orga-host", d
+assert d["provisioningKey"] == "spk-h", d
+PY
+python3 - "$s6/snap/101/sites/orga.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["name"] == "ct101-orga-101", d
+PY
+
+# E13: a single default slug on an already-converted target takes the per-slug
+# layout even without a second slug.
+_reset6
+mkdir -p "$s6/fakeroot/etc/systemd/system"
+printf '[Unit]\n' >"$s6/fakeroot/etc/systemd/system/pangolin-site@.service"
+if ! e13_out="$(var_mode=site var_target=host var_pangolin_endpoint=https://p.example \
+  var_site_id=e13id var_site_secret=e13sec _run6 2>&1)"; then
+  echo "E13 converted-host run failed: $e13_out" >&2; exit 1
+fi
+grep -qx 'MULTI_SITE=1' "$s6/snap/host/flags" ||
+  { echo "E13 converted host must set MULTI_SITE=1" >&2; exit 1; }
+grep -qx 'SITE_SLUGS=default' "$s6/snap/host/flags" ||
+  { echo "E13 converted host must list the default slug" >&2; exit 1; }
+[[ -f "$s6/snap/host/sites/default.json" ]] ||
+  { echo "E13 converted host must use sites/default.json" >&2; exit 1; }
+[[ ! -e "$s6/snap/host/site.json" ]] ||
+  { echo "E13 converted host must not write site.json" >&2; exit 1; }
+_reset6
+
+# E14: interface existence is checked per generated name, with no empty name,
+# before the payload runs.
+if ! e14_out="$(var_mode=site var_target=host var_sites="orga orgb" \
+  var_site_native=1 var_site_native_main=1 var_pangolin_endpoint=https://p.example \
+  var_site_id_orga=i1 var_site_secret_orga=s1 var_site_id_orgb=i2 var_site_secret_orgb=s2 \
+  _run6 2>&1)"; then
+  echo "E14 interface-check run failed: $e14_out" >&2; exit 1
+fi
+for name in pangorga pangmorga pangorgb pangmorgb; do
+  grep -qx "ip link show $name" "$s6/log" ||
+    { echo "E14 missing ip link show $name" >&2; exit 1; }
+done
+if grep -qE 'ip link show *$' "$s6/log"; then
+  echo "E14 must not query an empty interface name" >&2; exit 1
+fi
+_reset6
+e14b_rc=0
+e14b_out="$(FAKE_IP_EXISTS=pangorgb var_mode=site var_target=host var_sites="orga orgb" \
+  var_site_native=1 var_pangolin_endpoint=https://p.example \
+  var_site_id_orga=i1 var_site_secret_orga=s1 var_site_id_orgb=i2 var_site_secret_orgb=s2 \
+  _run6 2>&1)" || e14b_rc=$?
+unset FAKE_IP_EXISTS
+[[ "$e14b_rc" -ne 0 ]] || { echo "E14b an existing interface should fail" >&2; exit 1; }
+case "$e14b_out" in
+*"Interface pangorgb already exists on target host"*) ;;
+*) echo "E14b existing interface message: $e14b_out" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/ran" ]] || { echo "E14b payload must not run after a collision" >&2; exit 1; }
+
+# E15: a multi-slug run whose extra slug has no credentials and no existing
+# config fails before any mutation for that target.
+_reset6
+e15_rc=0
+e15_out="$(var_mode=site var_target=101 var_sites="default orgb" \
+  var_pangolin_endpoint=https://p.example \
+  var_site_id_default=dsec var_site_secret_default=dsec2 _run6 2>&1)" || e15_rc=$?
+[[ "$e15_rc" -ne 0 ]] || { echo "E15 missing extra credentials should fail" >&2; exit 1; }
+case "$e15_out" in
+*"orgb"*) ;;
+*) echo "E15 must name the incomplete slug: $e15_out" >&2; exit 1 ;;
+esac
+[[ ! -s "$s6/ran" ]] || { echo "E15 payload ran without extra slug credentials" >&2; exit 1; }
+
+# E4: interactive slug prompts reuse already-valid suffixed values and keep the
+# shared SSH owner selection.
+: >"$s6/wlog"
+if ! (
+  unset var_mode var_unattended var_targets var_target var_sites var_site_ssh_owner
+  unset var_site_id var_site_secret var_site_provisioning_key var_site_name
+  unset var_pangolin_endpoint var_site_native var_site_native_main
+  unset var_site_interface var_site_interface_main var_reconfigure
+  export PATH="$s6/bin:$PATH" FAKE_WHIPTAIL_LOG="$s6/wlog"
+  export FAKE_SITEMODE_OUT=multi
+  export FAKE_SITES_OUT='"default" "orga" "done"'
+  export FAKE_OWNER_OUT=orga
+  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_PAIR_ID=()
+  SITE_PAIR_SECRET=()
+  SITE_PAIR_KEY=()
+  SITE_PAIR_NAME=()
+  TARGETS=(host)
+  _target_site_verified() { return 1; }
+  _target_has_legacy_site() { return 1; }
+  _default_site_name() { printf 'pve\n'; }
+  var_site_id_orga=orgaid var_site_secret_orga=orgasec
+  _prompt_inputs host 1 0 || exit 1
+  [[ "$var_site_ssh_owner" == orga ]] || exit 1
+  [[ "${SITE_PAIR_ID["orga|host"]}" == orgaid ]] || exit 1
+  [[ "${SITE_PAIR_SECRET["orga|host"]}" == orgasec ]] || exit 1
+  [[ "${SITE_PAIR_ID["default|host"]}" == id ]] || exit 1
+  [[ "${SITE_PAIR_SECRET["default|host"]}" == sec ]] || exit 1
+  [[ "$(grep -c 'Site credentials:' "$FAKE_WHIPTAIL_LOG")" == 1 ]] || exit 1
+  [[ "$(grep -c 'manage multiple site labels' "$FAKE_WHIPTAIL_LOG")" == 1 ]] || exit 1
+) >"$s6/e4out" 2>&1; then
+  echo "E4 interactive slug flow failed:" >&2
+  cat "$s6/e4out" >&2
+  exit 1
+fi
+
+# The single-site menu path remains the default: choosing "one" prompts nothing
+# new and reuses the existing credential prompts exactly once.
+: >"$s6/wlog"
+if ! (
+  unset var_mode var_unattended var_targets var_target var_sites var_site_ssh_owner
+  unset var_site_id var_site_secret var_site_provisioning_key var_site_name
+  unset var_pangolin_endpoint var_site_native var_site_native_main
+  unset var_site_interface var_site_interface_main var_reconfigure
+  export PATH="$s6/bin:$PATH" FAKE_WHIPTAIL_LOG="$s6/wlog"
+  export FAKE_SITEMODE_OUT=one
+  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  _target_site_verified() { return 1; }
+  _target_has_legacy_site() { return 1; }
+  _default_site_name() { printf 'pve\n'; }
+  _prompt_inputs host 1 0 || exit 1
+  [[ "$var_site_id" == id ]] || exit 1
+  [[ -z "${var_site_ssh_owner:-}" ]] || exit 1
+  [[ "$(grep -c 'Site SSH owner' "$FAKE_WHIPTAIL_LOG")" == 0 ]] || exit 1
+  [[ "$(grep -c 'Site credentials:' "$FAKE_WHIPTAIL_LOG")" == 1 ]] || exit 1
+) >"$s6/e4bout" 2>&1; then
+  echo "E4b single-site menu flow failed:" >&2
+  cat "$s6/e4bout" >&2
+  exit 1
+fi
+
+rm -rf "$s6"
 
 echo "Entry tests passed"
 echo "Orchestration tests passed"

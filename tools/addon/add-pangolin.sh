@@ -21,9 +21,22 @@
 #              Per target: var_client_id_<host|CTID>, var_client_secret_<host|CTID>.
 #   The unsuffixed credential variables are used only when exactly one target
 #   is selected.
+#   Multi-site: var_sites="orga org-b"    site labels per run (default
+#              "default", at most 8). var_sites_<host|CTID> overrides the list
+#              for one target. var_site_ssh_owner=default|<slug>|none picks the
+#              slug that keeps the embedded SSH daemon. var_site_native and
+#              var_site_native_main are shared booleans. Interface overrides
+#              resolve in order: var_site_interface_<slug>_<target>,
+#              var_site_interface_<slug>, var_site_interface_<target>,
+#              var_site_interface, then the generated per-slug name. Site
+#              credential variables acquire the same slug suffixes:
+#              var_site_id_<slug>_<target> wins first.
+#              With one "default" slug and an unconverted target the run stays
+#              on the legacy single-site path.
 #
-# Mode, endpoint, site native toggles, and var_reconfigure are shared by every
-# target. Each target gets its own private answers directory and install run.
+# Mode, endpoint, site native toggles, SSH owner, and var_reconfigure are
+# shared by every target. Each target gets its own private answers directory
+# and install run.
 
 set -Eeuo pipefail
 
@@ -36,6 +49,10 @@ APP_TYPE="${APP_TYPE:-addon}"
 # Components the payload verified in this run; used for LXC tags and next steps.
 VERIFIED_SITE=0
 VERIFIED_CLIENT=0
+# Slugs the payload verified, space-separated, and the service backend it
+# reported. Only multi-site runs emit these markers.
+VERIFIED_SLUGS=""
+VERIFIED_BACKEND="single"
 # Targets selected for this run, in selection order.
 TARGETS=()
 # Per-target credentials resolved before the install loop.
@@ -52,6 +69,37 @@ TARGET_STATUS=()
 # Every private answers directory and every LXC that received a copy.
 TARGET_ANSWERS=()
 REMOTE_TARGETS=()
+# Per-target site slug selections (space-separated) and the effective
+# multi-site decision, parallel to TARGETS.
+TARGET_SLUGS=()
+TARGET_MULTI=()
+# Per-target "site <slug>: verified|failed" summary lines, parallel to TARGETS.
+TARGET_SLUG_STATUS=()
+# Site credentials collected interactively for a (slug,target) pair, keyed
+# "slug|target". Unattended runs resolve the same values from the environment.
+declare -A SITE_PAIR_ID=()
+declare -A SITE_PAIR_SECRET=()
+declare -A SITE_PAIR_KEY=()
+declare -A SITE_PAIR_NAME=()
+# Set by main() to 1 once the raw operator interface overrides have been
+# captured, so per-slug resolution can tell an unset shared interface (use the
+# generated per-slug name) from an explicit one (share it across slugs).
+SITE_INTERFACE_CAPTURED=0
+SITE_INTERFACE_RAW=""
+SITE_INTERFACE_MAIN_RAW=""
+# Static IDs already used in this run, collected before any mutation, so a
+# duplicate fails the affected target instead of the Pangolin server.
+SEEN_SITE_IDS=$'\n'
+SEEN_CLIENT_IDS=$'\n'
+# The site label and SSH owner menus are shared selections like the endpoint;
+# each is asked at most once per run.
+SITES_PROMPTED=0
+SITE_OWNER_PROMPTED=0
+# Slug plan for the target being processed, set by _resolve_target_slug_plan.
+SLUG_LIST=""
+SLUG_TOTAL=1
+SLUG_MULTI=0
+SLUG_ARRAY=(default)
 # Private run directory that holds the shared payload and the answers dirs.
 WORK_DIR=""
 # The site native checklist is a shared selection; it is asked at most once.
@@ -132,7 +180,9 @@ validate_site_slug() {
 }
 
 # Succeed when the site SSH owner is unset, `none`, or an exact slug from the
-# newline-delimited list. The message names only the owner, never credentials.
+# newline-delimited list. The message names only the sanitized owner, never
+# credentials, and control characters are stripped so operator input cannot
+# forge a second log line.
 validate_site_ssh_owner() {
   local owner="${1:-}" slugs="${2:-}" line
   [[ -z "$owner" || "$owner" == none ]] && return 0
@@ -140,7 +190,7 @@ validate_site_ssh_owner() {
     [[ -n "$line" ]] || continue
     [[ "$line" == "$owner" ]] && return 0
   done <<<"$slugs"
-  echo "Invalid site SSH owner: $owner (expected one of the selected site slugs or none)" >&2
+  echo "Invalid site SSH owner: ${owner//[[:cntrl:]]/} (expected one of the selected site slugs or none)" >&2
   return 1
 }
 
@@ -346,11 +396,22 @@ build_site_answers_to_path() {
       "$native" "$native_main" "$interface" "$interface_main" "$disable_ssh")"
   fi
   dir="$(dirname "$path")"
+  case "$path" in
+  /*) ;;
+  *)
+    echo "build_site_answers_to_path: an absolute config path is required" >&2
+    return 1
+    ;;
+  esac
   if [[ -z "$path" || "$dir" == "/" ]]; then
     echo "build_site_answers_to_path: a nested config path is required" >&2
     return 1
   fi
   install -d -m 0700 "$dir" || return 1
+  # install -d only applies -m when it creates the directory. Force the mode
+  # so a sites/ directory made by an earlier slug still guarantees 0700 for
+  # this credential-bearing config.
+  chmod 0700 "$dir" || return 1
   write_private_file "$path" "$config"
 }
 
@@ -565,11 +626,11 @@ _parse_sites() {
       return 1
     fi
     if ! validate_site_slug "$token"; then
-      echo "Invalid site slug: $token (expected 1-10 characters: a lowercase letter, then lowercase letters, digits, or inner hyphens)" >&2
+      echo "Invalid site slug: ${token//[[:cntrl:]]/} (expected 1-10 characters: a lowercase letter, then lowercase letters, digits, or inner hyphens)" >&2
       return 1
     fi
     if [[ "$seen" == *" $token "* ]]; then
-      echo "Duplicate site slug: $token" >&2
+      echo "Duplicate site slug: ${token//[[:cntrl:]]/}" >&2
       return 1
     fi
     seen="${seen}${token} "
@@ -704,6 +765,352 @@ _site_value() {
     value="${!name-}"
   fi
   printf '%s' "$value"
+}
+
+# Print 1 when the value is one of the accepted true spellings (1, true,
+# yes), otherwise 0. Every boolean operator variable is normalized through
+# this so the payload only ever sees 0 and 1.
+_normalize_bool() {
+  case "${1:-}" in
+  1 | true | yes) printf '1\n' ;;
+  *) printf '0\n' ;;
+  esac
+}
+
+# Print the validated site slug list selected for a target, one per line.
+# Resolution order: var_sites_<target>, then var_sites, then `default`.
+_sites_for_target() {
+  local target="${1:-host}" name="var_sites_${1:-host}" raw
+  raw="${!name-}"
+  if [[ -z "$raw" ]]; then
+    raw="${var_sites:-}"
+  fi
+  if [[ -z "$raw" ]]; then
+    raw="default"
+  fi
+  _parse_sites "$raw"
+}
+
+# Set SLUG_LIST (newline list), SLUG_ARRAY, SLUG_TOTAL, and SLUG_MULTI for a
+# target. SLUG_MULTI is 1 when the list holds more than one slug, any
+# non-default slug, or an explicit var_multi_sites request.
+_resolve_target_slug_plan() {
+  local target="${1:-host}" slug
+  SLUG_LIST="$(_sites_for_target "$target")" || return 1
+  mapfile -t SLUG_ARRAY <<<"$SLUG_LIST"
+  SLUG_TOTAL=${#SLUG_ARRAY[@]}
+  SLUG_MULTI=0
+  if ((SLUG_TOTAL > 1)); then
+    SLUG_MULTI=1
+  fi
+  for slug in "${SLUG_ARRAY[@]}"; do
+    if [[ "$slug" != default ]]; then
+      SLUG_MULTI=1
+    fi
+  done
+  if [[ "$(_normalize_bool "${var_multi_sites:-}")" == 1 ]]; then
+    SLUG_MULTI=1
+  fi
+}
+
+# Print the site SSH owner effective for a target's newline-delimited slug
+# list. var_site_ssh_owner wins; `default` (the default value) falls back to
+# the first selected slug when the list holds no `default` entry, because the
+# embedded SSH daemon must belong to one of the installed instances.
+_site_ssh_owner() {
+  local slugs="${1:-}" owner="${var_site_ssh_owner-}" first="" line
+  if [[ -z "$owner" ]]; then
+    owner=default
+  fi
+  if [[ "$owner" == default ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      [[ -z "$first" ]] && first="$line"
+      if [[ "$line" == default ]]; then
+        first=default
+        break
+      fi
+    done <<<"$slugs"
+    if [[ "$first" != default ]]; then
+      owner="$first"
+    fi
+  fi
+  printf '%s\n' "$owner"
+}
+
+# Print the endpoint for a (slug,target) pair: the resolved slug/target form,
+# then the shared var_pangolin_endpoint, which the operator is prompted for
+# once per run.
+_site_pair_endpoint() {
+  local value
+  value="$(_site_value var_pangolin_endpoint "$1" "$2" "$3" "$4")"
+  if [[ -z "$value" ]]; then
+    value="${var_pangolin_endpoint:-}"
+  fi
+  printf '%s' "$value"
+}
+
+# Print the interface name for a (slug,target) pair. `kind` is client or
+# main. Resolution order: var_site_interface[_main]_<slug>_<target>,
+# <slug>, <target>, the operator-set shared variable, then the generated
+# per-slug default. The shared fallback uses the raw environment captured
+# before main() applies its defaults, so the legacy pangolin default never
+# collides across slugs.
+_site_pair_interface() {
+  local slug="$1" target="$2" st="$3" tt="$4" kind="$5"
+  local base value
+  if [[ "$kind" == main ]]; then
+    base="var_site_interface_main"
+  else
+    base="var_site_interface"
+  fi
+  value="$(_site_value "$base" "$slug" "$target" "$st" "$tt")"
+  if [[ -z "$value" ]]; then
+    if [[ "${SITE_INTERFACE_CAPTURED:-0}" == 1 ]]; then
+      if [[ "$kind" == main ]]; then
+        value="${SITE_INTERFACE_MAIN_RAW:-}"
+      else
+        value="${SITE_INTERFACE_RAW:-}"
+      fi
+    else
+      value="${!base:-}"
+    fi
+  fi
+  if [[ -z "$value" ]]; then
+    if [[ "$kind" == main ]]; then
+      value="$(default_site_interface_main "$slug")"
+    else
+      value="$(default_site_interface "$slug")"
+    fi
+  fi
+  printf '%s' "$value"
+}
+
+# Print the effective interface names for every enabled native mode across a
+# slug list, one per line, for one target. Arguments: target, slug total,
+# target total, then the slugs. Empty names are never emitted, so the output
+# is safe to hand to validate_interface_names_on_target, which rejects blank
+# entries; with no enabled native mode the output is empty and the caller
+# skips the check entirely.
+_collect_site_interfaces() {
+  local target="${1:-host}" st="${2:-1}" tt="${3:-1}"
+  shift 3
+  local slug iface
+  local -a names=()
+  for slug in "$@"; do
+    if [[ "${var_site_native-0}" == 1 ]]; then
+      iface="$(_site_pair_interface "$slug" "$target" "$st" "$tt" client)"
+      if [[ -n "$iface" ]]; then
+        names+=("$iface")
+      fi
+    fi
+    if [[ "${var_site_native_main-0}" == 1 ]]; then
+      iface="$(_site_pair_interface "$slug" "$target" "$st" "$tt" main)"
+      if [[ -n "$iface" ]]; then
+        names+=("$iface")
+      fi
+    fi
+  done
+  if ((${#names[@]} == 0)); then
+    return 0
+  fi
+  printf '%s\n' "${names[@]}"
+}
+
+# Save the site credential globals for the (slug,target) pair just resolved.
+_store_site_pair() {
+  local slug="$1" target="$2" key="$1|$2"
+  SITE_PAIR_ID[$key]="${var_site_id-}"
+  SITE_PAIR_SECRET[$key]="${var_site_secret-}"
+  SITE_PAIR_KEY[$key]="${var_site_provisioning_key-}"
+  SITE_PAIR_NAME[$key]="${var_site_name-}"
+}
+
+# Fill the site credential globals for one (slug,target) pair: interactively
+# stored values first, then the environment through the _site_value
+# precedence. Arguments: slug, target, slug total, target total.
+_activate_site_pair() {
+  local slug="$1" target="$2" st="$3" tt="$4" key="$1|$2" value
+  value="${SITE_PAIR_ID[$key]-}"
+  if [[ -z "$value" ]]; then
+    value="$(_site_value var_site_id "$slug" "$target" "$st" "$tt")"
+  fi
+  var_site_id="$value"
+  value="${SITE_PAIR_SECRET[$key]-}"
+  if [[ -z "$value" ]]; then
+    value="$(_site_value var_site_secret "$slug" "$target" "$st" "$tt")"
+  fi
+  var_site_secret="$value"
+  value="${SITE_PAIR_KEY[$key]-}"
+  if [[ -z "$value" ]]; then
+    value="$(_site_value var_site_provisioning_key "$slug" "$target" "$st" "$tt")"
+  fi
+  var_site_provisioning_key="$value"
+  value="${SITE_PAIR_NAME[$key]-}"
+  if [[ -z "$value" ]]; then
+    value="$(_site_value var_site_name "$slug" "$target" "$st" "$tt")"
+  fi
+  var_site_name="$value"
+}
+
+# Print the default provisioning site name for a multi-site (slug,target)
+# pair: <hostname>-<slug> with one target, <hostname>-<slug>-<target> with
+# several. The legacy single-site path keeps the plain hostname default.
+_default_provisioning_site_name() {
+  local target="$1" slug="$2" host
+  host="$(_default_site_name "$target")"
+  if ((${#TARGETS[@]} > 1)); then
+    printf '%s-%s-%s\n' "$host" "$slug" "$target"
+  else
+    printf '%s-%s\n' "$host" "$slug"
+  fi
+}
+
+# Print the target's site layout state: single, template, or mixed. Read-only
+# in both branches: the host uses the payload's file inspection, an LXC uses
+# one sh -c probe that only reads files.
+_target_site_layout() {
+  local target="${1:-host}" out=""
+  if [[ "$target" == host ]]; then
+    if declare -F site_conversion_state >/dev/null 2>&1; then
+      out="$(site_conversion_state 2>/dev/null)" || out=""
+    fi
+  elif command -v pct >/dev/null 2>&1; then
+    out="$(pct exec "$target" -- sh -c '
+t=0; l=0
+v=$(head -n 1 /var/lib/pangolin/site-layout 2>/dev/null)
+[ "$v" = template ] && t=1
+[ -e /etc/systemd/system/pangolin-site@.service ] && t=1
+for f in /etc/init.d/pangolin-site-*; do
+  case "$f" in (*"*"*) continue ;; esac
+  if [ -e "$f" ] || [ -L "$f" ]; then t=1; fi
+done
+for f in /etc/systemd/system/pangolin-site.service \
+  /etc/systemd/system/multi-user.target.wants/pangolin-site.service \
+  /etc/init.d/pangolin-site /etc/runlevels/default/pangolin-site; do
+  if [ -e "$f" ] || [ -L "$f" ]; then l=1; fi
+done
+if [ "$t" = 1 ] && [ "$l" = 1 ]; then echo mixed
+elif [ "$t" = 1 ]; then echo template
+else echo single
+fi' 2>/dev/null)" || out=""
+  fi
+  case "$out" in
+  template | mixed) printf '%s\n' "$out" ;;
+  *) printf 'single\n' ;;
+  esac
+}
+
+# Succeed when the target already holds a per-slug site configuration. The
+# slug is validated before it is used in a path or in a remote command, and
+# the probe is read-only.
+_target_site_slug_exists() {
+  local target="${1:-}" slug="${2:-}" path
+  validate_site_slug "$slug" || return 1
+  if [[ "$target" == host ]]; then
+    if declare -F site_config_path >/dev/null 2>&1; then
+      path="$(site_config_path "$slug" 2>/dev/null)" || return 1
+    else
+      path="/etc/pangolin/sites/$slug.json"
+    fi
+    [[ -f "$path" ]]
+    return
+  fi
+  pct exec "$target" -- sh -c "test -f /etc/pangolin/sites/$slug.json" >/dev/null 2>&1
+}
+
+# Remember a static site ID for this run and reject a duplicate before the
+# affected target is mutated. IDs are identifiers, never secrets.
+_remember_site_id() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || return 0
+  if [[ "$SEEN_SITE_IDS" == *$'\n'"$id"$'\n'* ]]; then
+    echo "Duplicate site ID: $id (each site ID may be used only once per run)" >&2
+    return 1
+  fi
+  SEEN_SITE_IDS+="$id"$'\n'
+}
+
+# Remember a machine client ID for this run and reject a duplicate before the
+# affected target is mutated.
+_remember_client_id() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || return 0
+  if [[ "$SEEN_CLIENT_IDS" == *$'\n'"$id"$'\n'* ]]; then
+    echo "Duplicate client ID: $id (each client ID may be used only once per run)" >&2
+    return 1
+  fi
+  SEEN_CLIENT_IDS+="$id"$'\n'
+}
+
+# Validate the whole site plan before any target is touched: every slug list,
+# the SSH owner against each list, the interface overrides (format and
+# uniqueness per target), and the static site IDs resolvable from the
+# environment. A dry run additionally requires credentials for every
+# non-default slug, because it may not probe a target.
+_validate_site_plan() {
+  local dry="${1:-0}"
+  local i target owner slug names value st tt
+  local all_ids=""
+  tt=${#TARGETS[@]}
+  for ((i = 0; i < tt; i++)); do
+    target="${TARGETS[i]}"
+    _resolve_target_slug_plan "$target" || return 1
+    TARGET_SLUGS[i]="${SLUG_ARRAY[*]}"
+    TARGET_MULTI[i]="$SLUG_MULTI"
+    st="$SLUG_TOTAL"
+    owner="$(_site_ssh_owner "$SLUG_LIST")"
+    validate_site_ssh_owner "$owner" "$SLUG_LIST" || return 1
+    names="$(_collect_site_interfaces "$target" "$st" "$tt" "${SLUG_ARRAY[@]}")"
+    if [[ -n "$names" ]]; then
+      while IFS= read -r value; do
+        if [[ -n "$value" ]] && ! validate_interface_name "$value"; then
+          echo "Invalid native interface name: ${value//[[:cntrl:]]/} (expected 1-15 characters, starting with a letter, using letters, digits, _, -, or .)" >&2
+          return 1
+        fi
+      done <<<"$names"
+      interface_names_unique "$names" || return 1
+    fi
+    for slug in "${SLUG_ARRAY[@]}"; do
+      value="$(_site_value var_site_provisioning_key "$slug" "$target" "$st" "$tt")"
+      if [[ -z "$value" ]]; then
+        local id secret endpoint
+        id="$(_site_value var_site_id "$slug" "$target" "$st" "$tt")"
+        secret="$(_site_value var_site_secret "$slug" "$target" "$st" "$tt")"
+        if [[ -n "$id" && -z "$secret" ]] || [[ -z "$id" && -n "$secret" ]]; then
+          echo "Site credentials for $slug on $target are incomplete; provide var_site_id and var_site_secret together." >&2
+          return 1
+        fi
+        if [[ -n "$id" ]]; then
+          all_ids+="$id"$'\n'
+        elif [[ "$slug" != default && "$dry" == 1 ]]; then
+          echo "Site $slug needs a provisioning key or a site ID and secret." >&2
+          return 1
+        fi
+      fi
+      endpoint="$(_site_pair_endpoint "$slug" "$target" "$st" "$tt")"
+      if [[ -n "$endpoint" ]] && ! validate_endpoint "$endpoint"; then
+        echo "Invalid Pangolin endpoint for site $slug on $target; expected an http(s) URL with a host." >&2
+        return 1
+      fi
+    done
+  done
+  if [[ -n "$all_ids" ]]; then
+    validate_unique_site_ids "${all_ids%$'\n'}" || return 1
+  fi
+}
+
+# Reject a machine client ID used by two targets before any target is touched.
+_validate_client_plan() {
+  local i ids=""
+  for ((i = 0; i < ${#TARGETS[@]}; i++)); do
+    if [[ -n "${TARGET_CLIENT_ID[i]-}" ]]; then
+      ids+="${TARGET_CLIENT_ID[i]}"$'\n'
+    fi
+  done
+  if [[ -n "$ids" ]]; then
+    validate_unique_client_ids "${ids%$'\n'}" || return 1
+  fi
 }
 
 # Succeed when every nonempty line appears at most once. The label names the
@@ -909,10 +1316,14 @@ _validate_plan() {
 }
 
 # Print the plan and exit without network, prompts, or filesystem changes.
+# The multi-site arguments list the resolved slugs and the slug-based
+# multi-site decision; the dry run never probes a target layout, so a single
+# default slug shows the legacy plan with a conversion note.
 _print_dry_run() {
   local mode="$1" target="$2" site="$3" client="$4" reconfigure="$5"
+  local slugs="${6:-default}" multi="${7:-0}"
   local where="host" prefix="" site_native=0 site_native_main=0 need_tun=0
-  local native_label="disabled" main_label="disabled"
+  local native_label="disabled" main_label="disabled" dslug dip
   if [[ "$target" != host ]]; then
     where="LXC CTID $target"
     prefix="pct exec $target -- "
@@ -933,6 +1344,13 @@ _print_dry_run() {
   printf '  - Validate the target OS floor (Debian 12+, Ubuntu 22.04+, Alpine 3.20+)\n'
   printf '  - Install or verify the Pangolin CLI binary\n'
   if [[ "$site" == 1 ]]; then
+    printf 'Sites: %s\n' "$slugs"
+    printf 'SSH owner: %s\n' "$(_site_ssh_owner "${slugs// /$'\n'}")"
+    if [[ "$multi" == 1 ]]; then
+      printf 'Site layout: per-slug site instances (multi-site)\n'
+    else
+      printf 'Site layout: single-site; an already-converted target uses the per-slug path\n'
+    fi
     if [[ "$reconfigure" == 1 ]]; then
       printf '  - Replace the site configuration with the provided credentials\n'
     elif _has_site_form; then
@@ -946,11 +1364,30 @@ _print_dry_run() {
         printf '  - Note: reconfiguring with a provisioning key creates a second server-side site\n'
       fi
     fi
-    printf '  - Site native client tunnels: %s (interface %s)\n' \
-      "$native_label" "${var_site_interface-pangolin}"
-    printf '  - Site native main tunnel: %s (interface %s)\n' \
-      "$main_label" "${var_site_interface_main-pangolin}"
-    if [[ "$reconfigure" != 1 ]] && ! _has_site_form &&
+    if [[ "$multi" == 1 ]]; then
+      printf '  - Site native client tunnels: %s\n' "$native_label"
+      printf '  - Site native main tunnel: %s\n' "$main_label"
+    else
+      printf '  - Site native client tunnels: %s (interface %s)\n' \
+        "$native_label" "${var_site_interface-pangolin}"
+      printf '  - Site native main tunnel: %s (interface %s)\n' \
+        "$main_label" "${var_site_interface_main-pangolin}"
+    fi
+    if [[ "$multi" == 1 ]]; then
+      local -a darr=($slugs)
+      local dst="${#darr[@]}" dtt="${#TARGETS[@]}"
+      for dslug in "${darr[@]}"; do
+        if [[ "$site_native" == 1 ]]; then
+          dip="$(_site_pair_interface "$dslug" "$target" "$dst" "$dtt" client)"
+          printf '  - Site %s native client interface: %s\n' "$dslug" "$dip"
+        fi
+        if [[ "$site_native_main" == 1 ]]; then
+          dip="$(_site_pair_interface "$dslug" "$target" "$dst" "$dtt" main)"
+          printf '  - Site %s native main interface: %s\n' "$dslug" "$dip"
+        fi
+      done
+    fi
+    if [[ "$reconfigure" != 1 ]] && ! _has_site_form && [[ "$multi" != 1 ]] &&
       [[ "$site_native" == 1 || "$site_native_main" == 1 ]]; then
       printf '  - Note: native interface settings are applied only on create or reconfigure; reuse requires the existing site configuration to match, otherwise set var_reconfigure=1\n'
     fi
@@ -1099,15 +1536,235 @@ _ensure_lxc_runtime() {
   pct exec "$ctid" -- bash -c true
 }
 
+# Run the shared site native checklist once per run and set the toggles.
+# Only a completed checklist is shared; a cancel leaves it unasked for the
+# next target, exactly as before.
+_prompt_site_native_checklist() {
+  local net_choice net_state="OFF" main_state="OFF"
+  if [[ "${NATIVE_PROMPTED:-0}" == 1 ]]; then
+    return 0
+  fi
+  if [[ "${var_site_native-0}" == 1 ]]; then
+    net_state="ON"
+  fi
+  if [[ "${var_site_native_main-0}" == 1 ]]; then
+    main_state="ON"
+  fi
+  net_choice="$(whiptail --title "Site networking" --checklist \
+    "Site networking:" 15 74 2 \
+    main "native main tunnel (kernel interface, needs TUN)" "$main_state" \
+    client "native client tunnels (kernel interface, needs TUN)" "$net_state" \
+    3>&1 1>&2 2>&3)" || return 1
+  NATIVE_PROMPTED=1
+  var_site_native=0
+  var_site_native_main=0
+  case "$net_choice" in
+  *'"client"'*) var_site_native=1 ;;
+  esac
+  case "$net_choice" in
+  *'"main"'*) var_site_native_main=1 ;;
+  esac
+}
+
+# Run the interactive site label editor and set var_sites to the selected
+# space-separated list. Returns 1 on cancel or an empty selection.
+_prompt_site_labels() {
+  local -a slugs=(default)
+  local out item new label s dup
+  local -a selected kept
+  while :; do
+    local -a rows=()
+    for s in "${slugs[@]}"; do
+      rows+=("$s" "Site label $s" "ON")
+    done
+    rows+=("add" "Add another site label" "OFF" "done" "Use these site labels" "OFF")
+    out="$(whiptail --title "Site labels" --checklist \
+      "Manage site labels (space toggles, up to 8):" 20 74 8 "${rows[@]}" 3>&1 1>&2 2>&3)" ||
+      return 1
+    out="${out//\"/}"
+    _split_words selected "$out"
+    kept=()
+    new=""
+    for item in "${selected[@]}"; do
+      case "$item" in
+      add) new=add ;;
+      done) ;;
+      *) kept+=("$item") ;;
+      esac
+    done
+    if [[ "$new" == add ]]; then
+      if ((${#kept[@]} >= 8)); then
+        msg_warn "Eight site labels is the maximum." >&2
+      else
+        label="$(_prompt_value "New site label" "New site label" "" 0)" || return 1
+        if ! validate_site_slug "$label"; then
+          msg_warn "Invalid site label. Use 1-10 characters: a lowercase letter, then lowercase letters, digits, or inner hyphens." >&2
+        else
+          dup=0
+          for s in "${kept[@]}"; do
+            if [[ "$s" == "$label" ]]; then
+              dup=1
+            fi
+          done
+          if ((dup == 0)); then
+            kept+=("$label")
+          else
+            msg_warn "Site label $label is already selected." >&2
+          fi
+        fi
+      fi
+      slugs=("${kept[@]}")
+      continue
+    fi
+    if ((${#kept[@]} == 0)); then
+      echo "Select at least one site label" >&2
+      return 1
+    fi
+    _parse_sites "${kept[*]}" >/dev/null || return 1
+    var_sites="${kept[*]}"
+    return 0
+  done
+}
+
+# Ask the shared site SSH owner once: one of the selected slugs, or none.
+_prompt_site_ssh_owner() {
+  local slugs="${1:-}" choice s
+  local -a rows=()
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    rows+=("$s" "Embedded SSH daemon stays with $s")
+  done <<<"$slugs"
+  rows+=("none" "No site keeps the embedded SSH daemon")
+  choice="$(whiptail --title "Pangolin Addon" --menu \
+    "Site SSH owner:" 20 74 8 "${rows[@]}" 3>&1 1>&2 2>&3)" || return 1
+  var_site_ssh_owner="$choice"
+  SITE_OWNER_PROMPTED=1
+}
+
+# Resolve and prompt the site credentials for one (slug,target) pair. The
+# globals are already activated for the pair: a complete form is stored as-is
+# so prompts reuse existing values where valid, and only an incomplete pair
+# is asked about.
+_prompt_site_pair_credentials() {
+  local target="$1" slug="$2" choice
+  if [[ -n "${var_site_provisioning_key:-}" ]]; then
+    if [[ -z "${var_site_name:-}" ]]; then
+      var_site_name="$(_default_provisioning_site_name "$target" "$slug")"
+    fi
+    _store_site_pair "$slug" "$target"
+    return 0
+  fi
+  if [[ -n "${var_site_id:-}" && -n "${var_site_secret:-}" ]]; then
+    _store_site_pair "$slug" "$target"
+    return 0
+  fi
+  if [[ -z "${var_pangolin_endpoint:-}" ]]; then
+    var_pangolin_endpoint="$(whiptail --title "Pangolin Addon" \
+      --inputbox "Pangolin endpoint" 10 64 "https://app.pangolin.net" 3>&1 1>&2 2>&3)" ||
+      return 1
+  fi
+  choice="$(whiptail --title "Site credentials" --menu \
+    "Site credentials:" 15 64 2 \
+    static "Site ID + secret (works on every Pangolin edition)" \
+    provisioning "Site provisioning key (tier3/enterprise)" 3>&1 1>&2 2>&3)" || return 1
+  if [[ "$choice" == provisioning ]]; then
+    var_site_id=""
+    var_site_secret=""
+    if [[ -z "${var_site_provisioning_key:-}" ]]; then
+      var_site_provisioning_key="$(_prompt_value "Site provisioning key" \
+        "Site provisioning key (spk-...)" "" 1)" || return 1
+    fi
+    if [[ -z "${var_site_name:-}" ]]; then
+      var_site_name="$(_prompt_value "Site name" "Site name" \
+        "$(_default_provisioning_site_name "$target" "$slug")" 0)" || return 1
+    fi
+  else
+    var_site_provisioning_key=""
+    if [[ -z "${var_site_id:-}" ]]; then
+      var_site_id="$(_prompt_value "Site ID" "Site ID" "" 0)" || return 1
+    fi
+    if [[ -z "${var_site_secret:-}" ]]; then
+      var_site_secret="$(_prompt_value "Site secret" "Site secret" "" 1)" || return 1
+    fi
+  fi
+  _store_site_pair "$slug" "$target"
+}
+
 # Collect interactive credentials. Existing verified site configs are offered
 # as reuse or replace; client credentials are always prompted when missing. A
 # site enrollment ends with the native interface toggles; names are never
-# prompted.
+# prompted. In a multi-site enrollment the operator first chooses one site or
+# manages several site labels, then the SSH owner, the shared native toggles,
+# and the credentials of every slug/target pair the environment does not
+# already answer.
 _prompt_inputs() {
   local target="$1" site="$2" client="$3" choice default_name
-  local net_choice net_state main_state enrolling=0
+  local enrolling=0
   if [[ "$site" == 1 ]]; then
-    if _target_site_verified "$target" && [[ "${var_reconfigure:-0}" != 1 ]]; then
+    local explicit=0 sited_var="var_sites_${target}"
+    if [[ -n "${var_sites:-}" || -n "${!sited_var:-}" ]]; then
+      explicit=1
+    fi
+    local may_reuse=0
+    if [[ "${var_reconfigure:-0}" != 1 ]] && _target_site_verified "$target"; then
+      may_reuse=1
+    fi
+    if ((explicit == 0)) && [[ "$SITES_PROMPTED" != 1 ]] && ((may_reuse == 0)) &&
+      ! _is_noninteractive; then
+      choice="$(whiptail --title "Pangolin Addon" --menu \
+        "Configure one site or manage multiple site labels:" 15 74 2 \
+        one "One site (the default label)" \
+        multi "Manage multiple site labels" 3>&1 1>&2 2>&3)" || return 1
+      SITES_PROMPTED=1
+      if [[ "$choice" == multi ]]; then
+        _prompt_site_labels || return 1
+      fi
+    fi
+    _resolve_target_slug_plan "$target" || return 1
+    if [[ "$SLUG_MULTI" == 1 ]]; then
+      if [[ -z "${var_pangolin_endpoint:-}" ]]; then
+        var_pangolin_endpoint="$(whiptail --title "Pangolin Addon" \
+          --inputbox "Pangolin endpoint" 10 64 "https://app.pangolin.net" 3>&1 1>&2 2>&3)" ||
+          return 1
+      fi
+      if [[ -z "${var_site_ssh_owner:-}" && "$SITE_OWNER_PROMPTED" != 1 ]]; then
+        _prompt_site_ssh_owner "$SLUG_LIST" || return 1
+      fi
+      _prompt_site_native_checklist || return 1
+      local mslug mitra pair_found
+      for mslug in "${SLUG_ARRAY[@]}"; do
+        if [[ "${var_site_native:-0}" == 1 ]]; then
+          mitra="$(_site_pair_interface "$mslug" "$target" "$SLUG_TOTAL" "${#TARGETS[@]}" client)"
+          printf 'Site %s native client interface: %s\n' "$mslug" "$mitra"
+        fi
+        if [[ "${var_site_native_main:-0}" == 1 ]]; then
+          mitra="$(_site_pair_interface "$mslug" "$target" "$SLUG_TOTAL" "${#TARGETS[@]}" main)"
+          printf 'Site %s native main interface: %s\n' "$mslug" "$mitra"
+        fi
+      done
+      for mslug in "${SLUG_ARRAY[@]}"; do
+        _activate_site_pair "$mslug" "$target" "$SLUG_TOTAL" "${#TARGETS[@]}"
+        pair_found=0
+        if [[ -n "${var_site_provisioning_key:-}" ]]; then
+          pair_found=1
+          _store_site_pair "$mslug" "$target"
+        elif [[ -n "${var_site_id:-}" && -n "${var_site_secret:-}" ]]; then
+          pair_found=1
+          _store_site_pair "$mslug" "$target"
+        fi
+        if ((pair_found == 0)) && [[ "$mslug" == default ]] &&
+          [[ "${var_reconfigure:-0}" != 1 ]]; then
+          if _target_site_verified "$target" || _target_has_legacy_site "$target" ||
+            _target_site_slug_exists "$target" "$mslug"; then
+            continue
+          fi
+        fi
+        if ((pair_found == 0)); then
+          _prompt_site_pair_credentials "$target" "$mslug" || return 1
+        fi
+      done
+    elif [[ "$may_reuse" == 1 ]]; then
+      SITES_PROMPTED=1
       choice="$(whiptail --title "Existing site" --menu \
         "A verified site configuration already exists." 15 64 2 \
         reuse "Reuse the existing site configuration" \
@@ -1116,7 +1773,8 @@ _prompt_inputs() {
         var_reconfigure=1
       fi
     fi
-    if [[ "${var_reconfigure:-0}" == 1 ]] || ! _target_site_verified "$target"; then
+    if [[ "$SLUG_MULTI" != 1 ]] &&
+      { [[ "${var_reconfigure:-0}" == 1 ]] || ! _target_site_verified "$target"; }; then
       if ! _target_has_legacy_site "$target" || [[ "${var_reconfigure:-0}" == 1 ]]; then
         enrolling=1
         if [[ -z "${var_pangolin_endpoint:-}" ]]; then
@@ -1150,30 +1808,11 @@ _prompt_inputs() {
           fi
         fi
       fi
-    elif _has_site_form; then
+    elif [[ "$SLUG_MULTI" != 1 ]] && [[ "$may_reuse" == 1 ]] && _has_site_form; then
       msg_warn "Ignoring new site credentials; the verified site configuration is reused. Set var_reconfigure=1 to replace it."
     fi
-    if [[ "$enrolling" == 1 && "${NATIVE_PROMPTED:-0}" != 1 ]]; then
-      net_state="OFF"
-      main_state="OFF"
-      [[ "${var_site_native-0}" == 1 ]] && net_state="ON"
-      [[ "${var_site_native_main-0}" == 1 ]] && main_state="ON"
-      net_choice="$(whiptail --title "Site networking" --checklist \
-        "Site networking:" 15 74 2 \
-        main "native main tunnel (kernel interface, needs TUN)" "$main_state" \
-        client "native client tunnels (kernel interface, needs TUN)" "$net_state" \
-        3>&1 1>&2 2>&3)" || return 1
-      # Only a completed checklist is shared; a cancel leaves it unasked for
-      # the next target.
-      NATIVE_PROMPTED=1
-      var_site_native=0
-      var_site_native_main=0
-      case "$net_choice" in
-      *'"client"'*) var_site_native=1 ;;
-      esac
-      case "$net_choice" in
-      *'"main"'*) var_site_native_main=1 ;;
-      esac
+    if [[ "$SLUG_MULTI" != 1 ]] && [[ "$enrolling" == 1 ]]; then
+      _prompt_site_native_checklist || return 1
     fi
   fi
   if [[ "$client" == 1 ]]; then
@@ -1215,6 +1854,62 @@ _resolve_site_answers() {
   printf '%s\n' "$site_answers"
 }
 
+# Validate the multi-site plan for one target before any change: the SSH
+# owner, the interface names (format, uniqueness, and existence on the
+# target, which runs after the container is started and before any TUN
+# change or payload run), the static site IDs, and the credential
+# completeness of every requested slug. A pair with no credentials is
+# allowed only when the target already holds a config that can serve it.
+_prepare_multi_site_target() {
+  local target="$1" reconfigure="$2"
+  local st="$SLUG_TOTAL" tt="${#TARGETS[@]}" slug owner
+  local names value ekey eid esec
+  owner="$(_site_ssh_owner "$SLUG_LIST")"
+  validate_site_ssh_owner "$owner" "$SLUG_LIST" || return 1
+  names="$(_collect_site_interfaces "$target" "$st" "$tt" "${SLUG_ARRAY[@]}")"
+  if [[ -n "$names" ]]; then
+    while IFS= read -r value; do
+      if [[ -n "$value" ]] && ! validate_interface_name "$value"; then
+        echo "Invalid native interface name: ${value//[[:cntrl:]]/} (expected 1-15 characters, starting with a letter, using letters, digits, _, -, or .)" >&2
+        return 1
+      fi
+    done <<<"$names"
+    interface_names_unique "$names" || return 1
+    validate_interface_names_on_target "$target" "$names" || return 1
+  fi
+  for slug in "${SLUG_ARRAY[@]}"; do
+    _activate_site_pair "$slug" "$target" "$st" "$tt"
+    ekey="${var_site_provisioning_key:-}"
+    eid="${var_site_id:-}"
+    esec="${var_site_secret:-}"
+    if [[ -n "$eid" ]] && [[ -z "$esec" ]] || [[ -z "$eid" ]] && [[ -n "$esec" ]]; then
+      echo "Site credentials for $slug on $target are incomplete; provide var_site_id and var_site_secret together." >&2
+      return 1
+    fi
+    if [[ -n "$eid" ]] && ! _remember_site_id "$eid"; then
+      return 1
+    fi
+    if [[ -z "$ekey" && -z "$eid" && -z "$esec" ]]; then
+      if [[ "$reconfigure" == 1 && "$slug" == default ]]; then
+        echo "Site default needs a provisioning key or a site ID and secret when reconfiguring." >&2
+        return 1
+      fi
+      if _target_site_slug_exists "$target" "$slug"; then
+        continue
+      fi
+      if [[ "$slug" == default ]]; then
+        if _target_site_verified "$target" || _target_has_legacy_site "$target"; then
+          continue
+        fi
+        msg_error "No site configuration found. Provide a provisioning key or a site ID and secret."
+        return 1
+      fi
+      echo "Site $slug needs a provisioning key or a site ID and secret." >&2
+      return 1
+    fi
+  done
+}
+
 # Throw away every private answers directory on every exit path, including the
 # copies pushed into each LXC container.
 _cleanup_answers() {
@@ -1245,15 +1940,34 @@ _remove_remote_answers() {
 }
 
 # Print the commands the operator uses to confirm and inspect the services.
+# Multi-site runs pass the verified slug list and the payload's backend so
+# the commands name the real instance unit.
 _print_next_steps() {
-  local target="$1" site="$2" client="$3" prefix=""
+  local target="$1" site="$2" client="$3" slugs="${4:-default}" backend="${5:-single}"
+  local prefix="" nslug
   if [[ "$target" != host ]]; then
     prefix="pct exec $target -- "
   fi
   if [[ "$site" == 1 ]]; then
     msg_ok "Pangolin site is installed."
-    printf '  %spangolin service status site\n' "$prefix"
-    printf '  %spangolin service logs site\n' "$prefix"
+    case "$backend" in
+    systemd)
+      for nslug in $slugs; do
+        printf '  %ssystemctl status pangolin-site@%s\n' "$prefix" "$nslug"
+        printf '  %sjournalctl -u pangolin-site@%s\n' "$prefix" "$nslug"
+      done
+      ;;
+    openrc)
+      for nslug in $slugs; do
+        printf '  %src-service pangolin-site-%s status\n' "$prefix" "$nslug"
+        printf '  %s/var/log/pangolin-site-%s.log\n' "$prefix" "$nslug"
+      done
+      ;;
+    *)
+      printf '  %spangolin service status site\n' "$prefix"
+      printf '  %spangolin service logs site\n' "$prefix"
+      ;;
+    esac
   fi
   if [[ "$client" == 1 ]]; then
     msg_ok "Pangolin client is installed."
@@ -1275,11 +1989,16 @@ _warn_provisioning_risks() {
 }
 
 # Read the payload's verified-component marker and tag an LXC target with only
-# the components that actually verified. Sets VERIFIED_SITE/VERIFIED_CLIENT.
+# the components that actually verified. Sets VERIFIED_SITE/VERIFIED_CLIENT,
+# the verified slug list, and the backend. site:<slug> markers count as the
+# site component, so any verified slug still maps to the one pangolin-site
+# tag.
 _apply_verified_tags() {
   local target="$1" answers="$2" content="" line
   VERIFIED_SITE=0
   VERIFIED_CLIENT=0
+  VERIFIED_SLUGS=""
+  VERIFIED_BACKEND="single"
   if [[ "$target" == host ]]; then
     content="$(cat "$answers/verified" 2>/dev/null || true)"
   else
@@ -1288,7 +2007,12 @@ _apply_verified_tags() {
   while IFS= read -r line; do
     case "$line" in
     site) VERIFIED_SITE=1 ;;
+    site:*)
+      VERIFIED_SITE=1
+      VERIFIED_SLUGS+="${line#site:} "
+      ;;
     client) VERIFIED_CLIENT=1 ;;
+    backend:*) VERIFIED_BACKEND="${line#backend:}" ;;
     esac
   done <<<"$content"
   if [[ "$target" != host ]] && [[ "$VERIFIED_SITE" == 1 || "$VERIFIED_CLIENT" == 1 ]]; then
@@ -1337,23 +2061,31 @@ _run_target_payload() {
   return "$rc"
 }
 
-# Print the result of every target after the loop.
+# Print the result of every target after the loop, and for a multi-site
+# target the per-slug verification status. No credentials are printed.
 _print_run_summary() {
   local i
   printf '\nPangolin addon summary\n'
   for ((i = 0; i < ${#TARGETS[@]}; i++)); do
     printf '  %s: %s\n' "${TARGETS[i]}" "${TARGET_STATUS[i]:-failed}"
+    if [[ -n "${TARGET_SLUG_STATUS[i]:-}" ]]; then
+      printf '%s\n' "${TARGET_SLUG_STATUS[i]}"
+    fi
   done
 }
 
 # Install one target from the shared selections. Returns non-zero for that
 # target only; the caller continues with the rest. Credentials for the target
 # come from the per-target arrays, except in interactive mode where the prompts
-# fill them for this target.
+# fill them for this target. A multi-site target resolves its credentials per
+# (slug,target) pair, and one convert_site_layout call in the payload installs
+# every requested slug.
 _install_target() {
   local target="$1" index="$2" site="$3" client="$4" shared_reconfigure="$5"
   local reconfigure="${TARGET_RECONFIGURE[index]:-$shared_reconfigure}"
   local site_answers=0 need_tun=0 payload_rc=0 name="" answers=""
+  local multi=0 st=1 tt="${#TARGETS[@]}" ep disable_ssh
+  local prov_warned=0
 
   if _is_noninteractive; then
     _activate_target_credentials "$index"
@@ -1367,6 +2099,8 @@ _install_target() {
   fi
   VERIFIED_SITE=0
   VERIFIED_CLIENT=0
+  VERIFIED_SLUGS=""
+  VERIFIED_BACKEND="single"
 
   if [[ "$target" != host ]]; then
     if ! _ensure_lxc_running "$target"; then
@@ -1388,13 +2122,30 @@ _install_target() {
   fi
 
   _validate_plan "$site" "$client" "$reconfigure" || return 1
-  _warn_provisioning_risks "$reconfigure" "$site"
 
   if [[ "$site" == 1 ]]; then
-    site_answers="$(_resolve_site_answers "$target" "$reconfigure")" || return 1
-    if ! _native_config_possible "$target" "$site_answers"; then
-      msg_error "Native site interfaces are enabled but the existing site configuration does not match; set var_reconfigure=1 to apply them."
-      return 1
+    _resolve_target_slug_plan "$target" || return 1
+    st="$SLUG_TOTAL"
+    multi="$SLUG_MULTI"
+    if [[ "$multi" == 0 ]]; then
+      # A converted or interrupted target must use the per-slug layout even
+      # with a single default slug. The probe is read-only.
+      if [[ "$(_target_site_layout "$target")" != single ]]; then
+        multi=1
+      fi
+    fi
+    TARGET_MULTI[index]="$multi"
+    TARGET_SLUGS[index]="${SLUG_ARRAY[*]}"
+    if [[ "$multi" == 1 ]]; then
+      _prepare_multi_site_target "$target" "$reconfigure" || return 1
+      site_answers=1
+    else
+      _warn_provisioning_risks "$reconfigure" "$site"
+      site_answers="$(_resolve_site_answers "$target" "$reconfigure")" || return 1
+      if ! _native_config_possible "$target" "$site_answers"; then
+        msg_error "Native site interfaces are enabled but the existing site configuration does not match; set var_reconfigure=1 to apply them."
+        return 1
+      fi
     fi
   fi
 
@@ -1426,11 +2177,61 @@ _install_target() {
     REMOTE_TARGETS+=("$target")
   fi
 
-  write_private_file "$answers/flags" \
-    "$(printf 'SITE=%s\nCLIENT=%s\nRECONFIGURE=%s\nTARGET=%s' \
-      "$site" "$client" "$reconfigure" "$target")" || return 1
+  local flag_lines
+  flag_lines="$(printf 'SITE=%s\nCLIENT=%s\nRECONFIGURE=%s\nTARGET=%s' \
+    "$site" "$client" "$reconfigure" "$target")"
+  if [[ "$site" == 1 ]]; then
+    if [[ "$multi" == 1 ]]; then
+      flag_lines+="$(printf '\nSITE_SLUGS=%s\nSSH_OWNER=%s\nMULTI_SITE=1' \
+        "${SLUG_ARRAY[*]}" "$(_site_ssh_owner "$SLUG_LIST")")"
+    else
+      flag_lines+=$'\nMULTI_SITE=0'
+    fi
+  fi
+  write_private_file "$answers/flags" "$flag_lines" || return 1
 
-  if [[ "$site" == 1 && "$site_answers" == 1 ]]; then
+  if [[ "$site" == 1 && "$multi" == 1 ]]; then
+    local slug
+    for slug in "${SLUG_ARRAY[@]}"; do
+      _activate_site_pair "$slug" "$target" "$st" "$tt"
+      if [[ -z "${var_site_provisioning_key:-}" ]] &&
+        { [[ -z "${var_site_id:-}" ]] || [[ -z "${var_site_secret:-}" ]]; }; then
+        continue # the target already holds this slug's config
+      fi
+      ep="$(_site_pair_endpoint "$slug" "$target" "$st" "$tt")"
+      if site_ssh_disabled "$(_site_ssh_owner "$SLUG_LIST")" "$slug"; then
+        disable_ssh=1
+      else
+        disable_ssh=0
+      fi
+      local iface imain
+      iface="$(_site_pair_interface "$slug" "$target" "$st" "$tt" client)"
+      imain="$(_site_pair_interface "$slug" "$target" "$st" "$tt" main)"
+      if [[ -n "${var_site_provisioning_key:-}" ]]; then
+        if ((prov_warned == 0)); then
+          _warn_provisioning_risks "$reconfigure" 1
+          prov_warned=1
+        fi
+        name="${var_site_name:-}"
+        if [[ -z "$name" ]]; then
+          name="$(_default_provisioning_site_name "$target" "$slug")"
+        fi
+        if ! validate_site_name "$name"; then
+          msg_error "Invalid site name; expected 1-63 characters with no control characters."
+          return 1
+        fi
+        build_site_answers_to_path "$answers/sites/$slug.json" "$ep" \
+          "${var_site_provisioning_key}" "$name" - - \
+          "$var_site_native" "$var_site_native_main" "$iface" "$imain" \
+          "$disable_ssh" || return 1
+      else
+        build_site_answers_to_path "$answers/sites/$slug.json" "$ep" - - \
+          "${var_site_id}" "${var_site_secret}" \
+          "$var_site_native" "$var_site_native_main" "$iface" "$imain" \
+          "$disable_ssh" || return 1
+      fi
+    done
+  elif [[ "$site" == 1 && "$site_answers" == 1 ]]; then
     if [[ -n "${var_site_provisioning_key:-}" ]]; then
       name="${var_site_name:-}"
       if [[ -z "$name" ]]; then
@@ -1452,6 +2253,10 @@ _install_target() {
     fi
   fi
   if [[ "$client" == 1 ]]; then
+    if ! _remember_client_id "${var_client_id:-}"; then
+      msg_error "The machine client ID is already used by another target in this run."
+      return 1
+    fi
     build_client_answers "$answers" "$var_pangolin_endpoint" \
       "$var_client_id" "$var_client_secret" || return 1
   fi
@@ -1463,9 +2268,21 @@ _install_target() {
   # behind, and that must not mark the target as installed.
   if ((payload_rc == 0)); then
     _apply_verified_tags "$target" "$answers"
+    if [[ "$multi" == 1 && "$site" == 1 ]]; then
+      local vslug vstatus entries=""
+      for vslug in "${SLUG_ARRAY[@]}"; do
+        vstatus=failed
+        if [[ " $VERIFIED_SLUGS " == *" $vslug "* ]]; then
+          vstatus=verified
+        fi
+        entries+="  site $vslug: $vstatus"$'\n'
+      done
+      TARGET_SLUG_STATUS[index]="${entries%$'\n'}"
+    fi
   else
     VERIFIED_SITE=0
     VERIFIED_CLIENT=0
+    VERIFIED_SLUGS=""
   fi
   # The remote copy is no longer needed once the marker is read.
   _remove_remote_answers "$target"
@@ -1478,7 +2295,12 @@ _install_target() {
     VERIFIED_SITE="$site"
     VERIFIED_CLIENT="$client"
   fi
-  _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT"
+  if [[ "$multi" == 1 && "$VERIFIED_SITE" == 1 && -n "$VERIFIED_SLUGS" ]]; then
+    _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT" \
+      "$VERIFIED_SLUGS" "$VERIFIED_BACKEND"
+  else
+    _print_next_steps "$target" "$VERIFIED_SITE" "$VERIFIED_CLIENT"
+  fi
   return 0
 }
 
@@ -1489,6 +2311,12 @@ main() {
   # Disable the trace before target resolution or credential loading.
   set +x
   local mode="" target="" site=0 client=0 reconfigure=0
+  # Capture the raw operator interface overrides before _resolve_site_native
+  # fills in the pangolin defaults, so _site_pair_interface can tell an unset
+  # shared interface from an explicit one and fall back to the per-slug name.
+  local SITE_INTERFACE_RAW="${var_site_interface:-}"
+  local SITE_INTERFACE_MAIN_RAW="${var_site_interface_main:-}"
+  SITE_INTERFACE_CAPTURED=1
   local var_site_native="${var_site_native-0}"
   local var_site_native_main="${var_site_native_main-0}"
   local var_site_interface="${var_site_interface-pangolin}"
@@ -1500,6 +2328,14 @@ main() {
   REMOTE_TARGET=""
   WORK_DIR=""
   NATIVE_PROMPTED=0
+  SITES_PROMPTED=0
+  SITE_OWNER_PROMPTED=0
+  SEEN_SITE_IDS=$'\n'
+  SEEN_CLIENT_IDS=$'\n'
+  SITE_PAIR_ID=()
+  SITE_PAIR_SECRET=()
+  SITE_PAIR_KEY=()
+  SITE_PAIR_NAME=()
   TARGETS=()
   TARGET_ANSWERS=()
   REMOTE_TARGETS=()
@@ -1511,6 +2347,9 @@ main() {
   TARGET_SITE_NAME=()
   TARGET_CLIENT_ID=()
   TARGET_CLIENT_SECRET=()
+  TARGET_SLUGS=()
+  TARGET_MULTI=()
+  TARGET_SLUG_STATUS=()
 
   PANGOLIN_DRY_RUN="${PANGOLIN_DRY_RUN:-0}"
   # A non-1 value must never turn a requested dry run into a live install.
@@ -1568,13 +2407,26 @@ main() {
     done
   fi
 
+  # Pre-change validation for the site plan. Slugs, SSH owner, interface
+  # overrides, and static IDs are all provable from the environment before any
+  # target is opened, so a duplicate or collision fails here with zero side
+  # effects. The dry run additionally requires credentials for every slug
+  # because it never probes a target.
+  if [[ "$site" == 1 ]]; then
+    _validate_site_plan "$PANGOLIN_DRY_RUN" || return 1
+  fi
+  if [[ "$client" == 1 ]]; then
+    _validate_client_plan || return 1
+  fi
+
   if [[ "$PANGOLIN_DRY_RUN" == 1 ]]; then
     printf 'Pangolin addon dry run\n'
     printf 'Selected targets: %s\n' "$total"
     for ((i = 0; i < total; i++)); do
       _activate_target_credentials "$i"
       _validate_plan "$site" "$client" "$reconfigure" || return 1
-      _print_dry_run "$mode" "${TARGETS[i]}" "$site" "$client" "$reconfigure"
+      _print_dry_run "$mode" "${TARGETS[i]}" "$site" "$client" "$reconfigure" \
+        "${TARGET_SLUGS[i]:-default}" "${TARGET_MULTI[i]:-0}"
       printf '\n'
     done
     return 0

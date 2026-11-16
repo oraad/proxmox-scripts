@@ -174,9 +174,25 @@ site_config_dir() {
   p /etc/pangolin/sites
 }
 
-# Print the configuration path for one validated slug, mode 0600 when written.
+# Succeed when the argument is a valid local site slug: 1-10 characters,
+# a lowercase letter first, lowercase letters, digits, and inner hyphens.
+# Payload callers validate through this before any path or unit name is
+# built, so traversal and slash-bearing input can never reach a file
+# operation.
+_is_site_slug() {
+  local slug="${1:-}"
+  [[ "$slug" =~ ^[a-z]([a-z0-9-]{0,8}[a-z0-9])?$ ]]
+}
+
+# Print the configuration path for one validated slug, mode 0600 when
+# written. An invalid slug fails before any path is produced.
 site_config_path() {
-  p "/etc/pangolin/sites/$1.json"
+  local slug="${1:-}"
+  if ! _is_site_slug "$slug"; then
+    echo "site_config_path: invalid site slug: ${slug//[[:cntrl:]]/}" >&2
+    return 1
+  fi
+  p "/etc/pangolin/sites/$slug.json"
 }
 
 # Print the default native interface name for a validated slug. The prefixes
@@ -1158,13 +1174,19 @@ remove_site_openrc_slug() {
 # Remove one site instance for the given backend: stopped, disabled, and
 # unlinked; on OpenRC also its unit, wrapper, and log. A systemd instance has
 # no per-instance files (the template unit is shared), so only the enablement
-# is removed. Configs and the shared logrotate file are preserved.
+# is removed. Configs and the shared logrotate file are preserved. The slug is
+# validated before any service-manager call so an empty, traversal, or
+# slash-bearing name cannot reach systemctl or rc-service.
 uninstall_site_slug() {
   local backend="${1:-}" slug="${2:-}"
   [[ -n "$slug" ]] || {
     echo "uninstall_site_slug: a slug is required" >&2
     return 1
   }
+  if ! _is_site_slug "$slug"; then
+    echo "uninstall_site_slug: invalid site slug: ${slug//[[:cntrl:]]/}" >&2
+    return 1
+  fi
   case "$backend" in
   systemd) remove_site_systemd_slug "$slug" ;;
   openrc) remove_site_openrc_slug "$slug" ;;
@@ -1686,21 +1708,31 @@ site_conversion_state() {
   fi
 }
 
+# Print 1 for the accepted true spellings (1, true, yes) and 0 otherwise, so
+# every multi-site boolean is normalized before it reaches the payload.
+_normalize_bool() {
+  case "${1:-}" in
+  1 | true | yes) printf '1' ;;
+  *) printf '0' ;;
+  esac
+}
+
 # Succeed when the operator requested the multi-site layout: a MULTI_SITE
 # entry in the flags file given as argument 1 wins when present; otherwise the
-# MULTI_SITE or var_multi_sites environment variables apply. The entry point
+# MULTI_SITE or var_multi_sites environment variables apply. Every spelling is
+# normalized through _normalize_bool, so true and yes mean 1. The entry point
 # owns these flags; the payload only reads them.
 multi_site_requested() {
   local flags="${1:-}" value
   if [[ -n "$flags" && -f "$flags" ]]; then
     value="$(_env_value "$flags" MULTI_SITE || true)"
     if [[ -n "$value" ]]; then
-      [[ "$value" == 1 ]] && return 0
+      [[ "$(_normalize_bool "$value")" == 1 ]] && return 0
       return 1
     fi
   fi
-  [[ "${MULTI_SITE:-}" == 1 ]] && return 0
-  [[ "${var_multi_sites:-}" == 1 ]] && return 0
+  [[ "$(_normalize_bool "${MULTI_SITE:-}")" == 1 ]] && return 0
+  [[ "$(_normalize_bool "${var_multi_sites:-}")" == 1 ]] && return 0
   return 1
 }
 
@@ -1969,7 +2001,7 @@ convert_site_layout() {
 # no --perms option, so a failed push is retried without it and the mode is
 # applied with chmod inside the container. File contents never enter argv.
 push_payload() {
-  local ctid="${1:-}" payload="${2:-}" answers="${3:-}" file base remote
+  local ctid="${1:-}" payload="${2:-}" answers="${3:-}" file base remote subdir sbase
   if [[ -z "$ctid" || ! -f "$payload" || ! -d "$answers" ]]; then
     echo "push_payload: expected a CTID, a payload file, and an answers directory" >&2
     return 1
@@ -1981,10 +2013,28 @@ push_payload() {
     pct push "$ctid" "$payload" "$remote/payload.sh" || return 1
     pct exec "$ctid" -- chmod 700 "$remote/payload.sh" || return 1
   fi
+  # Multi-site runs add a sites/ subdirectory of per-slug configs. It is a
+  # second-level directory, so push the directory itself with a private mode
+  # and push each slug config into it with mode 600.
+  if [[ -d "$answers/sites" ]]; then
+    if ! pct exec "$ctid" -- sh -c \
+      'mkdir -p /root/.pangolin-addon/sites && chmod 700 /root/.pangolin-addon/sites'; then
+      return 1
+    fi
+    for subdir in "$answers/sites"/*; do
+      [[ -f "$subdir" ]] || continue
+      sbase="$(basename "$subdir")"
+      if ! pct push "$ctid" "$subdir" "$remote/sites/$sbase" --perms 600; then
+        pct push "$ctid" "$subdir" "$remote/sites/$sbase" || return 1
+        pct exec "$ctid" -- chmod 600 "$remote/sites/$sbase" || return 1
+      fi
+    done
+  fi
   for file in "$answers"/*; do
     [[ -f "$file" ]] || continue
     base="$(basename "$file")"
     [[ "$base" == payload.sh ]] && continue
+    [[ "$base" == sites ]] && continue
     if ! pct push "$ctid" "$file" "$remote/$base" --perms 600; then
       pct push "$ctid" "$file" "$remote/$base" || return 1
       pct exec "$ctid" -- chmod 600 "$remote/$base" || return 1
@@ -2249,11 +2299,99 @@ _print_service_log_hint() {
   echo "Or run: pangolin service logs $component" >&2
 }
 
+# Succeed when the slug's site instance is active and its configuration
+# holds real credentials rather than a pending provisioning key. Read-only:
+# it queries the service manager and the config file only.
+_site_slug_verified() {
+  local backend="$1" slug="${2:-}" cfg
+  cfg="$(site_config_path "$slug" 2>/dev/null)" || return 1
+  [[ -f "$cfg" ]] || return 1
+  case "$backend" in
+  systemd) site_instance_was_active "$slug" >/dev/null 2>&1 || return 1 ;;
+  openrc) site_instance_was_active_openrc "$slug" >/dev/null 2>&1 || return 1 ;;
+  *) return 1 ;;
+  esac
+  if grep -q '"provisioningKey"[[:space:]]*:' "$cfg" 2>/dev/null; then
+    return 1
+  fi
+  site_config_has_credentials "$cfg"
+}
+
+# Install every requested slug from the answers directory in one pass. The
+# answers dir holds sites/<slug>.json; each supplied config is installed
+# authoritatively (mode 0600) so a rerun with new credentials replaces the
+# per-slug file before conversion. convert_site_layout then installs and
+# verifies the default and each extra slug independently, removing any
+# instance that fails while leaving the verified ones running.
+_install_site_multi() {
+  local backend="$1" answers="$2" flags="$3" verified_file="$4" rc=0
+  local raw slug cfg src installed=0 verified
+  local -a slugs=()
+  raw="$(_env_value "$flags" SITE_SLUGS || true)"
+  read -r -a slugs <<<"$raw"
+  if ((${#slugs[@]} == 0)); then
+    slugs=(default)
+  fi
+  # SSH_OWNER is parsed for the log contract; the entry has already baked it
+  # into each slug's config as the disableSsh key. Echoing the owner label is
+  # safe: it is a site slug, never a credential.
+  local ssh_owner
+  ssh_owner="$(_env_value "$flags" SSH_OWNER || true)"
+  if [[ -n "$ssh_owner" && "$ssh_owner" =~ ^[a-z]([a-z0-9-]{0,8}[a-z0-9])?$|^(default|none)$ ]]; then
+    echo "Site SSH owner: $ssh_owner"
+  fi
+  if [[ -d "$answers/sites" ]]; then
+    if ! install -d -m 0700 "$(site_config_dir)"; then
+      echo "Failed to create $(site_config_dir)." >&2
+      return 1
+    fi
+    for slug in "${slugs[@]}"; do
+      if ! cfg="$(site_config_path "$slug")"; then
+        rc=1
+        continue
+      fi
+      src="$answers/sites/$slug.json"
+      [[ -f "$src" ]] || continue
+      if ! install -m 0600 "$src" "$cfg"; then
+        echo "Failed to install $cfg." >&2
+        rc=1
+      fi
+    done
+  fi
+  if ((rc == 0)) && ! convert_site_layout "$backend" "$flags" "${slugs[@]}"; then
+    rc=1
+  fi
+  _record_verified "$verified_file" "backend:$backend" || rc=1
+  for slug in "${slugs[@]}"; do
+    verified=0
+    if _site_slug_verified "$backend" "$slug"; then
+      verified=1
+      installed=$((installed + 1))
+      _record_verified "$verified_file" "site:$slug" || rc=1
+      if [[ "$slug" == default ]]; then
+        _record_verified "$verified_file" site || rc=1
+      fi
+    fi
+    if ((verified == 0)); then
+      echo "The pangolin-site instance for $slug did not verify." >&2
+      rc=1
+    fi
+  done
+  if ((installed > 0)); then
+    cleanup_legacy_newt || {
+      echo "The site instances are verified, but legacy Newt cleanup failed." >&2
+      rc=1
+    }
+  fi
+  return "$rc"
+}
+
 # Install the selected components from a private answers directory. Components
 # are independent: a verified component stays installed when the other fails,
 # and the failed component is stopped without touching the earlier one.
 payload_main() {
   local answers="${1:-}" flags verified_file backend site client reconfigure rc=0 site_verified=0
+  local target multi_site=0
   if [[ -z "$answers" || ! -d "$answers" ]]; then
     echo "payload_main: an answers directory is required" >&2
     return 1
@@ -2266,6 +2404,9 @@ payload_main() {
   site="$(_env_value "$flags" SITE || true)"
   client="$(_env_value "$flags" CLIENT || true)"
   reconfigure="$(_env_value "$flags" RECONFIGURE || true)"
+  # The entry records its selected target for diagnostics; the payload only
+  # reads it, and never echoes unvalidated flag content into a log line.
+  target="$(_env_value "$flags" TARGET || true)"
   if [[ "$site" != 0 && "$site" != 1 ]] || [[ "$client" != 0 && "$client" != 1 ]]; then
     echo "payload_main: flags must set SITE and CLIENT to 0 or 1" >&2
     return 1
@@ -2276,6 +2417,9 @@ payload_main() {
   fi
   if [[ "$reconfigure" != 1 ]]; then
     reconfigure=0
+  fi
+  if [[ "$site" == 1 ]] && multi_site_requested "$flags"; then
+    multi_site=1
   fi
 
   # Record only the components that verify, so a partial run can still tag the
@@ -2307,7 +2451,12 @@ payload_main() {
   fi
 
   if [[ "$site" == 1 ]]; then
-    if ! _backup_install_paths "$backend" site; then
+    if [[ "$multi_site" == 1 ]]; then
+      # Multi-slug path: one convert_site_layout call installs every
+      # requested slug. Instances that fail are removed there while the
+      # verified ones keep running; this run still ends non-zero.
+      _install_site_multi "$backend" "$answers" "$flags" "$verified_file" || rc=1
+    elif ! _backup_install_paths "$backend" site; then
       echo "Failed to back up the existing site unit; refusing to replace it." >&2
       rc=1
     elif _install_site_component "$backend" "$answers" "$reconfigure" "$site_verified"; then

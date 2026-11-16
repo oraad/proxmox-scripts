@@ -2170,3 +2170,273 @@ export LEGACY_ENDPOINT="$old_newt_endpoint"
 unset PANGOLIN_SERVICE_ATTEMPTS PANGOLIN_SERVICE_DELAY
 
 echo "Multi-site Task 5 tests passed"
+
+# ---------------------------------------------------------------------------
+# Multi-site Task 6: payload multi-slug loop, flags parsing, and carry-forward
+# hardening. The fakes reuse the Task 5 service-manager logs so the loop runs
+# hermetically under PANGOLIN_ROOT.
+# ---------------------------------------------------------------------------
+t6="$(mktemp -d)"
+mkdir -p "$t6/bin"
+cat >"$t6/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$FAKE_LOG"
+if [[ "$1" == "is-active" ]]; then
+  unit="${*: -1}"
+  [[ -z "${FAKE_INACTIVE_UNIT:-}" || "$unit" != "$FAKE_INACTIVE_UNIT" ]] || exit 3
+  [[ "${FAKE_INACTIVE:-0}" != "1" ]] || exit 3
+fi
+if [[ "$1" == "disable" && "${FAKE_FAIL_UNIT:-}" == "${*: -1}" ]]; then exit 1; fi
+exit 0
+EOF
+cat >"$t6/bin/pct" <<'EOF'
+#!/usr/bin/env bash
+echo "pct $*" >>"$FAKE_LOG"
+[[ "${1:-}" == exec || "${1:-}" == push ]] || exit 1
+exit 0
+EOF
+printf '#!/usr/bin/env bash\nexit 0\n' >"$t6/bin/pangolin"
+chmod 755 "$t6"/bin/*
+
+t6_reset() {
+  rm -rf "$t6/root" "$t6/answers"
+  mkdir -p "$t6/root/etc/systemd/system/multi-user.target.wants" "$t6/root/etc/pangolin" \
+    "$t6/root/var/lib/pangolin" "$t6/root/var/log" "$t6/root/usr/local/bin" \
+    "$t6/answers/sites"
+  printf '#!/bin/sh\nexit 0\n' >"$t6/root/usr/local/bin/pangolin"
+  chmod 755 "$t6/root/usr/local/bin/pangolin"
+}
+t6_flags() { # extra flag lines already embedded in the string
+  printf 'SITE=1\nCLIENT=0\nRECONFIGURE=0\nTARGET=host\n%s\n' "$1" >"$t6/answers/flags"
+}
+t6_cfg_d="$(site_config_static "https://p.example" idD secD)"
+t6_cfg_b="$(site_config_static "https://p.example" idB secB 0 0 pangorgb pangmorgb 1)"
+t6_write_answers() {
+  write_private_file "$t6/answers/sites/default.json" "$t6_cfg_d" || exit 1
+  write_private_file "$t6/answers/sites/orgb.json" "$t6_cfg_b" || exit 1
+}
+t6_run_main() { # $1: output file; rc propagates
+  (
+    install_cli_binary() { :; }
+    service_backend() { echo systemd; }
+    migrate_existing_addon() { :; }
+    migrate_legacy_newt() { :; }
+    payload_main "$t6/answers" >"$1" 2>&1
+  )
+}
+
+t6_old_path="$PATH"
+t6_old_root="$PANGOLIN_ROOT"
+t6_old_bin="$PANGOLIN_BIN"
+t6_old_log="${FAKE_LOG:-}"
+t6_old_newt_id="$LEGACY_NEWT_ID"
+t6_old_newt_secret="$LEGACY_NEWT_SECRET"
+t6_old_newt_endpoint="$LEGACY_ENDPOINT"
+export PATH="$t6/bin:$PATH"
+export PANGOLIN_ROOT="$t6/root"
+export PANGOLIN_BIN="$t6/root/usr/local/bin/pangolin"
+export PANGOLIN_SERVICE_ATTEMPTS=1
+export PANGOLIN_SERVICE_DELAY=0
+export FAKE_LOG="$t6/log"
+# The multi-slug loop tests are hermetic: no inherited Newt credentials may
+# silently satisfy the default import.
+export LEGACY_NEWT_ID=""
+export LEGACY_NEWT_SECRET=""
+export LEGACY_ENDPOINT=""
+
+# (T6-1) MULTI_SITE=true/yes normalization in the flags file and env.
+printf 'MULTI_SITE=true\n' >"$t6/flags-true"
+printf 'MULTI_SITE=yes\n' >"$t6/flags-yes"
+printf 'MULTI_SITE=TRUE\n' >"$t6/flags-TRUE"
+multi_site_requested "$t6/flags-true" || fail "MULTI_SITE=true should request multi-site"
+multi_site_requested "$t6/flags-yes" || fail "MULTI_SITE=yes should request multi-site"
+if multi_site_requested "$t6/flags-TRUE"; then
+  fail "MULTI_SITE=TRUE must be normalized by the entry before writing flags"
+fi
+if (unset MULTI_SITE var_multi_sites; multi_site_requested "$t6/flags-off-missing"); then
+  fail "a missing flags file with no env must not request"
+fi
+
+# (T6-2) The multi-slug loop installs every answers config, converts once, and
+# records exact site:<slug> markers plus the legacy site marker for default.
+t6_reset
+t6_write_answers
+t6_flags 'SITE_SLUGS=default orgb
+SSH_OWNER=orgb
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-2 multi-slug run should succeed: $(cat "$t6/out")"; }
+grep -qx 'site:default' "$t6/answers/verified" || fail "T6-2 site:default marker missing"
+grep -qx 'site:orgb' "$t6/answers/verified" || fail "T6-2 site:orgb marker missing"
+grep -qx 'site' "$t6/answers/verified" || fail "T6-2 legacy site marker missing for default"
+grep -qx 'backend:systemd' "$t6/answers/verified" || fail "T6-2 backend marker missing"
+[[ -f "$(site_config_path default)" ]] || fail "T6-2 sites/default.json must be installed"
+cmp -s "$t6/answers/sites/orgb.json" "$(site_config_path orgb)" ||
+  fail "T6-2 the answers config must be installed byte-for-byte"
+assert_eq "600" "$(stat -c '%a' "$(site_config_path orgb)")"
+[[ -f "$(site_config_path default)" ]] || fail "T6-2 default config missing"
+grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
+  fail "T6-2 the default instance must start"
+grep -q '^systemctl enable --now pangolin-site@orgb$' "$FAKE_LOG" ||
+  fail "T6-2 the extra instance must start"
+assert_eq "template" "$(cat "$t6/root/var/lib/pangolin/site-layout")"
+if grep -q 'pangolin service install' "$FAKE_LOG"; then
+  fail "T6-2 the multi path must not run the legacy single-site install"
+fi
+
+# (T6-3) One failing extra slug: the other stays verified, the failed slug is
+# disabled and removed, the run fails, and no site:orgb marker appears.
+t6_reset
+t6_write_answers
+t6_flags 'SITE_SLUGS=default orgb
+SSH_OWNER=orgb
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+FAKE_INACTIVE_UNIT='pangolin-site@orgb' t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -ne 0 ]] || fail "T6-3 a failing slug must fail the run"
+grep -qx 'site:default' "$t6/answers/verified" || fail "T6-3 default stays verified"
+grep -qx 'site' "$t6/answers/verified" || fail "T6-3 legacy marker stays for default"
+if grep -qx 'site:orgb' "$t6/answers/verified"; then
+  fail "T6-3 a failed slug must not be recorded verified"
+fi
+grep -q '^systemctl disable pangolin-site@orgb$' "$FAKE_LOG" ||
+  fail "T6-3 the failed slug instance must be disabled and removed"
+if grep -qE '^systemctl (stop|disable) pangolin-site@default$' "$FAKE_LOG"; then
+  fail "T6-3 the verified default must keep running"
+fi
+
+# (T6-4) A nondefault-only slug list records only site:<slug>; the default
+# config imports from the legacy site.json.
+t6_reset
+write_private_file "$t6/root/etc/pangolin/site.json" "$t6_cfg_d"
+write_private_file "$t6/answers/sites/orga.json" \
+  "$(site_config_static "https://p.example" idA secA 0 0 pangorga pangmorga 1)"
+t6_flags 'SITE_SLUGS=orga
+SSH_OWNER=orga
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-4 single nondefault slug should succeed: $(cat "$t6/out")"; }
+grep -qx 'site:orga' "$t6/answers/verified" || fail "T6-4 site:orga marker missing"
+if grep -qx 'site:default' "$t6/answers/verified"; then
+  fail "T6-4 only requested slugs may be marked"
+fi
+grep -q '^systemctl enable --now pangolin-site@orga$' "$FAKE_LOG" ||
+  fail "T6-4 the requested slug must start"
+
+# (T6-5) MULTI_SITE=1 with no configs and no legacy site.json fails cleanly
+# before any service change.
+t6_reset
+t6_flags 'SITE_SLUGS=default orgb
+SSH_OWNER=default
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -ne 0 ]] || fail "T6-5 no configs must fail"
+if grep -qx 'site:default' "$t6/answers/verified" || grep -qx 'site' "$t6/answers/verified"; then
+  fail "T6-5 nothing may be marked verified"
+fi
+if grep -q 'enable --now' "$FAKE_LOG"; then
+  fail "T6-5 a host with no configs must not start instances"
+fi
+unset FAKE_INACTIVE_UNIT
+
+# (T6-6) Answers configs win over an existing per-slug config: a rerun with
+# new default credentials replaces the file before conversion.
+t6_reset
+mkdir -p "$(site_config_dir)"
+write_private_file "$(site_config_path default)" "SENTINEL-OLD"
+t6_write_answers
+t6_flags 'SITE_SLUGS=default orgb
+SSH_OWNER=default
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-6 rerun should succeed: $(cat "$t6/out")"; }
+grep -q '"id":"idD"' "$(site_config_path default)" ||
+  fail "T6-6 answers must replace the existing per-slug config"
+
+# (T6-7) MULTI_SITE=0 keeps the legacy single-site path unchanged.
+t6_reset
+t6_flags 'MULTI_SITE=0'
+write_private_file "$t6/answers/site.json" "$t6_cfg_d"
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-7 legacy path should succeed: $(cat "$t6/out")"; }
+grep -qx 'site' "$t6/answers/verified" || fail "T6-7 legacy marker missing"
+if grep -qx 'site:default' "$t6/answers/verified"; then
+  fail "T6-7 the legacy path must not write slug markers"
+fi
+if [[ -e "$t6/root/etc/pangolin/sites" ]]; then
+  fail "T6-7 the legacy path must not create the sites directory"
+fi
+
+# (T6-8) push_payload also ships the sites/ subdirectory with mode 600 and
+# creates the remote directory first.
+t6_reset
+t6_write_answers
+printf 'flags\n' >"$t6/answers/flags"
+printf '#!/bin/sh\n' >"$t6/payload.sh"
+: >"$FAKE_LOG"
+push_payload 101 "$t6/payload.sh" "$t6/answers" || fail "T6-8 push should succeed"
+grep -q 'pct exec 101 -- sh -c mkdir -p /root/.pangolin-addon/sites' "$FAKE_LOG" ||
+  fail "T6-8 the remote sites directory must be created"
+grep -q 'pct push 101 .*sites/orgb.json /root/.pangolin-addon/sites/orgb.json --perms 600' \
+  "$FAKE_LOG" || fail "T6-8 the slug config must be pushed with mode 600"
+grep -q 'pct push 101 .*flags /root/.pangolin-addon/flags --perms 600' "$FAKE_LOG" ||
+  fail "T6-8 top-level answers files must keep the existing push path"
+
+# (T6-9) Carry-forward: site_config_path validates the slug before printing
+# any path.
+for bad in '' 'a/b' '../x' 'org/../evil' 'A' 'host/../host' "$(printf 'a\tb')"; do
+  if site_config_path "$bad" >/dev/null 2>&1; then
+    fail "site_config_path [$bad] should fail"
+  fi
+done
+assert_eq "$t6/root/etc/pangolin/sites/default.json" "$(site_config_path default)"
+assert_eq "$t6/root/etc/pangolin/sites/org-a.json" "$(site_config_path org-a)"
+
+# (T6-10) Carry-forward: uninstall_site_slug validates the slug before it
+# touches the service manager.
+printf '[Unit]\n' >"$t6/root/etc/systemd/system/pangolin-site@.service"
+for bad in '' '../x' 'a/b' 'Org'; do
+  : >"$FAKE_LOG"
+  if uninstall_site_slug systemd "$bad" >/dev/null 2>&1; then
+    fail "uninstall_site_slug [$bad] should fail"
+  fi
+  [[ ! -s "$FAKE_LOG" ]] || fail "an invalid slug must not touch the service manager"
+done
+: >"$FAKE_LOG"
+uninstall_site_slug systemd org-a || fail "a valid slug should uninstall"
+grep -q '^systemctl disable pangolin-site@org-a$' "$FAKE_LOG" ||
+  fail "the valid slug uninstall must run"
+
+# (T6-11) MULTI_SITE=true in the flags file selects the multi path even
+# without SITE_SLUGS (default only).
+t6_reset
+t6_write_answers
+t6_flags 'SITE_SLUGS=default
+MULTI_SITE=true'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-11 MULTI_SITE=true should run the multi path: $(cat "$t6/out")"; }
+grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
+  fail "T6-11 MULTI_SITE=true must convert"
+
+unset FAKE_LOG
+export PATH="$t6_old_path"
+export PANGOLIN_ROOT="$t6_old_root"
+export PANGOLIN_BIN="$t6_old_bin"
+if [[ -n "$t6_old_log" ]]; then export FAKE_LOG="$t6_old_log"; else unset FAKE_LOG; fi
+unset PANGOLIN_SERVICE_ATTEMPTS PANGOLIN_SERVICE_DELAY
+rm -rf "$t6"
+
+echo "Multi-site Task 6 tests passed"
