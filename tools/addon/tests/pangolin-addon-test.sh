@@ -985,3 +985,220 @@ assert_eq "14" "$(printf '%s' "$(default_site_interface abcdefghij)" | wc -c)"
 assert_eq "15" "$(printf '%s' "$(default_site_interface_main abcdefghij)" | wc -c)"
 
 echo "Multi-site Task 2 tests passed"
+
+# Multi-site Task 3: systemd template backend. The fake systemctl logs every
+# call; FAKE_INACTIVE fails all is-active checks and FAKE_INACTIVE_UNIT fails
+# only the named unit.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin" "$tmpd/root/etc/systemd/system"
+cat >"$tmpd/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$FAKE_LOG"
+if [[ "$1" == "is-active" ]]; then
+  unit="${*: -1}"
+  [[ -z "${FAKE_INACTIVE_UNIT:-}" || "$unit" != "$FAKE_INACTIVE_UNIT" ]] || exit 3
+  [[ "${FAKE_INACTIVE:-0}" != "1" ]] || exit 3
+fi
+exit 0
+EOF
+chmod 755 "$tmpd/bin/systemctl"
+
+old_path="$PATH"
+old_pangolin_root="$PANGOLIN_ROOT"
+old_pangolin_bin="$PANGOLIN_BIN"
+old_fake_log="${FAKE_LOG:-}"
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_ROOT="$tmpd/root"
+export PANGOLIN_BIN="$tmpd/root/usr/local/bin/pangolin"
+# Test-only wait overrides; the production policy stays 30x1s (probed below).
+export PANGOLIN_SERVICE_ATTEMPTS=1
+export PANGOLIN_SERVICE_DELAY=0
+
+# (2) Slug-specific instance names.
+assert_eq "pangolin-site@orga" "$(site_systemd_instance orga)"
+assert_eq "pangolin-site@org-a" "$(site_systemd_instance org-a)"
+
+# (1, 3) Template exact lines, literal %i config path, 0644 unit, 0700 sites
+# directory, and a daemon-reload.
+write_site_systemd_template || fail "template write should succeed"
+unit_file="$tmpd/root/etc/systemd/system/pangolin-site@.service"
+[[ -f "$unit_file" ]] || fail "template unit should exist"
+[[ "$(stat -c '%a' "$unit_file")" == "644" ]] || fail "template unit mode"
+[[ "$(stat -c '%a' "$tmpd/root/etc/pangolin/sites")" == "700" ]] || fail "sites dir mode"
+grep -q "systemctl daemon-reload" "$FAKE_LOG" || fail "template write must reload systemd"
+expected_unit="[Unit]
+Description=Pangolin Site (CLI)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=CONFIG_FILE=/etc/pangolin/sites/%i.json
+ExecStart=$PANGOLIN_BIN up site
+Restart=always
+RestartSec=2
+UMask=0077
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target"
+assert_eq "$expected_unit" "$(cat "$unit_file")"
+# The in-unit config path is the production absolute path, never the test root.
+grep -qx 'Environment=CONFIG_FILE=/etc/pangolin/sites/%i.json' "$unit_file" ||
+  fail "unit must keep the literal production config path"
+
+cfg="$(site_config_path orga)"
+write_private_file "$cfg" "$(site_config_static "https://p.example" id1 sec1)"
+
+# (4) A fresh instance is enabled with --now and not restarted.
+: >"$FAKE_LOG"
+start_site_systemd_slug orga 0 || fail "fresh instance should start"
+grep -q "systemctl enable --now pangolin-site@orga" "$FAKE_LOG" || fail "instance enable"
+if grep -q "systemctl restart pangolin-site@orga" "$FAKE_LOG"; then
+  fail "fresh instance must not restart"
+fi
+
+# (5, 6) An active instance enables, restarts, then waits on the instance name.
+: >"$FAKE_LOG"
+start_site_systemd_slug orga 1 || fail "active instance should start"
+grep -q "systemctl restart pangolin-site@orga" "$FAKE_LOG" || fail "active instance should restart"
+grep -q "systemctl is-active --quiet pangolin-site@orga" "$FAKE_LOG" ||
+  fail "the wait must use the templated instance name"
+enable_line="$(grep -n "systemctl enable --now pangolin-site@orga" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+restart_line="$(grep -n "systemctl restart pangolin-site@orga" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+active_line="$(grep -n "systemctl is-active --quiet pangolin-site@orga" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ "$enable_line" -lt "$restart_line" ]] || fail "enable must precede the restart"
+[[ "$restart_line" -lt "$active_line" ]] || fail "restart must precede the active wait"
+
+# (7) The provisioning wait uses the per-slug config.
+prov_cfg="$(site_config_path provorg)"
+write_private_file "$prov_cfg" "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1")"
+if verify_site_systemd_slug provorg "$prov_cfg"; then
+  fail "verify must wait on the per-slug provisioning config"
+fi
+verify_site_systemd_slug orga "$cfg" || fail "verify with the slug credentials should pass"
+
+# The production wait policy stays 30x1s when the test overrides are unset.
+policy="$(
+  unset PANGOLIN_SERVICE_ATTEMPTS PANGOLIN_SERVICE_DELAY
+  wait_service_active() {
+    printf '%s %s' "$3" "$4"
+    return 0
+  }
+  verify_site_systemd_slug orga "$cfg"
+)" || fail "policy probe should pass"
+assert_eq "30 1" "$policy"
+
+# site_instance_was_active reports the instance state from systemctl.
+site_instance_was_active orga || fail "instance should read as active"
+export FAKE_INACTIVE_UNIT='pangolin-site@orga'
+if site_instance_was_active orga; then fail "inactive instance should read false"; fi
+unset FAKE_INACTIVE_UNIT
+
+# stop_site_systemd_slug stops the templated instance.
+: >"$FAKE_LOG"
+stop_site_systemd_slug orga || fail "stop should succeed"
+grep -q "systemctl stop pangolin-site@orga" "$FAKE_LOG" || fail "instance stop call"
+
+# (8) Disable stops an active instance, disables it, and removes the enabled
+# instance symlink under multi-user.target.wants.
+mkdir -p "$tmpd/root/etc/systemd/system/multi-user.target.wants"
+wants_link="$tmpd/root/etc/systemd/system/multi-user.target.wants/pangolin-site@orga.service"
+ln -sf "$unit_file" "$wants_link"
+: >"$FAKE_LOG"
+disable_site_systemd_slug orga || fail "disable should succeed"
+grep -q "systemctl stop pangolin-site@orga" "$FAKE_LOG" || fail "disable must stop the instance"
+grep -q "systemctl disable pangolin-site@orga" "$FAKE_LOG" || fail "instance disable call"
+[[ ! -L "$wants_link" ]] || fail "disable must remove the enabled instance symlink"
+
+# Remove disables the instance and keeps the per-slug config for diagnostics.
+ln -sf "$unit_file" "$wants_link"
+: >"$FAKE_LOG"
+remove_site_systemd_slug orga || fail "remove should succeed"
+grep -q "systemctl disable pangolin-site@orga" "$FAKE_LOG" || fail "instance remove disables"
+[[ ! -L "$wants_link" ]] || fail "remove must clear the enabled instance symlink"
+[[ -f "$cfg" ]] || fail "remove must keep the per-slug config"
+[[ -f "$unit_file" ]] || fail "remove must keep the shared template"
+
+# (9) A failure after enable reports no success and leaves the template for
+# rollback; the legacy unit stays untouched until the instance verifies.
+: >"$FAKE_LOG"
+printf '[Unit]\n' >"$tmpd/root/etc/systemd/system/pangolin-site.service"
+inst_rc=0
+inst_out="$(
+  wait_service_active() { return 1; }
+  install_site_systemd_slug orga "$cfg" 2>/dev/null
+)" || inst_rc=$?
+[[ "$inst_rc" -ne 0 ]] || fail "an instance that never activates must fail"
+[[ -z "$inst_out" ]] || fail "a failed instance install must not report success"
+[[ -f "$unit_file" ]] || fail "a failed install must leave the template for rollback"
+if grep -qE "systemctl (stop|disable) pangolin-site$" "$FAKE_LOG"; then
+  fail "a failed instance install must not touch the legacy unit"
+fi
+
+# The success path writes the template, starts the instance, then stops and
+# disables the legacy single-instance unit after the instance verifies.
+: >"$FAKE_LOG"
+install_site_systemd_slug orga "$cfg" 1 || fail "slug install should succeed"
+grep -q "systemctl daemon-reload" "$FAKE_LOG" || fail "slug install must write the template"
+grep -q "systemctl enable --now pangolin-site@orga" "$FAKE_LOG" || fail "slug install must enable the instance"
+grep -q "systemctl restart pangolin-site@orga" "$FAKE_LOG" || fail "active slug must restart its instance"
+grep -q "systemctl stop pangolin-site$" "$FAKE_LOG" || fail "verified instance must stop the legacy unit"
+grep -q "systemctl disable pangolin-site$" "$FAKE_LOG" || fail "verified instance must disable the legacy unit"
+inst_active_line="$(grep -n "systemctl is-active --quiet pangolin-site@orga" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+legacy_stop_line="$(grep -n "systemctl stop pangolin-site$" "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ "$inst_active_line" -lt "$legacy_stop_line" ]] ||
+  fail "the legacy stop must follow the instance verification"
+
+# With no legacy unit file and an inactive legacy service the instance install
+# leaves both alone; a fresh multi-slug host has no legacy to retire.
+rm -f "$tmpd/root/etc/systemd/system/pangolin-site.service"
+: >"$FAKE_LOG"
+FAKE_INACTIVE_UNIT=pangolin-site \
+  install_site_systemd_slug orga "$cfg" || fail "slug install without a legacy unit should succeed"
+if grep -qE "systemctl (stop|disable) pangolin-site$" "$FAKE_LOG"; then
+  fail "install must not touch an absent legacy unit"
+fi
+
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+unset PANGOLIN_SERVICE_ATTEMPTS PANGOLIN_SERVICE_DELAY
+
+# (10) Legacy single-instance helpers keep the old behavior: with a test root
+# and the fake off PATH, install_site_systemd still calls the CLI and waits on
+# the plain unit name.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin"
+for c in systemctl pangolin; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
+  chmod 755 "$tmpd/bin/$c"
+done
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_ROOT="$tmpd/root"
+export PANGOLIN_BIN="$tmpd/bin/pangolin"
+cfg="$tmpd/site.json"
+write_private_file "$cfg" "$(site_config_static "https://p.example" id1 sec1)"
+install_site_systemd "$cfg" 1 || fail "legacy install should still succeed"
+grep -q "pangolin service install site --config-file $cfg" "$FAKE_LOG" || fail "legacy CLI install call"
+grep -q "systemctl restart pangolin-site$" "$FAKE_LOG" || fail "legacy restart call"
+grep -q "systemctl is-active --quiet pangolin-site$" "$FAKE_LOG" || fail "legacy wait on the plain unit"
+if grep -q "pangolin-site@" "$FAKE_LOG"; then
+  fail "the legacy install path must not use template instances"
+fi
+if ls "$tmpd/root/etc/systemd/system" >/dev/null 2>&1; then
+  fail "the legacy install must not write template units"
+fi
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+
+echo "Multi-site Task 3 tests passed"

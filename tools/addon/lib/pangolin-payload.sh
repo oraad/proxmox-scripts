@@ -594,6 +594,162 @@ install_site_systemd() {
   fi
 }
 
+# Print the systemd template instance name for a validated slug.
+site_systemd_instance() {
+  printf 'pangolin-site@%s' "$1"
+}
+
+# Succeed while the template instance for a slug is active. The conversion
+# path records this before touching the service so only running instances are
+# restarted afterwards.
+site_instance_was_active() {
+  systemctl is-active --quiet "$(site_systemd_instance "$1")" >/dev/null 2>&1
+}
+
+# Write the shared pangolin-site@.service template, mirroring the upstream
+# single-instance unit: same dependencies, restart policy, and sandboxing. The
+# in-unit CONFIG_FILE is the literal production path with %i so systemd
+# resolves it per instance; only the installed binary location is expanded.
+# The per-slug config directory is created mode 0700 next to it.
+write_site_systemd_template() {
+  local dir unit
+  dir="$(site_config_dir)"
+  unit="$(p /etc/systemd/system/pangolin-site@.service)"
+  install -d -m 0755 "$(dirname "$dir")" "$(dirname "$unit")" || return 1
+  install -d -m 0700 "$dir" || return 1
+  if ! cat >"$unit" <<EOF
+[Unit]
+Description=Pangolin Site (CLI)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=CONFIG_FILE=/etc/pangolin/sites/%i.json
+ExecStart=$PANGOLIN_BIN up site
+Restart=always
+RestartSec=2
+UMask=0077
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  then
+    echo "Failed to write $unit" >&2
+    return 1
+  fi
+  chmod 0644 "$unit" || return 1
+  if ! systemctl daemon-reload; then
+    echo "Failed to reload systemd after writing $unit" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Enable and start a template instance, restarting it when the slug's service
+# was already active so the new configuration takes effect.
+_enable_site_instance() {
+  local instance="$1" was_active="${2:-0}"
+  if ! systemctl enable --now "$instance"; then
+    echo "Failed to enable the $instance service" >&2
+    return 1
+  fi
+  _restart_if_was_active systemd "$instance" "$was_active"
+}
+
+# Wait for a slug's instance to become active, then for its configuration to
+# hold credentials instead of a provisioning key. The policy is 30x1s; the
+# internal PANGOLIN_SERVICE_ATTEMPTS and PANGOLIN_SERVICE_DELAY overrides
+# exist only so the test suite runs without sleeping.
+verify_site_systemd_slug() {
+  local slug="$1" config_path="$2" instance
+  local attempts="${PANGOLIN_SERVICE_ATTEMPTS:-30}" delay="${PANGOLIN_SERVICE_DELAY:-1}"
+  instance="$(site_systemd_instance "$slug")"
+  if ! wait_service_active systemd "$instance" "$attempts" "$delay"; then
+    echo "The $instance service did not become active" >&2
+    return 1
+  fi
+  if ! wait_for_provisioning "$config_path" "$attempts" "$delay"; then
+    echo "The $instance service did not complete provisioning." >&2
+    return 1
+  fi
+}
+
+# Start a slug's template instance against its per-slug configuration, then
+# verify it. was_active=1 restarts the instance after enabling.
+start_site_systemd_slug() {
+  local slug="$1" was_active="${2:-0}"
+  _enable_site_instance "$(site_systemd_instance "$slug")" "$was_active" || return 1
+  verify_site_systemd_slug "$slug" "$(site_config_path "$slug")"
+}
+
+# Stop a slug's template instance.
+stop_site_systemd_slug() {
+  stop_service systemd "$(site_systemd_instance "$1")"
+}
+
+# Stop an active instance, disable it, and remove the enabled instance symlink
+# that `systemctl enable` leaves under multi-user.target.wants. The template
+# and the per-slug config stay in place.
+disable_site_systemd_slug() {
+  local slug="$1" instance link
+  instance="$(site_systemd_instance "$slug")"
+  link="$(p "/etc/systemd/system/multi-user.target.wants/$instance.service")"
+  if systemctl is-active --quiet "$instance" >/dev/null 2>&1; then
+    stop_site_systemd_slug "$slug" || {
+      echo "Failed to stop the $instance service" >&2
+      return 1
+    }
+  fi
+  if ! systemctl disable "$instance"; then
+    echo "Failed to disable the $instance service" >&2
+    return 1
+  fi
+  if ! rm -f "$link"; then
+    echo "Failed to remove $link" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Remove a slug's instance: disabled, unlinked, and cleared from systemd's
+# failed-start state. The per-slug config and the shared template are kept for
+# diagnostics and other instances; callers remove those separately.
+remove_site_systemd_slug() {
+  local slug="$1"
+  disable_site_systemd_slug "$slug" || return 1
+  systemctl reset-failed "$(site_systemd_instance "$slug")" >/dev/null 2>&1 || true
+  return 0
+}
+
+# Conversion entry point for one slug: write the template, enable and verify
+# the instance on the given configuration, and only then stop and disable the
+# legacy single-instance unit so the two never hold the same site credentials
+# at once. On any earlier failure the legacy unit stays untouched and the
+# template stays on disk for rollback.
+install_site_systemd_slug() {
+  local slug="$1" config_path="$2" was_active="${3:-0}" legacy legacy_unit
+  write_site_systemd_template || return 1
+  _enable_site_instance "$(site_systemd_instance "$slug")" "$was_active" || return 1
+  verify_site_systemd_slug "$slug" "$config_path" || return 1
+  legacy=pangolin-site
+  legacy_unit="$(p "/etc/systemd/system/$legacy.service")"
+  if systemctl is-active --quiet "$legacy" >/dev/null 2>&1; then
+    systemctl stop "$legacy" || {
+      echo "Failed to stop the $legacy service" >&2
+      return 1
+    }
+  fi
+  if [[ -e "$legacy_unit" || -L "$legacy_unit" ]] && ! systemctl disable "$legacy"; then
+    echo "Failed to disable the $legacy service" >&2
+    return 1
+  fi
+  return 0
+}
+
 # Install the client service with the verified CLI, then wait for it to become
 # active. An already-active unit is restarted so new credentials take effect.
 # Returns 1 without printing success when install, restart, or wait fails.
