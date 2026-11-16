@@ -1122,6 +1122,25 @@ for bad in 1a -a a- A org_a abcdefghijk "" "or g" $'a\nb'; do
   fi
 done
 
+# The slug `host` is reserved: it is the host target's environment suffix.
+if validate_site_slug host >/dev/null 2>&1; then
+  echo "reserved slug [host] should fail" >&2
+  exit 1
+fi
+reserved_rc=0
+reserved_out="$(_parse_sites 'host' 2>&1)" || reserved_rc=$?
+[[ "$reserved_rc" -ne 0 ]] || { echo "slug host should be rejected" >&2; exit 1; }
+case "$reserved_out" in
+*Reserved*host*) ;;
+*) echo "reserved slug message: $reserved_out" >&2; exit 1 ;;
+esac
+for bad in 'orga,host' 'default host'; do
+  if _parse_sites "$bad" >/dev/null 2>&1; then
+    echo "slug list [$bad] should fail" >&2
+    exit 1
+  fi
+done
+
 assert_eq $'orga\norg-b' "$(_parse_sites 'orga, org-b')"
 assert_eq $'a\nb\nc\nd\ne\nf\ng\nh' "$(_parse_sites 'a b,c d,e f,g h')"
 dup_sites_rc=0
@@ -1156,6 +1175,34 @@ case "$cap_out" in
 *) echo "slug cap message: $cap_out" >&2; exit 1 ;;
 esac
 assert_eq "8" "$(_parse_sites "$eight_slugs" | grep -c .)"
+
+# Wildcard input must fail validation, never expand against the working
+# directory. The scratch dirs hold files that `*`, `?`, and `[ab]` would match.
+globd="$(mktemp -d)"
+mkdir -p "$globd/slugs" "$globd/targets"
+touch "$globd/slugs/a" "$globd/slugs/ab" "$globd/slugs/b"
+touch "$globd/targets/101" "$globd/targets/102"
+for bad in '*' '?' '[ab]' '*.json'; do
+  glob_out="$(cd "$globd/slugs" && _parse_sites "$bad" 2>&1)" && {
+    echo "slug list [$bad] expanded working-directory files: $glob_out" >&2
+    exit 1
+  }
+  case "$glob_out" in
+  *"Invalid site slug"*) ;;
+  *) echo "slug wildcard message [$bad]: $glob_out" >&2; exit 1 ;;
+  esac
+done
+glob_targets="$(cd "$globd/targets" && _parse_targets '*' 2>&1)" && {
+  echo "target list [*] expanded working-directory files: $glob_targets" >&2
+  exit 1
+}
+case "$glob_targets" in
+*"Invalid target"*) ;;
+*) echo "target wildcard message: $glob_targets" >&2; exit 1 ;;
+esac
+assert_eq $'a\nab\nb' "$(cd "$globd/slugs" && _parse_sites 'a, ab b')"
+assert_eq $'101\n102' "$(cd "$globd/targets" && _parse_targets '101, 102')"
+rm -rf "$globd"
 
 assert_eq "org_a" "$(_slug_suffix org-a)"
 assert_eq "default" "$(_slug_suffix default)"

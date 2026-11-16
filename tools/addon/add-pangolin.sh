@@ -123,9 +123,11 @@ validate_site_name() {
 # Succeed when the site slug is a valid local site label: 1-10 characters,
 # starting with a lowercase letter, using lowercase letters, digits, and inner
 # hyphens, ending with a letter or digit. `default` is the legacy single-site
-# label and matches this pattern.
+# label and matches this pattern. `host` is reserved: it is the host target's
+# environment suffix, and a host slug would collide with it.
 validate_site_slug() {
   local slug="${1:-}"
+  [[ "$slug" != host ]] || return 1
   [[ "$slug" =~ ^[a-z]([a-z0-9-]{0,8}[a-z0-9])?$ ]]
 }
 
@@ -398,16 +400,24 @@ _resolve_mode() {
   printf '%s\n' "$choice"
 }
 
+# Split a space-, tab-, comma-, or newline-separated list into the named
+# array. Unlike unquoted word splitting this never expands wildcards, and
+# empty fields are dropped.
+_split_words() {
+  local -n _split_out="$1"
+  local raw="${2:-}"
+  raw="${raw//$'\n'/ }"
+  raw="${raw//,/ }"
+  IFS=$' \t' read -r -a _split_out <<<"$raw"
+}
+
 # Print one normalized target per line: `host` or a CTID without leading zeros.
 # Accepts a space- or comma-separated list. Rejects non-numeric values, CTID 0,
 # and duplicates (including leading-zero spellings).
 _parse_targets() {
-  local raw="${1:-}" token seen=" " ctid
+  local token seen=" " ctid
   local -a tokens=()
-  raw="${raw//,/ }"
-  # Word splitting is intentional: the list is space- or comma-separated.
-  # shellcheck disable=SC2206
-  tokens=($raw)
+  _split_words tokens "${1:-}"
   if ((${#tokens[@]} == 0)); then
     echo "No targets selected (expected host or CTIDs)" >&2
     return 1
@@ -438,15 +448,12 @@ _parse_targets() {
 }
 
 # Print one validated site slug per line, in input order. Accepts a space- or
-# comma-separated list. Rejects an empty selection, an invalid slug, a
-# duplicate, and more than 8 slugs.
+# comma-separated list. Rejects an empty selection, the reserved slug `host`,
+# an invalid slug, a duplicate, and more than 8 slugs.
 _parse_sites() {
-  local raw="${1:-}" token seen=" "
+  local token seen=" "
   local -a tokens=()
-  raw="${raw//,/ }"
-  # Word splitting is intentional: the list is space- or comma-separated.
-  # shellcheck disable=SC2206
-  tokens=($raw)
+  _split_words tokens "${1:-}"
   if ((${#tokens[@]} == 0)); then
     echo "No sites selected (expected one or more slugs)" >&2
     return 1
@@ -456,6 +463,10 @@ _parse_sites() {
     return 1
   fi
   for token in "${tokens[@]}"; do
+    if [[ "$token" == host ]]; then
+      echo "Reserved site slug: host (targets already use the host suffix)" >&2
+      return 1
+    fi
     if ! validate_site_slug "$token"; then
       echo "Invalid site slug: $token (expected 1-10 characters: a lowercase letter, then lowercase letters, digits, or inner hyphens)" >&2
       return 1
