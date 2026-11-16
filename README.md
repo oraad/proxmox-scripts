@@ -20,7 +20,7 @@ Current scripts:
 - [Coder Code Server](https://oraad.github.io/proxmox-scripts/scripts) — VS Code in the browser, native Debian package in an LXC
 - [OpenChamber](https://oraad.github.io/proxmox-scripts/scripts) — web/PWA UI for the OpenCode AI agent, native Node.js install in an LXC
 - [Pangolin Site](https://oraad.github.io/proxmox-scripts/scripts) — dedicated LXC for the Pangolin tunnel agent (CLI site mode, the Newt replacement)
-- [Pangolin Addon](https://oraad.github.io/proxmox-scripts/scripts) — install the Pangolin CLI (Site tunnel and/or Machine client) on the Proxmox host or an existing LXC
+- [Pangolin Addon](https://oraad.github.io/proxmox-scripts/scripts) — install the Pangolin CLI (Site tunnel and/or Machine client) on the Proxmox host and/or existing LXCs; one run may install multiple targets and multiple site connectors per target
 - [PVE LXC Apps Updater](https://oraad.github.io/proxmox-scripts/scripts) — batch-update community-scripts and custom LXCs
 
 ## Getting started

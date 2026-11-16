@@ -34,27 +34,27 @@
   },
   "notes": [
     {
-      "text": "Run on the Proxmox host, not inside a container. A host install exposes everything the host can reach and joins the whole host to the VPN; prefer an existing LXC.",
+      "text": "Run on the Proxmox host. Installs go to the host and/or Debian 12+/Ubuntu 22.04+/Alpine 3.20+ LXCs (var_targets). A host install joins the whole host to the VPN; prefer an LXC.",
       "type": "warning"
     },
     {
-      "text": "Site mode: Site ID + secret, or a provisioning key (tier3/enterprise). Unattended needs \"approve new sites\" on. Reconfiguring with a key creates a second server-side site.",
+      "text": "Site: a static Site ID must be unique per connector. A provisioning key (tier3/enterprise) creates one distinct site per use; unattended needs \"approve new sites\" on.",
       "type": "warning"
     },
     {
-      "text": "Components: Site tunnel (userspace WireGuard, no TUN) and Machine client (needs /dev/net/tun). Targets: Proxmox host and/or existing Debian 12+/Ubuntu 22.04+/Alpine 3.20+ LXCs, selected with var_targets or a checklist.",
+      "text": "Components: Site tunnel (userspace WireGuard) and Machine client. Client or native mode needs /dev/net/tun (LXC passthrough added). Create the client in the dashboard first.",
       "type": "info"
     },
     {
-      "text": "Client mode: create a machine client in the dashboard, then supply its ID, secret, and endpoint. Needs /dev/net/tun; the addon adds TUN passthrough to an LXC.",
+      "text": "Multi-site: var_sites lists up to 8 slug-keyed connectors per target. Native interfaces default to pang<slug>/pangm<slug>. var_site_ssh_owner (\"default\") alone keeps SSH.",
       "type": "info"
     },
     {
-      "text": "Config: /etc/pangolin/site.json and /etc/pangolin/pangolin-client.env (0600); backups /var/lib/pangolin/backup. Logs: /var/log/pangolin-site.log, /var/log/pangolin-client.log.",
+      "text": "A single-site install converts on its first extra slug, one-way, and stays template-based: `systemctl status pangolin-site@<slug>` / `rc-service pangolin-site-<slug> status`.",
       "type": "info"
     },
     {
-      "text": "Unattended: `var_mode=site var_targets=\"host 101\" var_pangolin_endpoint=URL var_site_id_host=ID var_site_secret_host=SECRET var_site_id_101=ID var_site_secret_101=SECRET` with tools/addon/add-pangolin.sh. Mode, endpoint, native toggles, and var_reconfigure are shared; credentials are per target (suffix `host` or the CTID). One target may still use `var_target` with the unsuffixed credentials. A failed target does not stop the others; the run exits non-zero if any failed. Update: re-run the script.",
+      "text": "Unattended: var_mode=site var_targets=101,102 var_pangolin_endpoint=URL var_sites=\"orga\" var_site_id_orga_101=ID var_site_secret_orga_101=SECRET. Creds take slug/target suffixes.",
       "type": "info"
     }
   ]
