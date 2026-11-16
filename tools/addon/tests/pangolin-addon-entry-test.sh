@@ -1110,6 +1110,102 @@ if ! (
   exit 1
 fi
 
+# Task 1 multi-site helpers. A slug is a local site label; the suffix
+# normalization lets hyphenated slugs resolve through Bash indirect expansion.
+for ok in default a org-a abcdefghij; do
+  validate_site_slug "$ok" || { echo "slug [$ok] should pass" >&2; exit 1; }
+done
+for bad in 1a -a a- A org_a abcdefghijk "" "or g" $'a\nb'; do
+  if validate_site_slug "$bad" >/dev/null 2>&1; then
+    echo "slug [$bad] should fail" >&2
+    exit 1
+  fi
+done
+
+assert_eq $'orga\norg-b' "$(_parse_sites 'orga, org-b')"
+assert_eq $'a\nb\nc\nd\ne\nf\ng\nh' "$(_parse_sites 'a b,c d,e f,g h')"
+dup_sites_rc=0
+dup_sites_out="$(_parse_sites 'orga orga' 2>&1)" || dup_sites_rc=$?
+[[ "$dup_sites_rc" -ne 0 ]] || { echo "duplicate slug should fail" >&2; exit 1; }
+case "$dup_sites_out" in
+*Duplicate*orga*) ;;
+*) echo "duplicate slug message: $dup_sites_out" >&2; exit 1 ;;
+esac
+for bad in 'orga,1' 'Org' 'org_a' '-a' 'a-'; do
+  if _parse_sites "$bad" >/dev/null 2>&1; then
+    echo "slug list [$bad] should fail" >&2
+    exit 1
+  fi
+done
+for empty in '' '   ' ',,'; do
+  empty_rc=0
+  empty_sites_out="$(_parse_sites "$empty" 2>&1)" || empty_rc=$?
+  [[ "$empty_rc" -ne 0 ]] || { echo "empty selection [$empty] should fail" >&2; exit 1; }
+  case "$empty_sites_out" in
+  *"No sites selected"*) ;;
+  *) echo "empty selection message [$empty]: $empty_sites_out" >&2; exit 1 ;;
+  esac
+done
+nine_slugs="$(for i in 1 2 3 4 5 6 7 8 9; do printf 's%s ' "$i"; done)"
+eight_slugs="$(for i in 1 2 3 4 5 6 7 8; do printf 's%s ' "$i"; done)"
+cap_rc=0
+cap_out="$(_parse_sites "$nine_slugs" 2>&1)" || cap_rc=$?
+[[ "$cap_rc" -ne 0 ]] || { echo "nine slugs should exceed the cap" >&2; exit 1; }
+case "$cap_out" in
+*"maximum 8"*) ;;
+*) echo "slug cap message: $cap_out" >&2; exit 1 ;;
+esac
+assert_eq "8" "$(_parse_sites "$eight_slugs" | grep -c .)"
+
+assert_eq "org_a" "$(_slug_suffix org-a)"
+assert_eq "default" "$(_slug_suffix default)"
+
+# _site_value resolves (slug,target) combined, slug-only when one target is
+# selected, target-only when one slug is selected, then the global. Empty
+# suffixed variables fall through to the next form.
+assert_eq "wins" "$(
+  var_site_id_org_a_101=wins var_site_id_org_a=slug-only \
+    var_site_id_101=target-only var_site_id=global \
+    _site_value var_site_id org-a 101 2 2
+)"
+assert_eq "slug-only" "$(
+  var_site_id_org_a=slug-only var_site_id=global \
+    _site_value var_site_id org-a 101 2 1
+)"
+assert_eq "target-only" "$(
+  var_site_id_101=target-only var_site_id=global \
+    _site_value var_site_id default 101 1 2
+)"
+assert_eq "global" "$(var_site_id=global _site_value var_site_id default 101 1 1)"
+assert_eq "global" "$(
+  var_site_id_org_a_host= var_site_id=global \
+    _site_value var_site_id org-a host 1 1
+)"
+assert_eq "" "$(_site_value var_site_unset org-a 101 2 2)"
+
+validate_unique_site_ids $'id-a\nid-b' || { echo "distinct site ids should pass" >&2; exit 1; }
+validate_unique_site_ids $'id-a\n\nid-b\n' || { echo "empty lines should be ignored" >&2; exit 1; }
+validate_unique_site_ids '' || { echo "no ids should pass" >&2; exit 1; }
+# An id that only contains another id is not a duplicate.
+validate_unique_site_ids $'x y\ny' || { echo "substring ids are not duplicates" >&2; exit 1; }
+site_dup_rc=0
+site_dup_out="$(validate_unique_site_ids $'id-a\nid-b\nid-a' 2>&1)" || site_dup_rc=$?
+[[ "$site_dup_rc" -ne 0 ]] || { echo "duplicate site id should fail" >&2; exit 1; }
+case "$site_dup_out" in
+*"Duplicate site ID"*id-a*) ;;
+*) echo "duplicate site id message: $site_dup_out" >&2; exit 1 ;;
+esac
+
+validate_unique_client_ids $'cid-a\ncid-b\n\ncid-c' ||
+  { echo "distinct client ids should pass" >&2; exit 1; }
+client_dup_rc=0
+client_dup_out="$(validate_unique_client_ids $'cid-a\ncid-a' 2>&1)" || client_dup_rc=$?
+[[ "$client_dup_rc" -ne 0 ]] || { echo "duplicate client id should fail" >&2; exit 1; }
+case "$client_dup_out" in
+*"Duplicate client ID"*cid-a*) ;;
+*) echo "duplicate client id message: $client_dup_out" >&2; exit 1 ;;
+esac
+
 # Multi-target install loop. A fake payload records each invocation and fails
 # only for the CTIDs listed in fail-targets. The fake pct maps the remote
 # answers path onto a local directory and records tag changes.

@@ -120,6 +120,15 @@ validate_site_name() {
   return 0
 }
 
+# Succeed when the site slug is a valid local site label: 1-10 characters,
+# starting with a lowercase letter, using lowercase letters, digits, and inner
+# hyphens, ending with a letter or digit. `default` is the legacy single-site
+# label and matches this pattern.
+validate_site_slug() {
+  local slug="${1:-}"
+  [[ "$slug" =~ ^[a-z]([a-z0-9-]{0,8}[a-z0-9])?$ ]]
+}
+
 # Succeed when a dotted version is at least a minimum dotted version.
 _os_version_ge() {
   local have="$1" need="$2" i a b max=0
@@ -428,6 +437,38 @@ _parse_targets() {
   done
 }
 
+# Print one validated site slug per line, in input order. Accepts a space- or
+# comma-separated list. Rejects an empty selection, an invalid slug, a
+# duplicate, and more than 8 slugs.
+_parse_sites() {
+  local raw="${1:-}" token seen=" "
+  local -a tokens=()
+  raw="${raw//,/ }"
+  # Word splitting is intentional: the list is space- or comma-separated.
+  # shellcheck disable=SC2206
+  tokens=($raw)
+  if ((${#tokens[@]} == 0)); then
+    echo "No sites selected (expected one or more slugs)" >&2
+    return 1
+  fi
+  if ((${#tokens[@]} > 8)); then
+    echo "Too many site slugs: ${#tokens[@]} (maximum 8)" >&2
+    return 1
+  fi
+  for token in "${tokens[@]}"; do
+    if ! validate_site_slug "$token"; then
+      echo "Invalid site slug: $token (expected 1-10 characters: a lowercase letter, then lowercase letters, digits, or inner hyphens)" >&2
+      return 1
+    fi
+    if [[ "$seen" == *" $token "* ]]; then
+      echo "Duplicate site slug: $token" >&2
+      return 1
+    fi
+    seen="${seen}${token} "
+    printf '%s\n' "$token"
+  done
+}
+
 # Print the whiptail checklist rows: the host first, then every LXC on this
 # host. `pct list` output is VMID Status Lock Name; the name may move columns
 # when the container is locked, so the last field is used.
@@ -521,6 +562,65 @@ _target_value() {
     value="${!name-}"
   fi
   printf '%s' "$value"
+}
+
+# Print the environment-name fragment for a slug: every hyphen becomes an
+# underscore. Bash indirect expansion cannot resolve names containing hyphens,
+# and slugs never contain underscores, so this mapping is unique.
+_slug_suffix() {
+  printf '%s' "${1//-/_}"
+}
+
+# Print the value of the first nonempty environment variable for a
+# (slug,target) pair, trying:
+#   <base>_<slug_suffix>_<target>
+#   <base>_<slug_suffix>  when exactly one target is selected
+#   <base>_<target>       when exactly one slug is selected
+#   <base>                when exactly one slug and one target are selected
+_site_value() {
+  local base="$1" slug="$2" target="$3" slug_total="$4" target_total="$5"
+  local suffix name value
+  suffix="$(_slug_suffix "$slug")"
+  name="${base}_${suffix}_${target}"
+  value="${!name-}"
+  if [[ -z "$value" && "$target_total" == 1 ]]; then
+    name="${base}_${suffix}"
+    value="${!name-}"
+  fi
+  if [[ -z "$value" && "$slug_total" == 1 ]]; then
+    name="${base}_${target}"
+    value="${!name-}"
+  fi
+  if [[ -z "$value" && "$slug_total" == 1 && "$target_total" == 1 ]]; then
+    name="$base"
+    value="${!name-}"
+  fi
+  printf '%s' "$value"
+}
+
+# Succeed when every nonempty line appears at most once. The label names the
+# ID kind in the error; IDs are identifiers, never secrets.
+_check_unique_ids() {
+  local label="$1" ids="${2:-}" line seen=$'\n'
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$seen" == *$'\n'"$line"$'\n'* ]]; then
+      echo "Duplicate $label ID: $line (each $label ID may be used only once per run)" >&2
+      return 1
+    fi
+    seen+="$line"$'\n'
+  done <<<"$ids"
+}
+
+# Succeed when no static site ID repeats across the selected (slug,target)
+# pairs; a static site ID is single-use.
+validate_unique_site_ids() {
+  _check_unique_ids site "${1:-}"
+}
+
+# Succeed when no machine-client ID repeats across the selected targets.
+validate_unique_client_ids() {
+  _check_unique_ids client "${1:-}"
 }
 
 # Copy the per-target credentials into the credential globals that the shared
