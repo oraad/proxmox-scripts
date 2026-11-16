@@ -982,14 +982,24 @@ site_instance_was_active_openrc() {
 # production path with the test root stripped, so the installed wrapper points at
 # the real config, never a test directory. This mirrors write_site_systemd_template
 # keeping Environment=CONFIG_FILE on the literal production layout. The path is
-# single-quoted so the assignment cannot split or run anything.
+# single-quoted so the assignment cannot split or run anything. The strip only
+# happens when config_path is actually under PANGOLIN_ROOT; an unrelated path
+# would silently bake a wrong CONFIG_FILE, so it is refused instead.
 write_site_openrc_slug() {
   local slug="$1" config_path="$2" name wrapper log_path prod_config quoted
   _require_supervise_daemon || return 1
   name="$(site_openrc_instance "$slug")"
   wrapper="$(p "/usr/local/bin/$name-start")"
   log_path="$(p "/var/log/$name.log")"
-  prod_config="${config_path#"$PANGOLIN_ROOT"}"
+  if [[ -n "$PANGOLIN_ROOT" ]]; then
+    if [[ "$config_path" != "$PANGOLIN_ROOT"/* ]]; then
+      echo "write_site_openrc_slug: $config_path is not under $PANGOLIN_ROOT" >&2
+      return 1
+    fi
+    prod_config="${config_path#"$PANGOLIN_ROOT"}"
+  else
+    prod_config="$config_path"
+  fi
   install -d -m 0755 "$(dirname "$wrapper")" "$(dirname "$log_path")" || return 1
   install -d -m 0700 "$(site_config_dir)" || return 1
   install -m 0700 /dev/null "$wrapper" || return 1
@@ -1042,15 +1052,28 @@ stop_site_openrc_slug() {
 
 # Stop an active service and remove it from the default runlevel. The wrapper,
 # unit, log, and per-slug config stay in place for the caller.
+#
+# Idempotent and command-guarded like the cleanup helpers. A service with no
+# default-runlevel entry (for example a failed fresh install whose generic
+# cleanup already removed the link, leaving /etc/init.d present) needs no
+# `rc-update del`, and OpenRC returns non-zero for that del. So del runs only
+# when /etc/runlevels/default/<name> exists, and its failure is preserved then.
+# When a required command is missing the helper is a no-op, never a hard error.
 disable_site_openrc_slug() {
-  local slug="$1" name
+  local slug="$1" name runlevel
   name="$(site_openrc_instance "$slug")"
-  if rc-service "$name" status >/dev/null 2>&1; then
+  runlevel="$(p "/etc/runlevels/default/$name")"
+  if command -v rc-service >/dev/null 2>&1 &&
+    rc-service "$name" status >/dev/null 2>&1; then
     stop_site_openrc_slug "$slug" || {
       echo "Failed to stop the $name service" >&2
       return 1
     }
   fi
+  if [[ ! -e "$runlevel" && ! -L "$runlevel" ]]; then
+    return 0
+  fi
+  command -v rc-update >/dev/null 2>&1 || return 0
   if ! rc-update del "$name" default; then
     echo "Failed to disable the $name service" >&2
     return 1
@@ -1072,29 +1095,41 @@ install_site_openrc_slug() {
 }
 
 # Retire the legacy single-instance OpenRC service: stop it when still running,
-# remove it from the default runlevel, and delete its init script and wrapper.
-# Only the legacy pangolin-site plumbing is touched: per-slug instances, the
-# template state, the site configurations, install backups, and the conversion
-# marker all stay for the caller. A host with no legacy unit or wrapper returns
-# quietly.
+# remove it from the default runlevel, and delete its init script, wrapper, and
+# the default-runlevel symlink. The OpenRC enabled artifact is
+# /etc/runlevels/default/pangolin-site, the sibling of the systemd wants symlink
+# the systemd retire removes, so it belongs in both the existence check and the
+# removal set. Only the legacy pangolin-site plumbing is touched: per-slug
+# instances, the template state, the site configurations, install backups, and
+# the conversion marker all stay for the caller. A host with no legacy unit,
+# wrapper, or runlevel link returns quietly. Commands are guarded like the
+# cleanup helpers: rc-update del runs only when the runlevel entry exists and
+# rc-update is present (preserving a real del failure otherwise), and the init,
+# wrapper, and runlevel files are removed under PANGOLIN_ROOT whether or not the
+# service tools are on PATH.
 retire_legacy_single_site_openrc() {
-  local legacy=pangolin-site init wrapper
+  local legacy=pangolin-site init wrapper runlevel
   init="$(p "/etc/init.d/$legacy")"
   wrapper="$(p "/usr/local/bin/$legacy-start")"
-  if rc-service "$legacy" status >/dev/null 2>&1; then
+  runlevel="$(p "/etc/runlevels/default/$legacy")"
+  if command -v rc-service >/dev/null 2>&1 &&
+    rc-service "$legacy" status >/dev/null 2>&1; then
     rc-service "$legacy" stop || {
       echo "Failed to stop the $legacy service" >&2
       return 1
     }
   fi
-  if [[ ! -e "$init" && ! -L "$init" && ! -e "$wrapper" && ! -L "$wrapper" ]]; then
+  if [[ ! -e "$init" && ! -L "$init" && ! -e "$wrapper" && ! -L "$wrapper" &&
+    ! -e "$runlevel" && ! -L "$runlevel" ]]; then
     return 0
   fi
-  if ! rc-update del "$legacy" default; then
-    echo "Failed to disable the $legacy service" >&2
-    return 1
+  if [[ -e "$runlevel" || -L "$runlevel" ]] && command -v rc-update >/dev/null 2>&1; then
+    if ! rc-update del "$legacy" default; then
+      echo "Failed to disable the $legacy service" >&2
+      return 1
+    fi
   fi
-  if ! rm -f "$init" "$wrapper"; then
+  if ! rm -f "$init" "$wrapper" "$runlevel"; then
     echo "Failed to remove the $legacy service files" >&2
     return 1
   fi

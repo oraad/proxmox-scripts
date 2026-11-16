@@ -1239,8 +1239,24 @@ echo "Multi-site Task 3 tests passed"
 # argv and the exported CONFIG_FILE so the production path is verified end-to-end.
 tmpd="$(mktemp -d)"
 mkdir -p "$tmpd/bin" "$tmpd/root/etc/init.d" "$tmpd/root/usr/local/bin" \
-  "$tmpd/root/etc/pangolin" "$tmpd/root/etc/logrotate.d" "$tmpd/root/var/log"
-for c in rc-update supervise-daemon logrotate; do
+  "$tmpd/root/etc/pangolin" "$tmpd/root/etc/logrotate.d" "$tmpd/root/var/log" \
+  "$tmpd/root/etc/runlevels/default"
+# rc-update models the default-runlevel symlink so that `del` fails (exit 1) when
+# the service was never added, mirroring real OpenRC and exposing idempotence bugs.
+cat >"$tmpd/bin/rc-update" <<'EOF'
+#!/usr/bin/env bash
+echo "rc-update $*" >>"$FAKE_LOG"
+case "$1" in
+add) ln -sf "$PANGOLIN_ROOT/etc/init.d/$2" "$PANGOLIN_ROOT/etc/runlevels/default/$2" ;;
+del)
+  entry="$PANGOLIN_ROOT/etc/runlevels/default/$2"
+  if [[ -e "$entry" || -L "$entry" ]]; then rm -f "$entry"; else exit 1; fi
+  ;;
+esac
+exit 0
+EOF
+chmod 755 "$tmpd/bin/rc-update"
+for c in supervise-daemon logrotate; do
   printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
   chmod 755 "$tmpd/bin/$c"
 done
@@ -1292,6 +1308,26 @@ grep -q "CONFIG_FILE='/etc/pangolin/sites/org-a.json'" "$slug_wrapper" ||
 if grep -q "$tmpd/root" "$slug_wrapper"; then
   fail "wrapper must not bake in the test root"
 fi
+# No credential material may be written into the wrapper: it only holds the
+# config path and the exec line.
+if grep -qE 'sec1|id1|https://p\.example' "$slug_wrapper"; then
+  fail "per-slug wrapper must not contain credentials"
+fi
+
+# A config path outside PANGOLIN_ROOT is refused before any file is written:
+# stripping an unrelated prefix would bake a wrong CONFIG_FILE into the wrapper.
+outside="$tmpd/elsewhere/etc/pangolin/sites/org-a.json"
+if err="$(write_site_openrc_slug orgd "$outside" 2>&1 >/dev/null)"; then
+  fail "write must refuse a config path outside PANGOLIN_ROOT"
+fi
+case "$err" in
+*"not under"*) ;;
+*) fail "expected a prefix error, got: $err" ;;
+esac
+[[ ! -e "$tmpd/root/etc/init.d/pangolin-site-orgd" ]] ||
+  fail "a refused write must not create a unit"
+[[ ! -e "$tmpd/root/usr/local/bin/pangolin-site-orgd-start" ]] ||
+  fail "a refused write must not create a wrapper"
 
 # (2, 4) Modes and supervise-daemon restart settings.
 [[ "$(stat -c '%a' "$slug_wrapper")" == "700" ]] || fail "per-slug wrapper mode"
@@ -1351,6 +1387,18 @@ disable_site_openrc_slug org-a || fail "disable should succeed"
 grep -q 'rc-service pangolin-site-org-a stop' "$FAKE_LOG" || fail "disable must stop the instance"
 grep -q 'rc-update del pangolin-site-org-a default' "$FAKE_LOG" || fail "instance disable call"
 
+# (8b) Idempotence: an init script present but with no default-runlevel entry (a
+# failed fresh install whose generic cleanup already removed the link) must not
+# call rc-update del, which OpenRC fails for an unadded service, and must not
+# return an error.
+printf '#!/sbin/openrc-run\n' >"$tmpd/root/etc/init.d/pangolin-site-orgidem"
+: >"$FAKE_LOG"
+FAKE_INACTIVE_UNIT=pangolin-site-orgidem \
+  disable_site_openrc_slug orgidem || fail "disable must be idempotent without a runlevel entry"
+if grep -q 'rc-update del pangolin-site-orgidem default' "$FAKE_LOG"; then
+  fail "disable must skip rc-update del when not in the runlevel"
+fi
+
 # (10) log rotation globs the per-slug site logs plus the unchanged client log.
 lr="$tmpd/root/etc/logrotate.d/pangolin"
 [[ -f "$lr" ]] || fail "logrotate config should be written"
@@ -1383,30 +1431,43 @@ fi
 [[ -f "$legacy_init" ]] || fail "per-slug install must leave the legacy init file"
 [[ -f "$legacy_wrapper" ]] || fail "per-slug install must leave the legacy wrapper"
 
-# The failure path: a stubbed wait makes the install fail without success output
-# or any legacy action.
+# The failure path: org-b has its own config, and a stubbed wait makes the
+# install fail without success output or any legacy action. Its wrapper must
+# point at sites/org-b.json, not another slug's config, and carry no secret.
+cfg_b="$(site_config_path org-b)"
+write_private_file "$cfg_b" "$(site_config_static "https://p.example" idb secb)"
 inst_rc=0
 inst_out="$(
   wait_service_active() { return 1; }
-  install_site_openrc_slug org-b "$cfg" 2>/dev/null
+  install_site_openrc_slug org-b "$cfg_b" 2>/dev/null
 )" || inst_rc=$?
 [[ "$inst_rc" -ne 0 ]] || fail "an instance that never activates must fail"
 [[ -z "$inst_out" ]] || fail "a failed instance install must not report success"
 [[ -f "$legacy_init" ]] || fail "a failed install must leave the legacy init file"
 [[ -f "$legacy_wrapper" ]] || fail "a failed install must leave the legacy wrapper"
+orgb_wrapper="$tmpd/root/usr/local/bin/pangolin-site-org-b-start"
+grep -q "CONFIG_FILE='/etc/pangolin/sites/org-b.json'" "$orgb_wrapper" ||
+  fail "the org-b wrapper must point at the org-b config"
+if grep -qE 'secb|idb|https://p\.example' "$orgb_wrapper"; then
+  fail "the org-b wrapper must not contain credentials"
+fi
 
 # (12) retire_legacy_single_site_openrc stops the legacy service, removes it from
-# the default runlevel, and deletes only its init and wrapper. Per-slug units,
-# configs, and the legacy site.json all survive for the caller.
+# the default runlevel, and deletes its init, wrapper, and runlevel symlink.
+# Per-slug units, configs, and the legacy site.json all survive for the caller.
+ln -sf "$legacy_init" "$tmpd/root/etc/runlevels/default/pangolin-site"
 : >"$FAKE_LOG"
 retire_legacy_single_site_openrc || fail "retire should succeed"
 grep -q 'rc-service pangolin-site stop' "$FAKE_LOG" || fail "retire must stop an active legacy service"
 grep -q 'rc-update del pangolin-site default' "$FAKE_LOG" || fail "retire must disable the legacy service"
 [[ ! -e "$legacy_init" ]] || fail "retire must remove the legacy init file"
 [[ ! -e "$legacy_wrapper" ]] || fail "retire must remove the legacy wrapper"
+[[ ! -e "$tmpd/root/etc/runlevels/default/pangolin-site" ]] ||
+  fail "retire must remove the legacy runlevel symlink"
 [[ -f "$slug_unit" ]] || fail "retire must keep the per-slug unit"
 [[ -f "$slug_wrapper" ]] || fail "retire must keep the per-slug wrapper"
 [[ -f "$cfg" ]] || fail "retire must keep the per-slug config"
+[[ -f "$cfg_b" ]] || fail "retire must keep the other per-slug config"
 [[ -f "$tmpd/root/etc/pangolin/site.json" ]] || fail "retire must keep the legacy site config"
 
 # On a host with no legacy unit retire is a quiet no-op: the inactive probe aside,
@@ -1418,6 +1479,24 @@ noise="$(FAKE_INACTIVE_UNIT=pangolin-site retire_legacy_single_site_openrc 2>&1)
 if grep -qE 'rc-service pangolin-site (stop|start|restart)|rc-update del pangolin-site default' "$FAKE_LOG"; then
   fail "retire must not act without a legacy unit"
 fi
+
+# An orphaned runlevel symlink with no init script or wrapper (the systemd
+# sibling likewise removes its wants symlink) is still retired: the entry is in
+# the existence check and the removal set, so rc-update del runs and the link is
+# cleared even though the service is not running. The prior retire removed the
+# init and wrapper, so only the runlevel link is created here.
+: >"$FAKE_LOG"
+ln -sf "$legacy_init" "$tmpd/root/etc/runlevels/default/pangolin-site"
+noise="$(FAKE_INACTIVE_UNIT=pangolin-site retire_legacy_single_site_openrc 2>&1)" ||
+  fail "retire of an orphan runlevel link should succeed"
+[[ -z "$noise" ]] || fail "retire of an orphan link printed: $noise"
+grep -q 'rc-update del pangolin-site default' "$FAKE_LOG" ||
+  fail "retire must clear the runlevel entry for an orphan link"
+if grep -q 'rc-service pangolin-site stop' "$FAKE_LOG"; then
+  fail "retire must not stop an inactive legacy service"
+fi
+[[ ! -e "$tmpd/root/etc/runlevels/default/pangolin-site" ]] ||
+  fail "retire must remove the orphan runlevel symlink"
 
 # A missing supervise-daemon means the unit cannot restart, so the write refuses
 # before creating any file.
