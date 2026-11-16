@@ -620,7 +620,7 @@ write_site_systemd_template() {
   dir="$(site_config_dir)"
   unit="$(p /etc/systemd/system/pangolin-site@.service)"
   install -d -m 0755 "$(dirname "$dir")" "$(dirname "$unit")" || return 1
-  install -d -m 0700 "$dir" || return 1
+  ensure_site_config_dir || return 1
   if ! cat >"$unit" <<EOF
 [Unit]
 Description=Pangolin Site (CLI)
@@ -1724,6 +1724,98 @@ multi_site_requested() {
   return 1
 }
 
+# Ensure the per-slug site configuration directory exists with mode 0700.
+# install -d only applies -m when it creates the directory, so force the
+# mode afterwards: a pre-existing wider directory must never keep shared
+# credentials readable by others.
+ensure_site_config_dir() {
+  local dir
+  dir="$(site_config_dir)"
+  install -d -m 0700 "$dir" || return 1
+  chmod 0700 "$dir" || return 1
+}
+
+# Reconcile one installed site config with the SSH-owner policy. Exactly one
+# connector may run the host's embedded SSH daemon: the owner slug must not
+# declare disableSsh, and every other slug — plus every slug when the owner
+# is none or empty — must declare "disableSsh":true as the final key, the
+# only position the addon's config writers use. Configs whose content is not
+# the addon one-line JSON object are never rewritten: the caller must fail
+# and ask for a reconfigure instead. A missing config is skipped; creating
+# it is the caller's job.
+reconcile_site_ssh_owner() {
+  local slug="${1:-}" owner="${2:-}"
+  local cfg content new keeps=0
+  cfg="$(site_config_path "$slug")" || return 1
+  if [[ ! -f "$cfg" ]]; then
+    return 0
+  fi
+  if ! content="$(cat "$cfg" 2>/dev/null)"; then
+    echo "reconcile_site_ssh_owner: cannot read $cfg; rerun with var_reconfigure=1." >&2
+    return 1
+  fi
+  if [[ "$content" == *$'\n'* ]]; then
+    echo "reconcile_site_ssh_owner: $cfg is not in the addon one-line JSON format; rerun with var_reconfigure=1 to regenerate the configuration." >&2
+    return 1
+  fi
+  case "$content" in
+  '{'*'}') ;;
+  *)
+    echo "reconcile_site_ssh_owner: $cfg is not in the addon one-line JSON format; rerun with var_reconfigure=1 to regenerate the configuration." >&2
+    return 1
+    ;;
+  esac
+  if [[ -n "$owner" && "$owner" != none && "$owner" == "$slug" ]]; then
+    keeps=1
+  fi
+  new="$content"
+  if ((keeps == 1)); then
+    case "$content" in
+    *',"disableSsh":true}') new="${content%,\"disableSsh\":true\}}" ;;
+    *',"disableSsh":false}') new="${content%,\"disableSsh\":false\}}" ;;
+    *'"disableSsh"'*)
+      echo "reconcile_site_ssh_owner: $cfg has a disableSsh key outside the addon one-line format; rerun with var_reconfigure=1 to regenerate the configuration." >&2
+      return 1
+      ;;
+    esac
+  else
+    case "$content" in
+    *',"disableSsh":true}') ;;
+    *',"disableSsh":false}') new="${content%,\"disableSsh\":false\}},\"disableSsh\":true}" ;;
+    *'"disableSsh"'*)
+      echo "reconcile_site_ssh_owner: $cfg has a disableSsh key outside the addon one-line format; rerun with var_reconfigure=1 to regenerate the configuration." >&2
+      return 1
+      ;;
+    *) new="${content%\}},\"disableSsh\":true}" ;;
+    esac
+  fi
+  if [[ "$new" != "$content" ]]; then
+    write_private_file "$cfg" "$new" || return 1
+  fi
+  return 0
+}
+
+# Apply the SSH-owner policy to every listed slug with an installed config.
+# Flags written by the pre-multi-site entry carry no SSH_OWNER key, so the
+# policy is skipped there and legacy conversions keep their configs
+# byte-for-byte.
+_enforce_site_ssh_policy() {
+  local flags="${1:-}"
+  shift
+  local slug owner
+  if [[ -z "$flags" || ! -f "$flags" ]] || ! grep -q '^SSH_OWNER=' "$flags" 2>/dev/null; then
+    return 0
+  fi
+  owner="$(_env_value "$flags" SSH_OWNER || true)"
+  for slug in "$@"; do
+    if [[ -f "$(site_config_path "$slug" 2>/dev/null || true)" ]]; then
+      if ! reconcile_site_ssh_owner "$slug" "$owner"; then
+        return 1
+      fi
+    fi
+  done
+}
+
 # Convert a legacy single-site install to the per-slug template layout. One-way
 # and idempotent: the marker (or an installed template unit) makes every later
 # run use the template path, even with only `default`, and reverting requires
@@ -1736,8 +1828,11 @@ multi_site_requested() {
 # interrupted conversion converges. With only `default` on an unconverted host
 # it returns quietly and the caller keeps the legacy single-site path. In the
 # already-converted `template` state the import and legacy steps are skipped,
-# but requested non-default slugs are still installed and verified, so a
-# rerun after a failed extra slug converges instead of silently succeeding.
+# but every requested slug — the default included — is reconciled with
+# restart-if-was-active semantics, so a replaced sites/default.json takes
+# effect and a rerun after a failed extra slug converges instead of silently
+# succeeding. When the entry supplied an SSH_OWNER flag, the owner policy is
+# reconciled for every installed config before any instance starts.
 #
 # Safety rules, asserted by the test suite:
 #   - the same site credentials are never active twice: the legacy service is
@@ -1799,7 +1894,7 @@ convert_site_layout() {
     default_cfg="$(site_config_path default)"
     legacy_json="$(p /etc/pangolin/site.json)"
     if [[ ! -e "$default_cfg" ]]; then
-      install -d -m 0700 "$(site_config_dir)" || return 1
+      ensure_site_config_dir || return 1
       if [[ -f "$legacy_json" ]]; then
         # Byte-for-byte copy: credentials, provisioning key, and native state
         # carry over untouched, and the legacy file stays in place.
@@ -1812,6 +1907,15 @@ convert_site_layout() {
         echo "convert_site_layout: no site configuration to convert; provide $legacy_json or Newt credentials first." >&2
         return 1
       fi
+    fi
+
+    # Step 1b: apply the SSH-owner policy to every imported or supplied
+    # config, including a default that was not explicitly requested. An
+    # unreconciled config must never reach a running instance, so a refusal
+    # aborts here, before any backup, stop, or start.
+    if ! _enforce_site_ssh_policy "$flags" default "${slugs[@]}"; then
+      echo "convert_site_layout: the SSH-owner policy could not be applied; no instances were changed." >&2
+      return 1
     fi
 
     # Step 2: record what the legacy cleanup may remove once the conversion
@@ -1949,11 +2053,26 @@ convert_site_layout() {
     fi
   fi
 
-  # Step 6: reconcile the requested extra slugs. This runs on the template
-  # path too: a rerun after a failed extra slug must converge, not silently
-  # succeed while the slug is missing. A failure removes only that instance
-  # and leaves every verified instance running; the run still fails.
-  for slug in "${extra_slugs[@]}"; do
+  # Step 6: reconcile the requested slugs. This runs on the template path
+  # too: a rerun after a failed extra slug must converge, not silently
+  # succeed while the slug is missing. On the template path the default slug
+  # is included: a replaced sites/default.json must reach the running
+  # @default instance through the restart-if-was-active path. A failure
+  # removes only that instance and leaves every verified instance running;
+  # the run still fails.
+  local -a reconcile_slugs=()
+  if [[ "$state" == template ]]; then
+    # Reconcile must not start an instance whose SSH-owner state is unknown:
+    # apply the policy to every installed config first.
+    if ! _enforce_site_ssh_policy "$flags" "${slugs[@]}"; then
+      echo "convert_site_layout: the SSH-owner policy could not be applied; no instances were changed." >&2
+      return 1
+    fi
+    reconcile_slugs=("${slugs[@]}")
+  else
+    reconcile_slugs=("${extra_slugs[@]}")
+  fi
+  for slug in "${reconcile_slugs[@]}"; do
     local slug_cfg slug_was_active=0 slug_ok=1
     slug_cfg="$(site_config_path "$slug")"
     if [[ ! -f "$slug_cfg" ]]; then
@@ -2329,7 +2448,7 @@ _install_site_multi() {
     echo "Site SSH owner: $ssh_owner"
   fi
   if [[ -d "$answers/sites" ]]; then
-    if ! install -d -m 0700 "$(site_config_dir)"; then
+    if ! ensure_site_config_dir; then
       echo "Failed to create $(site_config_dir)." >&2
       return 1
     fi

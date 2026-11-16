@@ -1957,17 +1957,26 @@ assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
   fail "a verified default must still retire the legacy unit"
 [[ -f "$(site_config_path orgb)" ]] || fail "the failed slug config must stay for diagnostics"
 
-# (8) A rerun with the template marker and only default requested is a quiet
-# no-op: no re-import, no rewrite, and no service call at all.
+# (8) A rerun with the template marker and only default requested reconciles
+# the default instance in place: the running @default is reinstalled and
+# restarted (restart-if-was-active) and re-verified, with no re-import and no
+# legacy file or legacy service touch.
 write_private_file "$t5_root/etc/pangolin/site.json" "SENTINEL-LEGACY"
-write_private_file "$t5_default_cfg" "SENTINEL-DEFAULT"
+t5_default_now="$(site_config_static "https://p.example" idR secR)"
+write_private_file "$t5_default_cfg" "$t5_default_now"
 : >"$FAKE_LOG"
 convert_site_layout systemd "" default || fail "a rerun on template state should succeed"
-[[ "$(cat "$t5_default_cfg")" == "SENTINEL-DEFAULT" ]] ||
+[[ "$(cat "$t5_default_cfg")" == "$t5_default_now" ]] ||
   fail "a rerun must not re-import or rewrite the default config"
+grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
+  fail "a rerun must reconcile the default instance"
+grep -q '^systemctl restart pangolin-site@default$' "$FAKE_LOG" ||
+  fail "an active default instance must be restarted on rerun"
+if grep -qE '^systemctl (stop|start|disable) pangolin-site$' "$FAKE_LOG"; then
+  fail "a template rerun must not touch the legacy service"
+fi
 [[ "$(cat "$t5_root/etc/pangolin/site.json")" == "SENTINEL-LEGACY" ]] ||
   fail "a rerun must not touch the legacy site.json"
-[[ ! -s "$FAKE_LOG" ]] || fail "a default-only rerun on template state must not touch services"
 assert_eq "template" "$(cat "$t5_root/var/lib/pangolin/site-layout")"
 
 # (8b) The rerun must still install a requested extra slug: after the failed
@@ -1977,7 +1986,7 @@ convert_site_layout systemd "" default orgb ||
   fail "a template-state rerun must install the requested extra slug"
 grep -q '^systemctl enable --now pangolin-site@orgb$' "$FAKE_LOG" ||
   fail "the rerun must start pangolin-site@orgb"
-[[ "$(cat "$t5_default_cfg")" == "SENTINEL-DEFAULT" ]] ||
+[[ "$(cat "$t5_default_cfg")" == "$t5_default_now" ]] ||
   fail "the extras path must not re-import the default config"
 
 # (9) A single non-default slug with no flag still triggers conversion.
@@ -2189,14 +2198,39 @@ echo "pct $*" >>"$FAKE_LOG"
 [[ "${1:-}" == exec || "${1:-}" == push ]] || exit 1
 exit 0
 EOF
+cat >"$t6/bin/rc-service" <<'EOF'
+#!/usr/bin/env bash
+echo "rc-service $*" >>"$FAKE_LOG"
+if [[ "$2" == "status" ]]; then
+  [[ -z "${FAKE_INACTIVE_UNIT:-}" || "$1" != "$FAKE_INACTIVE_UNIT" ]] || exit 3
+fi
+exit 0
+EOF
+cat >"$t6/bin/rc-update" <<'EOF'
+#!/usr/bin/env bash
+echo "rc-update $*" >>"$FAKE_LOG"
+case "$1" in
+add) ln -sf "$PANGOLIN_ROOT/etc/init.d/$2" "$PANGOLIN_ROOT/etc/runlevels/default/$2" ;;
+del)
+  entry="$PANGOLIN_ROOT/etc/runlevels/default/$2"
+  if [[ -e "$entry" || -L "$entry" ]]; then rm -f "$entry"; else exit 1; fi
+  ;;
+esac
+exit 0
+EOF
 printf '#!/usr/bin/env bash\nexit 0\n' >"$t6/bin/pangolin"
+for c in supervise-daemon logrotate; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$t6/bin/$c"
+done
+mkdir -p "$t6/root/etc/init.d" "$t6/root/etc/runlevels/default" "$t6/root/etc/logrotate.d" "$t6/root/var/log"
 chmod 755 "$t6"/bin/*
 
 t6_reset() {
   rm -rf "$t6/root" "$t6/answers"
-  mkdir -p "$t6/root/etc/systemd/system/multi-user.target.wants" "$t6/root/etc/pangolin" \
-    "$t6/root/var/lib/pangolin" "$t6/root/var/log" "$t6/root/usr/local/bin" \
-    "$t6/answers/sites"
+  mkdir -p "$t6/root/etc/systemd/system/multi-user.target.wants" "$t6/root/etc/init.d" \
+    "$t6/root/etc/runlevels/default" "$t6/root/etc/logrotate.d" \
+    "$t6/root/etc/pangolin" "$t6/root/var/lib/pangolin" "$t6/root/var/log" \
+    "$t6/root/usr/local/bin" "$t6/answers/sites"
   printf '#!/bin/sh\nexit 0\n' >"$t6/root/usr/local/bin/pangolin"
   chmod 755 "$t6/root/usr/local/bin/pangolin"
 }
@@ -2256,7 +2290,7 @@ fi
 t6_reset
 t6_write_answers
 t6_flags 'SITE_SLUGS=default orgb
-SSH_OWNER=orgb
+SSH_OWNER=default
 MULTI_SITE=1'
 : >"$FAKE_LOG"
 t6_rc=0
@@ -2285,7 +2319,7 @@ fi
 t6_reset
 t6_write_answers
 t6_flags 'SITE_SLUGS=default orgb
-SSH_OWNER=orgb
+SSH_OWNER=default
 MULTI_SITE=1'
 : >"$FAKE_LOG"
 t6_rc=0
@@ -2425,8 +2459,166 @@ t6_run_main "$t6/out" || t6_rc=$?
 grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
   fail "T6-11 MULTI_SITE=true must convert"
 
+# (T6-12) Template-state rerun with a replaced default config reconciles and
+# restarts the active @default instance: no re-import, no legacy touch.
+t6_reset
+t6_write_answers
+printf 'template\n' >"$t6/root/var/lib/pangolin/site-layout"
+printf '[Unit]\n' >"$t6/root/etc/systemd/system/pangolin-site@.service"
+cfg_old="$(site_config_static "https://p.example" idOLD secOLD)"
+write_private_file "$t6/root/etc/pangolin/site.json" "SENTINEL-LEGACY-JSON"
+mkdir -p "$(site_config_dir)"
+write_private_file "$(site_config_path default)" "$cfg_old"
+t6_flags 'SITE_SLUGS=default
+SSH_OWNER=default
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-12 default reconcile should succeed: $(cat "$t6/out")"; }
+grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
+  fail "T6-12 the replaced default config must be reinstalled"
+grep -q '^systemctl restart pangolin-site@default$' "$FAKE_LOG" ||
+  fail "T6-12 an active default instance must be restarted"
+grep -q '"id":"idD"' "$(site_config_path default)" ||
+  fail "T6-12 the answers default config must replace the old one"
+[[ "$(cat "$t6/root/etc/pangolin/site.json")" == "SENTINEL-LEGACY-JSON" ]] ||
+  fail "T6-12 the legacy site.json must stay untouched"
+if grep -qE '^systemctl (stop|disable|start) pangolin-site$' "$FAKE_LOG"; then
+  fail "T6-12 a template-state rerun must not touch the legacy service"
+fi
+if grep -q '^systemctl enable --now pangolin-site@orgb$' "$FAKE_LOG"; then
+  fail "T6-12 answers orgb must not make orgb requested (SITE_SLUGS=default only)"
+fi
+
+# (T6-13) SSH owner policy default to nondefault (systemd): the imported
+# default config gets disableSsh, the owner slug does not, exactly one
+# effective owner.
+t6_reset
+write_private_file "$t6/root/etc/pangolin/site.json" \
+  "$(site_config_static "https://p.example" idL secL)"
+write_private_file "$(site_config_path orgb)" \
+  "$(site_config_static "https://p.example" idB secB)"
+t6_flags 'SITE_SLUGS=default orgb
+SSH_OWNER=orgb
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-13 owner migration should succeed: $(cat "$t6/out")"; }
+grep -q '"disableSsh":true' "$(site_config_path default)" ||
+  fail "T6-13 the imported non-owner default must gain disableSsh"
+if grep -q '"disableSsh"' "$(site_config_path orgb)"; then
+  fail "T6-13 the owner slug must not declare disableSsh"
+fi
+grep -q '"id":"idL"' "$(site_config_path default)" ||
+  fail "T6-13 the policy must keep the imported credentials"
+python3 - "$(site_config_path default)" "$(site_config_path orgb)" <<'PY'
+import json, sys
+d0 = json.load(open(sys.argv[1]))
+assert d0["id"] == "idL" and d0["secret"] == "secL" and d0["disableSsh"] is True, d0
+d1 = json.load(open(sys.argv[2]))
+assert d1["id"] == "idB" and "disableSsh" not in d1, d1
+PY
+owners=0
+for f in "$t6/root/etc/pangolin/sites"/*.json; do
+  grep -q '"disableSsh":true' "$f" || owners=$((owners + 1))
+done
+[[ "$owners" == 1 ]] || fail "T6-13 exactly one slug may keep the SSH daemon, got $owners"
+grep -q '^systemctl enable --now pangolin-site@default$' "$FAKE_LOG" ||
+  fail "T6-13 the default instance must still start"
+
+# (T6-14) SSH owner policy owner to none (systemd, template state): every
+# requested slug gets disableSsh before and during the reconcile.
+t6_reset
+printf 'template\n' >"$t6/root/var/lib/pangolin/site-layout"
+printf '[Unit]\n' >"$t6/root/etc/systemd/system/pangolin-site@.service"
+mkdir -p "$(site_config_dir)"
+write_private_file "$(site_config_path default)" \
+  "$(site_config_static "https://p.example" idD secD 0 0 pangolin pangolin 1)"
+write_private_file "$(site_config_path orga)" \
+  "$(site_config_static "https://p.example" idA secA)"
+t6_flags 'SITE_SLUGS=default orga
+SSH_OWNER=none
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+t6_rc=0
+t6_run_main "$t6/out" || t6_rc=$?
+[[ "$t6_rc" -eq 0 ]] || { fail "T6-14 owner none must succeed: $(cat "$t6/out")"; }
+grep -q '"disableSsh":true' "$(site_config_path default)" || fail "T6-14 default"
+grep -q '"disableSsh":true' "$(site_config_path orga)" ||
+  fail "T6-14 the previous owner must lose SSH"
+python3 - "$(site_config_path default)" "$(site_config_path orga)" <<'PY'
+import json, sys
+for path in sys.argv[1:]:
+    d = json.load(open(path))
+    assert d["disableSsh"] is True, d
+    assert "id" in d and "endpoint" in d, d
+PY
+for f in "$t6/root/etc/pangolin/sites"/*.json; do
+  grep -q '"disableSsh":true' "$f" || fail "T6-14 a slug kept SSH with owner none"
+done
+
+# (T6-15) SSH owner policy default to nondefault on OpenRC.
+t6_reset
+write_private_file "$t6/root/etc/pangolin/site.json" \
+  "$(site_config_static "https://p.example" idL secL)"
+write_private_file "$(site_config_path orga)" \
+  "$(site_config_static "https://p.example" idA secA)"
+t6_flags 'SITE_SLUGS=default orga
+SSH_OWNER=orga
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+convert_site_layout openrc "$t6/answers/flags" default orga ||
+  fail "T6-15 the OpenRC owner migration must succeed"
+grep -q '"disableSsh":true' "$(site_config_path default)" ||
+  fail "T6-15 the imported OpenRC default must gain disableSsh"
+if grep -q '"disableSsh"' "$(site_config_path orga)"; then
+  fail "T6-15 the OpenRC owner slug must keep SSH"
+fi
+grep -q '^rc-update add pangolin-site-default default$' "$FAKE_LOG" ||
+  fail "T6-15 the default instance must still be enabled"
+
+# (T6-16) A config outside the addon one-line JSON shape is never rewritten:
+# the conversion fails with a reconfigure message before any instance starts.
+t6_reset
+printf 'template\n' >"$t6/root/var/lib/pangolin/site-layout"
+mkdir -p "$(site_config_dir)"
+printf '{\n  "endpoint": "https://p.example",\n  "id": "idD",\n  "secret": "secD"\n}\n' \
+  >"$(site_config_path default)"
+chmod 600 "$(site_config_path default)"
+t6_flags 'SITE_SLUGS=default
+SSH_OWNER=default
+MULTI_SITE=1'
+: >"$FAKE_LOG"
+reconcile_err="$(convert_site_layout systemd "$t6/answers/flags" default 2>&1 >/dev/null)" && {
+  fail "T6-16 an unknown config shape must fail the conversion"
+}
+case "$reconcile_err" in
+*one-line*) ;;
+*) echo "T6-16 format message: $reconcile_err" >&2; exit 1 ;;
+esac
+case "$reconcile_err" in
+*var_reconfigure=1*) ;;
+*) echo "T6-16 reconfigure guidance: $reconcile_err" >&2; exit 1 ;;
+esac
+[[ ! -s "$FAKE_LOG" ]] || fail "T6-16 no instance may start with an unreconciled config"
+if grep -q '"disableSsh"' "$(site_config_path default)"; then
+  fail "T6-16 an unknown shape must not be rewritten"
+fi
+
+# (T6-17) The sites directory is forced private 0700 even when it already
+# exists with a wider mode, matching the answers-directory policy.
+t6_reset
+write_private_file "$t6/root/etc/pangolin/site.json" "$t6_cfg_d"
+install -d -m 0755 "$(site_config_dir)"
+t6_flags 'SITE_SLUGS=default
+SSH_OWNER=default
+MULTI_SITE=1'
+convert_site_layout systemd "$t6/answers/flags" default || fail "T6-17 conversion must succeed"
+assert_eq "700" "$(stat -c '%a' "$(site_config_dir)")"
+
 unset FAKE_LOG
-export PATH="$t6_old_path"
 export PANGOLIN_ROOT="$t6_old_root"
 export PANGOLIN_BIN="$t6_old_bin"
 if [[ -n "$t6_old_log" ]]; then export FAKE_LOG="$t6_old_log"; else unset FAKE_LOG; fi

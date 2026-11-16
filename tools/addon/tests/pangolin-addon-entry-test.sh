@@ -2414,10 +2414,10 @@ printf '[Unit]\n' >"$s6/fakeroot/etc/systemd/system/pangolin-site@.service"
 if ! itc_out="$(
   var_mode= var_targets= var_target= var_sites= var_site_ssh_owner= \
     var_pangolin_endpoint= var_site_id= var_site_secret= \
-    FAKE_MODE_OUT=site FAKE_TARGETS_OUT='"host" "101"' _run6 2>&1)"; then
+    FAKE_MODE_OUT=site FAKE_TARGETS_OUT='"host"' _run6 2>&1)"; then
   echo "interactive converted-host run failed: $itc_out" >&2; exit 1
 fi
-assert_eq $'host\n101' "$(cat "$s6/ran")"
+assert_eq "host" "$(cat "$s6/ran")"
 grep -qx 'MULTI_SITE=1' "$s6/snap/host/flags" ||
   { echo "the converted host must use the per-slug layout: $itc_out" >&2; exit 1; }
 grep -qx 'SITE_SLUGS=default' "$s6/snap/host/flags" ||
@@ -2430,10 +2430,6 @@ grep -q '"secret":"sec"' "$s6/snap/host/sites/default.json" ||
   { echo "the entered site secret must reach the converted host" >&2; exit 1; }
 [[ ! -e "$s6/snap/host/site.json" ]] ||
   { echo "the converted host must not write the legacy site.json" >&2; exit 1; }
-grep -qx 'MULTI_SITE=0' "$s6/snap/101/flags" ||
-  { echo "the unconverted target must stay on the legacy path" >&2; exit 1; }
-[[ -f "$s6/snap/101/site.json" ]] ||
-  { echo "the unconverted target must write site.json" >&2; exit 1; }
 case "$itc_out" in
 *"host: ok (site)"*) ;;
 *) echo "converted host summary missing: $itc_out" >&2; exit 1 ;;
@@ -2523,6 +2519,31 @@ case "$e15_out" in
 *) echo "E15 must name the incomplete slug: $e15_out" >&2; exit 1 ;;
 esac
 [[ ! -s "$s6/ran" ]] || { echo "E15 payload ran without extra slug credentials" >&2; exit 1; }
+
+# E17: the interactive legacy path must dedupe static site IDs across
+# targets. The fake whiptail types the same Site ID for both targets; the
+# second target must fail before its answers are pushed or its payload runs.
+_reset6
+: >"$s6/wlog"
+e17_rc=0
+e17_out="$(var_mode= var_targets= var_target= var_sites= var_site_ssh_owner= \
+  var_pangolin_endpoint=https://p.example FAKE_MODE_OUT=site \
+  FAKE_TARGETS_OUT='"host" "101"' _run6 2>&1)" || e17_rc=$?
+[[ "$e17_rc" -ne 0 ]] || { echo "E17 duplicate entered site ID must fail the run" >&2; exit 1; }
+assert_eq "host" "$(cat "$s6/ran")"
+if grep -q 'pct push 101' "$s6/log"; then
+  echo "E17 the second target must not install its answers" >&2; exit 1
+fi
+case "$e17_out" in
+*"Duplicate site ID"*) ;;
+*) echo "E17 duplicate message missing: $e17_out" >&2; exit 1 ;;
+esac
+case "$e17_out" in
+*"101: failed"*) ;;
+*) echo "E17 summary must report 101 failed: $e17_out" >&2; exit 1 ;;
+esac
+assert_eq "2" "$(grep -c -- '--inputbox Site ID' "$s6/wlog")"
+_reset6
 
 # E4: interactive slug prompts reuse already-valid suffixed values and keep the
 # shared SSH owner selection.

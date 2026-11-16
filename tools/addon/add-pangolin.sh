@@ -2178,6 +2178,14 @@ _install_target() {
     else
       _warn_provisioning_risks "$reconfigure" "$site"
       site_answers="$(_resolve_site_answers "$target" "$reconfigure")" || return 1
+      # The interactive legacy path types credentials per target with no
+      # environment to scan, so dedupe the static site ID here, before any
+      # change for this target. Unattended runs already validated the same
+      # set in _validate_site_plan; recording again is consistent.
+      if [[ "$site_answers" == 1 && -z "${var_site_provisioning_key:-}" ]] &&
+        [[ -n "${var_site_id:-}" ]]; then
+        _remember_site_id "$var_site_id" || return 1
+      fi
       if ! _native_config_possible "$target" "$site_answers"; then
         msg_error "Native site interfaces are enabled but the existing site configuration does not match; set var_reconfigure=1 to apply them."
         return 1
