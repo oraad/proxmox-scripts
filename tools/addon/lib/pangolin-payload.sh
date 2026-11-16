@@ -832,16 +832,18 @@ EOF
   chmod 0755 "$unit"
 }
 
-# Write /etc/logrotate.d/pangolin when logrotate is installed. Both OpenRC log
-# paths are covered because either component may install first. A write failure
-# warns instead of failing the service install: log rotation is auxiliary.
+# Write /etc/logrotate.d/pangolin when logrotate is installed. The site glob
+# covers the legacy single-instance log and every /var/log/pangolin-site-<slug>.log
+# per-slug log; the client path stays literal. Both components may install first,
+# so each write the full set. A write failure warns instead of failing the
+# service install: log rotation is auxiliary.
 _write_logrotate() {
   local file
   command -v logrotate >/dev/null 2>&1 || return 0
   file="$(p /etc/logrotate.d/pangolin)"
   install -d -m 0755 "$(dirname "$file")" || return 1
   if ! cat >"$file" <<EOF
-$(p /var/log/pangolin-site.log)
+$(p "/var/log/pangolin-site*.log")
 $(p /var/log/pangolin-client.log) {
     size 10M
     rotate 5
@@ -920,9 +922,10 @@ EOF
   return 0
 }
 
-# Enable and start an OpenRC service, then wait for it to become active. An
-# already-active service is restarted so the new configuration takes effect.
-_start_openrc_service() {
+# Add a service to the default runlevel and start it, restarting it when it was
+# already active so the new configuration takes effect. The active wait lives in
+# the caller so the single-site and per-slug policies can differ.
+_enable_openrc_instance() {
   local name="$1" was_active="${2:-0}"
   if ! rc-update add "$name" default; then
     echo "Failed to enable the $name service" >&2
@@ -932,9 +935,14 @@ _start_openrc_service() {
     echo "Failed to start the $name service" >&2
     return 1
   fi
-  if ! _restart_if_was_active openrc "$name" "$was_active"; then
-    return 1
-  fi
+  _restart_if_was_active openrc "$name" "$was_active"
+}
+
+# Enable and start an OpenRC service, then wait for it to become active. An
+# already-active service is restarted so the new configuration takes effect.
+_start_openrc_service() {
+  local name="$1" was_active="${2:-0}"
+  _enable_openrc_instance "$name" "$was_active" || return 1
   if ! wait_service_active openrc "$name" 30 1; then
     echo "The $name service did not become active" >&2
     return 1
@@ -955,6 +963,142 @@ install_client_openrc() {
   local id="$1" secret="$2" endpoint="$3" was_active="${4:-0}"
   write_client_openrc "$id" "$secret" "$endpoint" || return 1
   _start_openrc_service pangolin-client "$was_active"
+}
+
+# Print the OpenRC service name for a validated slug. OpenRC has no template
+# units, so each slug gets its own init script named pangolin-site-<slug>.
+site_openrc_instance() {
+  printf 'pangolin-site-%s' "$1"
+}
+
+# Succeed while a slug's OpenRC service is active. The conversion caller records
+# this before touching the service so only running services are restarted later.
+site_instance_was_active_openrc() {
+  rc-service "$(site_openrc_instance "$1")" status >/dev/null 2>&1
+}
+
+# Write the per-slug wrapper and its OpenRC unit. The wrapper lives under
+# PANGOLIN_ROOT so tests can inspect it, but the CONFIG_FILE it exports is the
+# production path with the test root stripped, so the installed wrapper points at
+# the real config, never a test directory. This mirrors write_site_systemd_template
+# keeping Environment=CONFIG_FILE on the literal production layout. The path is
+# single-quoted so the assignment cannot split or run anything.
+write_site_openrc_slug() {
+  local slug="$1" config_path="$2" name wrapper log_path prod_config quoted
+  _require_supervise_daemon || return 1
+  name="$(site_openrc_instance "$slug")"
+  wrapper="$(p "/usr/local/bin/$name-start")"
+  log_path="$(p "/var/log/$name.log")"
+  prod_config="${config_path#"$PANGOLIN_ROOT"}"
+  install -d -m 0755 "$(dirname "$wrapper")" "$(dirname "$log_path")" || return 1
+  install -d -m 0700 "$(site_config_dir)" || return 1
+  install -m 0700 /dev/null "$wrapper" || return 1
+  quoted="$(_shell_single_quote "$prod_config")"
+  if ! cat >"$wrapper" <<EOF
+#!/bin/sh
+CONFIG_FILE=$quoted
+export CONFIG_FILE
+exec "$PANGOLIN_BIN" up site
+EOF
+  then
+    echo "Failed to write $wrapper" >&2
+    return 1
+  fi
+  _write_openrc_unit "$name" "Pangolin Site (CLI)" "$wrapper" "$log_path" || return 1
+  _write_logrotate || echo "Warning: failed to write $(p /etc/logrotate.d/pangolin)" >&2
+  return 0
+}
+
+# Wait for a slug's service to become active, then for its configuration to hold
+# credentials instead of a provisioning key. The policy is 30x1s; the internal
+# PANGOLIN_SERVICE_ATTEMPTS and PANGOLIN_SERVICE_DELAY overrides exist only so
+# the test suite runs without sleeping.
+verify_site_openrc_slug() {
+  local slug="$1" config_path="$2" name
+  local attempts="${PANGOLIN_SERVICE_ATTEMPTS:-30}" delay="${PANGOLIN_SERVICE_DELAY:-1}"
+  name="$(site_openrc_instance "$slug")"
+  if ! wait_service_active openrc "$name" "$attempts" "$delay"; then
+    echo "The $name service did not become active" >&2
+    return 1
+  fi
+  if ! wait_for_provisioning "$config_path" "$attempts" "$delay"; then
+    echo "The $name service did not complete provisioning." >&2
+    return 1
+  fi
+}
+
+# Start a slug's service against its per-slug configuration, then verify it.
+# was_active=1 restarts the service after enabling so new configuration applies.
+start_site_openrc_slug() {
+  local slug="$1" was_active="${2:-0}"
+  _enable_openrc_instance "$(site_openrc_instance "$slug")" "$was_active" || return 1
+  verify_site_openrc_slug "$slug" "$(site_config_path "$slug")"
+}
+
+# Stop a slug's service.
+stop_site_openrc_slug() {
+  stop_service openrc "$(site_openrc_instance "$1")"
+}
+
+# Stop an active service and remove it from the default runlevel. The wrapper,
+# unit, log, and per-slug config stay in place for the caller.
+disable_site_openrc_slug() {
+  local slug="$1" name
+  name="$(site_openrc_instance "$slug")"
+  if rc-service "$name" status >/dev/null 2>&1; then
+    stop_site_openrc_slug "$slug" || {
+      echo "Failed to stop the $name service" >&2
+      return 1
+    }
+  fi
+  if ! rc-update del "$name" default; then
+    echo "Failed to disable the $name service" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Conversion building block for one slug: write the wrapper and unit, enable and
+# start the service, restart it when it was already active, then verify the
+# service and its provisioning against the given configuration. This helper never
+# touches the legacy single-instance service: like install_site_systemd_slug it
+# stays legacy-blind, and Task 5 orders stopping legacy before starting the
+# default instance and calls retire_legacy_single_site_openrc only afterwards.
+install_site_openrc_slug() {
+  local slug="$1" config_path="$2" was_active="${3:-0}"
+  write_site_openrc_slug "$slug" "$config_path" || return 1
+  _enable_openrc_instance "$(site_openrc_instance "$slug")" "$was_active" || return 1
+  verify_site_openrc_slug "$slug" "$config_path"
+}
+
+# Retire the legacy single-instance OpenRC service: stop it when still running,
+# remove it from the default runlevel, and delete its init script and wrapper.
+# Only the legacy pangolin-site plumbing is touched: per-slug instances, the
+# template state, the site configurations, install backups, and the conversion
+# marker all stay for the caller. A host with no legacy unit or wrapper returns
+# quietly.
+retire_legacy_single_site_openrc() {
+  local legacy=pangolin-site init wrapper
+  init="$(p "/etc/init.d/$legacy")"
+  wrapper="$(p "/usr/local/bin/$legacy-start")"
+  if rc-service "$legacy" status >/dev/null 2>&1; then
+    rc-service "$legacy" stop || {
+      echo "Failed to stop the $legacy service" >&2
+      return 1
+    }
+  fi
+  if [[ ! -e "$init" && ! -L "$init" && ! -e "$wrapper" && ! -L "$wrapper" ]]; then
+    return 0
+  fi
+  if ! rc-update del "$legacy" default; then
+    echo "Failed to disable the $legacy service" >&2
+    return 1
+  fi
+  if ! rm -f "$init" "$wrapper"; then
+    echo "Failed to remove the $legacy service files" >&2
+    return 1
+  fi
+  return 0
 }
 
 # Print the value of KEY from a KEY=value file, removing one layer of matching

@@ -581,7 +581,7 @@ lr="$tmpd/root/etc/logrotate.d/pangolin"
 for token in copytruncate size rotate compress missingok notifempty; do
   grep -q "$token" "$lr" || fail "logrotate config missing $token"
 done
-grep -q "$tmpd/root/var/log/pangolin-site.log" "$lr" || fail "logrotate site log path"
+grep -q "$tmpd/root/var/log/pangolin-site\*\.log" "$lr" || fail "logrotate site log glob"
 grep -q "$tmpd/root/var/log/pangolin-client.log" "$lr" || fail "logrotate client log path"
 # Run the wrapper: the sourced env must reach the CLI, but not through argv.
 "$client_wrapper" || fail "client wrapper should run"
@@ -1232,3 +1232,260 @@ export PANGOLIN_BIN="$old_pangolin_bin"
 if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
 
 echo "Multi-site Task 3 tests passed"
+
+# Multi-site Task 4: per-slug OpenRC backend. The fakes log every rc-update and
+# rc-service call; rc-service "status" fails for FAKE_INACTIVE_UNIT (or all when
+# FAKE_INACTIVE=1). The per-slug wrapper execs the fake pangolin, which records
+# argv and the exported CONFIG_FILE so the production path is verified end-to-end.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin" "$tmpd/root/etc/init.d" "$tmpd/root/usr/local/bin" \
+  "$tmpd/root/etc/pangolin" "$tmpd/root/etc/logrotate.d" "$tmpd/root/var/log"
+for c in rc-update supervise-daemon logrotate; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
+  chmod 755 "$tmpd/bin/$c"
+done
+cat >"$tmpd/bin/rc-service" <<'EOF'
+#!/usr/bin/env bash
+echo "rc-service $*" >>"$FAKE_LOG"
+if [[ "$2" == "status" ]]; then
+  [[ -z "${FAKE_INACTIVE_UNIT:-}" || "$1" != "$FAKE_INACTIVE_UNIT" ]] || exit 3
+  [[ "${FAKE_INACTIVE:-0}" != "1" ]] || exit 3
+fi
+exit 0
+EOF
+cat >"$tmpd/bin/pangolin" <<'EOF'
+#!/usr/bin/env bash
+printf 'argv=%s\n' "$*" >>"$FAKE_LOG"
+printf 'CONFIG_FILE=%s\n' "${CONFIG_FILE:-}" >>"$FAKE_LOG"
+EOF
+chmod 755 "$tmpd/bin/rc-service" "$tmpd/bin/pangolin"
+
+old_path="$PATH"
+old_pangolin_root="$PANGOLIN_ROOT"
+old_pangolin_bin="$PANGOLIN_BIN"
+old_fake_log="${FAKE_LOG:-}"
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_ROOT="$tmpd/root"
+export PANGOLIN_BIN="$tmpd/bin/pangolin"
+# Test-only wait overrides; the production policy stays 30x1s.
+export PANGOLIN_SERVICE_ATTEMPTS=1
+export PANGOLIN_SERVICE_DELAY=0
+
+# (2) Slug-specific instance names.
+assert_eq "pangolin-site-orga" "$(site_openrc_instance orga)"
+assert_eq "pangolin-site-org-a" "$(site_openrc_instance org-a)"
+
+# (1, 3) Per-slug wrapper and unit. The wrapper's CONFIG_FILE is the production
+# path, never the test root; the unit is named and located per slug.
+cfg="$(site_config_path org-a)"
+[[ "$cfg" == *"/etc/pangolin/sites/org-a.json" ]] || fail "config path layout"
+write_private_file "$cfg" "$(site_config_static "https://p.example" id1 sec1)"
+write_site_openrc_slug org-a "$cfg" || fail "per-slug write should succeed"
+slug_unit="$tmpd/root/etc/init.d/pangolin-site-org-a"
+slug_wrapper="$tmpd/root/usr/local/bin/pangolin-site-org-a-start"
+[[ -f "$slug_unit" ]] || fail "per-slug unit should exist at the slug path"
+[[ -f "$slug_wrapper" ]] || fail "per-slug wrapper should exist at the slug path"
+grep -qx 'name="pangolin-site-org-a"' "$slug_unit" || fail "unit name is the slug instance"
+grep -q "CONFIG_FILE='/etc/pangolin/sites/org-a.json'" "$slug_wrapper" ||
+  fail "wrapper must use the production config path"
+if grep -q "$tmpd/root" "$slug_wrapper"; then
+  fail "wrapper must not bake in the test root"
+fi
+
+# (2, 4) Modes and supervise-daemon restart settings.
+[[ "$(stat -c '%a' "$slug_wrapper")" == "700" ]] || fail "per-slug wrapper mode"
+[[ "$(stat -c '%a' "$slug_unit")" == "755" ]] || fail "per-slug unit mode"
+grep -q 'supervisor=supervise-daemon' "$slug_unit" || fail "per-slug supervisor"
+grep -q 'respawn_delay=2' "$slug_unit" || fail "per-slug respawn delay"
+grep -q 'respawn_max=0' "$slug_unit" || fail "per-slug respawn max"
+grep -q 'command_user=root' "$slug_unit" || fail "per-slug command user"
+grep -q "command=\"$slug_wrapper\"" "$slug_unit" || fail "per-slug unit command"
+grep -q "output_log=\"$tmpd/root/var/log/pangolin-site-org-a.log\"" "$slug_unit" ||
+  fail "per-slug log path"
+
+# (7) The active wait and provisioning check use the instance name. verify passes
+# on the slug's credential config and fails on a provisioning-key config.
+: >"$FAKE_LOG"
+verify_site_openrc_slug org-a "$cfg" || fail "verify should pass with credentials"
+grep -q 'rc-service pangolin-site-org-a status' "$FAKE_LOG" ||
+  fail "the wait must use the slug instance name"
+prov_cfg="$(site_config_path provorg)"
+write_private_file "$prov_cfg" "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1")"
+if verify_site_openrc_slug provorg "$prov_cfg"; then
+  fail "verify must wait on the per-slug provisioning config"
+fi
+
+# site_instance_was_active_openrc reports the instance state from rc-service.
+site_instance_was_active_openrc org-a || fail "instance should read as active"
+export FAKE_INACTIVE_UNIT='pangolin-site-org-a'
+if site_instance_was_active_openrc org-a; then fail "inactive instance should read false"; fi
+unset FAKE_INACTIVE_UNIT
+
+# (5, 6) Fresh start enables and starts without restarting; an active start
+# restarts after start and before the active wait.
+: >"$FAKE_LOG"
+start_site_openrc_slug org-a 0 || fail "fresh instance should start"
+grep -q 'rc-update add pangolin-site-org-a default' "$FAKE_LOG" || fail "instance enable"
+grep -q 'rc-service pangolin-site-org-a start' "$FAKE_LOG" || fail "instance start"
+if grep -q 'rc-service pangolin-site-org-a restart' "$FAKE_LOG"; then
+  fail "fresh instance must not restart"
+fi
+: >"$FAKE_LOG"
+start_site_openrc_slug org-a 1 || fail "active instance should start"
+grep -q 'rc-service pangolin-site-org-a restart' "$FAKE_LOG" || fail "active instance should restart"
+start_line="$(grep -n 'rc-service pangolin-site-org-a start' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+restart_line="$(grep -n 'rc-service pangolin-site-org-a restart' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+status_line="$(grep -n 'rc-service pangolin-site-org-a status' "$FAKE_LOG" | head -n 1 | cut -d: -f1)"
+[[ "$start_line" -lt "$restart_line" ]] || fail "start must precede the restart"
+[[ "$restart_line" -lt "$status_line" ]] || fail "restart must precede the active wait"
+
+# stop_site_openrc_slug stops the slug instance.
+: >"$FAKE_LOG"
+stop_site_openrc_slug org-a || fail "stop should succeed"
+grep -q 'rc-service pangolin-site-org-a stop' "$FAKE_LOG" || fail "instance stop call"
+
+# (8) Disable stops an active instance and removes it from the default runlevel.
+: >"$FAKE_LOG"
+disable_site_openrc_slug org-a || fail "disable should succeed"
+grep -q 'rc-service pangolin-site-org-a stop' "$FAKE_LOG" || fail "disable must stop the instance"
+grep -q 'rc-update del pangolin-site-org-a default' "$FAKE_LOG" || fail "instance disable call"
+
+# (10) log rotation globs the per-slug site logs plus the unchanged client log.
+lr="$tmpd/root/etc/logrotate.d/pangolin"
+[[ -f "$lr" ]] || fail "logrotate config should be written"
+grep -q "$tmpd/root/var/log/pangolin-site\*\.log" "$lr" || fail "logrotate site glob"
+grep -q "$tmpd/root/var/log/pangolin-client.log" "$lr" || fail "logrotate client log path"
+
+# The wrapper runs against the CLI with the production config exported, and the
+# exec line carries no credentials.
+"$slug_wrapper" || fail "per-slug wrapper should run"
+grep -q "^CONFIG_FILE=/etc/pangolin/sites/org-a.json$" "$FAKE_LOG" ||
+  fail "wrapper must export the production CONFIG_FILE"
+grep -q '^argv=up site$' "$FAKE_LOG" || fail "wrapper argv"
+
+# (11) install_site_openrc_slug never touches the legacy single instance, on
+# either the success or the failure path, even with a legacy install present and
+# running. Legacy retirement is a separate caller-ordered step (Task 5).
+legacy_init="$tmpd/root/etc/init.d/pangolin-site"
+legacy_wrapper="$tmpd/root/usr/local/bin/pangolin-site-start"
+printf '#!/sbin/openrc-run\n' >"$legacy_init"
+printf '#!/bin/sh\nexec old-site-start\n' >"$legacy_wrapper"
+write_private_file "$tmpd/root/etc/pangolin/site.json" \
+  "$(site_config_static "https://p.example" id1 sec1)"
+
+: >"$FAKE_LOG"
+install_site_openrc_slug org-a "$cfg" 1 || fail "per-slug install should succeed"
+if grep -qE 'rc-service pangolin-site (stop|start|restart|status)' "$FAKE_LOG" ||
+  grep -qE 'rc-update (add|del) pangolin-site default' "$FAKE_LOG"; then
+  fail "the per-slug install must never act on the legacy service"
+fi
+[[ -f "$legacy_init" ]] || fail "per-slug install must leave the legacy init file"
+[[ -f "$legacy_wrapper" ]] || fail "per-slug install must leave the legacy wrapper"
+
+# The failure path: a stubbed wait makes the install fail without success output
+# or any legacy action.
+inst_rc=0
+inst_out="$(
+  wait_service_active() { return 1; }
+  install_site_openrc_slug org-b "$cfg" 2>/dev/null
+)" || inst_rc=$?
+[[ "$inst_rc" -ne 0 ]] || fail "an instance that never activates must fail"
+[[ -z "$inst_out" ]] || fail "a failed instance install must not report success"
+[[ -f "$legacy_init" ]] || fail "a failed install must leave the legacy init file"
+[[ -f "$legacy_wrapper" ]] || fail "a failed install must leave the legacy wrapper"
+
+# (12) retire_legacy_single_site_openrc stops the legacy service, removes it from
+# the default runlevel, and deletes only its init and wrapper. Per-slug units,
+# configs, and the legacy site.json all survive for the caller.
+: >"$FAKE_LOG"
+retire_legacy_single_site_openrc || fail "retire should succeed"
+grep -q 'rc-service pangolin-site stop' "$FAKE_LOG" || fail "retire must stop an active legacy service"
+grep -q 'rc-update del pangolin-site default' "$FAKE_LOG" || fail "retire must disable the legacy service"
+[[ ! -e "$legacy_init" ]] || fail "retire must remove the legacy init file"
+[[ ! -e "$legacy_wrapper" ]] || fail "retire must remove the legacy wrapper"
+[[ -f "$slug_unit" ]] || fail "retire must keep the per-slug unit"
+[[ -f "$slug_wrapper" ]] || fail "retire must keep the per-slug wrapper"
+[[ -f "$cfg" ]] || fail "retire must keep the per-slug config"
+[[ -f "$tmpd/root/etc/pangolin/site.json" ]] || fail "retire must keep the legacy site config"
+
+# On a host with no legacy unit retire is a quiet no-op: the inactive probe aside,
+# it issues no stop or rc-update del and touches no files.
+: >"$FAKE_LOG"
+noise="$(FAKE_INACTIVE_UNIT=pangolin-site retire_legacy_single_site_openrc 2>&1)" ||
+  fail "retire on a fresh host should succeed"
+[[ -z "$noise" ]] || fail "retire on a fresh host printed: $noise"
+if grep -qE 'rc-service pangolin-site (stop|start|restart)|rc-update del pangolin-site default' "$FAKE_LOG"; then
+  fail "retire must not act without a legacy unit"
+fi
+
+# A missing supervise-daemon means the unit cannot restart, so the write refuses
+# before creating any file.
+mkdir -p "$tmpd/no-supervise"
+for c in rc-update rc-service logrotate pangolin; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$tmpd/no-supervise/$c"
+  chmod 755 "$tmpd/no-supervise/$c"
+done
+if supervise_err="$(PATH="$tmpd/no-supervise" write_site_openrc_slug orgc "$cfg" 2>&1 >/dev/null)"; then
+  fail "missing supervise-daemon should fail"
+fi
+case "$supervise_err" in
+*supervise-daemon*) ;;
+*) fail "missing supervise-daemon should name it, got: $supervise_err" ;;
+esac
+[[ ! -e "$tmpd/root/etc/init.d/pangolin-site-orgc" ]] ||
+  fail "a refused write must not create a unit"
+
+# (9) The production wait policy stays 30x1s when the test overrides are unset.
+policy="$(
+  unset PANGOLIN_SERVICE_ATTEMPTS PANGOLIN_SERVICE_DELAY
+  wait_service_active() {
+    printf '%s %s' "$3" "$4"
+    return 0
+  }
+  wait_for_provisioning() { return 0; }
+  verify_site_openrc_slug org-a "$cfg"
+)" || fail "policy probe should pass"
+assert_eq "30 1" "$policy"
+
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+unset PANGOLIN_SERVICE_ATTEMPTS PANGOLIN_SERVICE_DELAY
+
+# (13) The legacy single-site OpenRC install keeps its behavior: with a test root
+# and the fake PATH it still writes the plain wrapper and unit and enables the
+# plain service name, and its wrapper embeds the passed config path unchanged.
+tmpd="$(mktemp -d)"
+mkdir -p "$tmpd/bin" "$tmpd/root/etc/init.d" "$tmpd/root/usr/local/bin" \
+  "$tmpd/root/etc/pangolin" "$tmpd/root/var/log"
+for c in rc-update rc-service supervise-daemon logrotate; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"$FAKE_LOG"\nexit 0\n' "$c" >"$tmpd/bin/$c"
+  chmod 755 "$tmpd/bin/$c"
+done
+export PATH="$tmpd/bin:$PATH"
+export FAKE_LOG="$tmpd/log"
+export PANGOLIN_ROOT="$tmpd/root"
+export PANGOLIN_BIN="$tmpd/root/usr/local/bin/pangolin"
+single_cfg="$tmpd/root/etc/pangolin/site.json"
+write_private_file "$single_cfg" "$(site_config_static "https://p.example" id1 sec1)"
+install_site_openrc "$single_cfg" 1 || fail "legacy site install should succeed"
+[[ -f "$tmpd/root/etc/init.d/pangolin-site" ]] || fail "legacy unit at plain path"
+[[ -f "$tmpd/root/usr/local/bin/pangolin-site-start" ]] || fail "legacy wrapper at plain path"
+grep -q "CONFIG_FILE=$single_cfg" "$tmpd/root/usr/local/bin/pangolin-site-start" ||
+  fail "legacy wrapper embeds the passed config path"
+grep -q 'rc-update add pangolin-site default' "$FAKE_LOG" || fail "legacy enable"
+grep -q 'rc-service pangolin-site restart' "$FAKE_LOG" || fail "legacy restart"
+if grep -q "pangolin-site-" "$FAKE_LOG"; then
+  fail "the legacy single-site path must not use slug services"
+fi
+
+rm -rf "$tmpd"
+export PATH="$old_path"
+export PANGOLIN_ROOT="$old_pangolin_root"
+export PANGOLIN_BIN="$old_pangolin_bin"
+if [[ -n "$old_fake_log" ]]; then export FAKE_LOG="$old_fake_log"; else unset FAKE_LOG; fi
+
+echo "Multi-site Task 4 tests passed"
