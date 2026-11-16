@@ -131,6 +131,81 @@ validate_site_slug() {
   [[ "$slug" =~ ^[a-z]([a-z0-9-]{0,8}[a-z0-9])?$ ]]
 }
 
+# Succeed when the site SSH owner is unset, `none`, or an exact slug from the
+# newline-delimited list. The message names only the owner, never credentials.
+validate_site_ssh_owner() {
+  local owner="${1:-}" slugs="${2:-}" line
+  [[ -z "$owner" || "$owner" == none ]] && return 0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" == "$owner" ]] && return 0
+  done <<<"$slugs"
+  echo "Invalid site SSH owner: $owner (expected one of the selected site slugs or none)" >&2
+  return 1
+}
+
+# Succeed when a slug must disable its embedded SSH daemon. Exactly one slug
+# owns the host auth daemon: an empty or `none` owner disables every slug,
+# and any slug that is not the owner disables itself.
+site_ssh_disabled() {
+  local owner="${1:-}" slug="${2:-}"
+  [[ -n "$owner" && "$owner" != none && "$owner" == "$slug" ]] && return 1
+  return 0
+}
+
+# Succeed when every nonblank interface name appears at most once. Blank
+# lines are ignored. The message names only interface names, never credentials.
+interface_names_unique() {
+  local names="${1:-}" line seen=$'\n'
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$seen" == *$'\n'"$line"$'\n'* ]]; then
+      echo "Duplicate interface name: $line (each native interface name may be used only once)" >&2
+      return 1
+    fi
+    seen+="$line"$'\n'
+  done <<<"$names"
+}
+
+# Succeed when a network interface already exists on the target. Read-only:
+# `ip link show` exits 0 only for an existing name.
+_interface_exists_on_target() {
+  local target="${1:-}" name="${2:-}"
+  [[ -n "$name" ]] || return 1
+  if [[ "$target" == host ]]; then
+    ip link show "$name" >/dev/null 2>&1
+  else
+    pct exec "$target" -- ip link show "$name" >/dev/null 2>&1
+  fi
+}
+
+# Reject blank, invalid, duplicate, or already-existing interface names for a
+# target before any native interface is created. Every name is validated and
+# deduplicated first, so the target is queried only with safe names, once per
+# distinct name, and the messages never contain credentials.
+validate_interface_names_on_target() {
+  local target="${1:-}" names="${2:-}" line
+  local rule="1-15 characters, starting with a letter, using letters, digits, _, -, or ."
+  while IFS= read -r line; do
+    if [[ -z "$line" ]]; then
+      echo "Invalid interface name: empty (expected $rule)" >&2
+      return 1
+    fi
+    if ! validate_interface_name "$line"; then
+      echo "Invalid interface name: $line (expected $rule)" >&2
+      return 1
+    fi
+  done <<<"$names"
+  interface_names_unique "$names" || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if _interface_exists_on_target "$target" "$line"; then
+      echo "Interface $line already exists on target $target; native Pangolin interfaces need a free name." >&2
+      return 1
+    fi
+  done <<<"$names"
+}
+
 # Succeed when a dotted version is at least a minimum dotted version.
 _os_version_ge() {
   local have="$1" need="$2" i a b max=0
@@ -236,33 +311,55 @@ fetch_payload() {
   fi
 }
 
-# Write <dir>/site.json for a provisioning key or for static credentials. The
-# optional trailing native arguments are "native nativeMain interface
-# interfaceMain"; a dash means "not supplied" only for the credential fields.
-# The key wins when both credential forms are present.
-build_site_answers() {
-  local dir="$1" endpoint="$2" key="$3" name="$4" id="$5" secret="$6"
+# Write a site configuration JSON to an exact path for a provisioning key or
+# for static credentials. The trailing native arguments are "native nativeMain
+# interface interfaceMain"; a dash means "not supplied" only for the credential
+# fields. disableSsh=1 adds the SSH opt-out key for a non-owner slug. Every
+# value is validated before the parent directory or the file is created, so a
+# rejected run leaves no answers behind. The parent is private mode 0700 and
+# the file mode 0600: it always holds credentials. The key wins when both
+# credential forms are present.
+build_site_answers_to_path() {
+  local path="$1" endpoint="$2" key="$3" name="$4" id="$5" secret="$6"
   local native="${7-0}" native_main="${8-0}" interface="${9-pangolin}"
-  local interface_main="${10-pangolin}" config
+  local interface_main="${10-pangolin}" disable_ssh="${11-0}"
+  local config dir
   validate_endpoint "$endpoint" || {
     echo "Invalid Pangolin endpoint: $endpoint" >&2
     return 1
   }
   _validate_native_args "$native" "$native_main" "$interface" "$interface_main" || return 1
+  validate_native_flag "$disable_ssh" || {
+    echo "Invalid disableSsh flag: $disable_ssh (expected 0 or 1)" >&2
+    return 1
+  }
   if [[ "$key" != "-" && -n "$key" ]]; then
     [[ "$name" == "-" ]] && name=""
     config="$(site_config_provisioning "$endpoint" "$key" "$name" \
-      "$native" "$native_main" "$interface" "$interface_main")"
+      "$native" "$native_main" "$interface" "$interface_main" "$disable_ssh")"
   else
     if [[ "$id" == "-" || -z "$id" || "$secret" == "-" || -z "$secret" ]]; then
       echo "Site answers need a provisioning key or an id and secret" >&2
       return 1
     fi
     config="$(site_config_static "$endpoint" "$id" "$secret" \
-      "$native" "$native_main" "$interface" "$interface_main")"
+      "$native" "$native_main" "$interface" "$interface_main" "$disable_ssh")"
+  fi
+  dir="$(dirname "$path")"
+  if [[ -z "$path" || "$dir" == "/" ]]; then
+    echo "build_site_answers_to_path: a nested config path is required" >&2
+    return 1
   fi
   install -d -m 0700 "$dir" || return 1
-  write_private_file "$dir/site.json" "$config"
+  write_private_file "$path" "$config"
+}
+
+# Write <dir>/site.json with the site answers for one target. The optional
+# trailing arguments are the native toggles and the disableSsh flag; a flag of
+# 0 keeps the legacy single-site JSON byte-identical.
+build_site_answers() {
+  local dir="$1"
+  build_site_answers_to_path "$dir/site.json" "${@:2}"
 }
 
 # Write <dir>/client.env with the machine client credentials and mode 0600.

@@ -924,3 +924,64 @@ fi
 rm -rf "$tmpd"
 
 echo "Task 10 tests passed"
+
+# Multi-site Task 2: native + disableSsh key order, per-slug config paths, and
+# interface-name defaults. Generation stays byte-compatible for legacy callers.
+assert_eq \
+  '{"endpoint":"https://p.example","id":"id","secret":"secret","native":true,"interface":"pangorga","nativeMain":true,"interfaceMain":"pangmorga","disableSsh":true}' \
+  "$(site_config_static "https://p.example" "id" "secret" 1 1 pangorga pangmorga 1)"
+assert_eq \
+  '{"endpoint":"https://p.example","provisioningKey":"spk-1.secret","name":"pve-1","native":true,"interface":"pangorga","nativeMain":true,"interfaceMain":"pangmorga","disableSsh":true}' \
+  "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1" 1 1 pangorga pangmorga 1)"
+
+# disableSsh=0 appends no key; native off appends no native keys; the owner
+# path and every legacy call shape stay byte-compatible.
+assert_eq \
+  '{"endpoint":"https://p.example","id":"id","secret":"secret","native":true,"interface":"pangorga","nativeMain":true,"interfaceMain":"pangmorga"}' \
+  "$(site_config_static "https://p.example" "id" "secret" 1 1 pangorga pangmorga 0)"
+assert_eq \
+  '{"endpoint":"https://p.example","id":"id","secret":"secret","disableSsh":true}' \
+  "$(site_config_static "https://p.example" "id" "secret" 0 0 pangolin pangolin 1)"
+ssh_static="$(site_config_static "https://p.example" "id" "secret" 0 0 pangolin pangolin 1)"
+if ! (python3 - "$ssh_static" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert list(d) == ["endpoint", "id", "secret", "disableSsh"], list(d)
+assert d["disableSsh"] is True, d
+PY
+); then fail "disableSsh-only JSON shape: $ssh_static"; fi
+prov_ssh="$(site_config_provisioning "https://p.example" "spk-1.key" "pve-1" 0 0 pangolin pangolin 1)"
+if ! (python3 - "$prov_ssh" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert list(d) == ["endpoint", "provisioningKey", "name", "disableSsh"], list(d)
+PY
+); then fail "provisioning disableSsh shape: $prov_ssh"; fi
+assert_eq "$static" "$(site_config_static "https://p.example" "id1" "sec1")"
+assert_eq "$prov" "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1")"
+assert_eq "$both_static" \
+  "$(site_config_static "https://p.example" "id1" "sec1" 1 1 "pangolin" "pangolin-main")"
+assert_eq "$native_prov" \
+  "$(site_config_provisioning "https://p.example" "spk-1.secret" "pve-1" 0 1 "pangolin" "wg-main")"
+
+# Slug config paths honor PANGOLIN_ROOT and the fixed layout.
+root_tmp="$(mktemp -d)"
+old_root="$PANGOLIN_ROOT"
+export PANGOLIN_ROOT="$root_tmp/root"
+assert_eq "$root_tmp/root/etc/pangolin/sites" "$(site_config_dir)"
+assert_eq "$root_tmp/root/etc/pangolin/sites/org-a.json" "$(site_config_path org-a)"
+assert_eq "$root_tmp/root/etc/pangolin/sites/default.json" "$(site_config_path default)"
+[[ "$(site_config_path org-a)" != *$'\n'* ]] || fail "site_config_path must print one line"
+export PANGOLIN_ROOT="$old_root"
+rm -rf "$root_tmp"
+
+# Interface defaults stay within Linux IFNAMSIZ (15 characters) for the
+# maximum slug, and are valid interface names.
+assert_eq pangorga "$(default_site_interface orga)"
+assert_eq pangmorga "$(default_site_interface_main orga)"
+assert_eq pangabcdefghij "$(default_site_interface abcdefghij)"
+assert_eq pangmabcdefghij "$(default_site_interface_main abcdefghij)"
+assert_eq "14" "$(printf '%s' "$(default_site_interface abcdefghij)" | wc -c)"
+assert_eq "15" "$(printf '%s' "$(default_site_interface_main abcdefghij)" | wc -c)"
+
+echo "Multi-site Task 2 tests passed"

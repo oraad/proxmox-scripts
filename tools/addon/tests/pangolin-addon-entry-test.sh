@@ -1737,5 +1737,192 @@ case "$partial_steps" in
   ;;
 esac
 
+# Multi-site Task 2: interface defaults, SSH ownership mapping, and answers
+# written to an exact per-slug path.
+assert_eq pangorga "$(default_site_interface orga)"
+assert_eq pangmorga "$(default_site_interface_main orga)"
+assert_eq pangdefault "$(default_site_interface default)"
+longest="$(default_site_interface_main abcdefghij)"
+[[ "${#longest}" -le 15 ]] || { echo "default interface exceeds IFNAMSIZ: $longest" >&2; exit 1; }
+validate_interface_name "$longest" ||
+  { echo "default interface [$longest] should be valid" >&2; exit 1; }
+
+# Exactly one slug owns the embedded SSH daemon; every other slug disables it.
+site_ssh_disabled default default && { echo "owner slug must keep SSH" >&2; exit 1; }
+site_ssh_disabled default orga || { echo "non-owner slug must disable SSH" >&2; exit 1; }
+site_ssh_disabled orga orga && { echo "owner slug must keep SSH" >&2; exit 1; }
+site_ssh_disabled orga default || { echo "default is not the owner here" >&2; exit 1; }
+site_ssh_disabled "" orga || { echo "empty owner must disable SSH" >&2; exit 1; }
+site_ssh_disabled "" default || { echo "empty owner must disable the default slug" >&2; exit 1; }
+site_ssh_disabled none default || { echo "owner none must disable SSH" >&2; exit 1; }
+site_ssh_disabled none orga || { echo "owner none must disable SSH for every slug" >&2; exit 1; }
+
+# The SSH owner must be empty, none, or an exact slug from the list.
+validate_site_ssh_owner default $'default\norga' ||
+  { echo "owner default should pass" >&2; exit 1; }
+validate_site_ssh_owner none $'default\norga' ||
+  { echo "owner none should pass" >&2; exit 1; }
+validate_site_ssh_owner "" $'default\norga' ||
+  { echo "empty owner should pass" >&2; exit 1; }
+validate_site_ssh_owner orga $'default\norga' ||
+  { echo "slug owner should pass" >&2; exit 1; }
+for bad_owner in hostr orgad org sub; do
+  owner_rc=0
+  owner_out="$(validate_site_ssh_owner "$bad_owner" $'default\norga' 2>&1)" || owner_rc=$?
+  [[ "$owner_rc" -ne 0 ]] || { echo "owner [$bad_owner] should fail" >&2; exit 1; }
+  case "$owner_out" in
+  *"SSH owner"*) ;;
+  *) echo "ssh owner message [$bad_owner]: $owner_out" >&2; exit 1 ;;
+  esac
+done
+
+# Interface names must be unique; the message names only interfaces.
+interface_names_unique $'pangorga\npangmorga' ||
+  { echo "distinct interface names should pass" >&2; exit 1; }
+interface_names_unique $'pangorga\n\npangmorga\n' ||
+  { echo "blank lines should be ignored" >&2; exit 1; }
+interface_names_unique '' || { echo "no names should pass" >&2; exit 1; }
+iface_dup_rc=0
+iface_dup_out="$(interface_names_unique $'pangorga\npangorga' 2>&1)" || iface_dup_rc=$?
+[[ "$iface_dup_rc" -ne 0 ]] || { echo "duplicate interface name should fail" >&2; exit 1; }
+case "$iface_dup_out" in
+*Duplicate*pangorga*) ;;
+*) echo "duplicate interface message: $iface_dup_out" >&2; exit 1 ;;
+esac
+
+# A path-aware builder writes any nested config path with private modes and
+# validates before creating anything.
+p2dir="$(mktemp -d)"
+build_site_answers_to_path "$p2dir/etc/pangolin/sites/org-a.json" \
+  "https://p.example" - - id secret 1 1 pangorga pangmorga 1 ||
+  { echo "path-aware answers failed" >&2; exit 1; }
+sites_dir="$(dirname "$p2dir/etc/pangolin/sites/org-a.json")"
+[[ "$(stat -c '%a' "$sites_dir")" == "700" ]] ||
+  { echo "sites dir mode $(stat -c '%a' "$sites_dir")" >&2; exit 1; }
+[[ "$(stat -c '%a' "$p2dir/etc/pangolin/sites/org-a.json")" == "600" ]] ||
+  { echo "site config mode" >&2; exit 1; }
+assert_eq \
+  '{"endpoint":"https://p.example","id":"id","secret":"secret","native":true,"interface":"pangorga","nativeMain":true,"interfaceMain":"pangmorga","disableSsh":true}' \
+  "$(<"$p2dir/etc/pangolin/sites/org-a.json")"
+build_site_answers_to_path "$p2dir/keys.json" \
+  "https://p.example" "spk-1.key" "pve-1" - - 0 0 pangolin pangolin 0 ||
+  { echo "provisioning path answers failed" >&2; exit 1; }
+python3 - "$p2dir/keys.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["provisioningKey"] == "spk-1.key", d
+assert "disableSsh" not in d, d
+assert "native" not in d, d
+PY
+badp="$p2dir/missing-dir/site.json"
+if build_site_answers_to_path "$badp" "not-a-url" - - id secret \
+  >/dev/null 2>&1; then
+  echo "invalid endpoint should fail" >&2; exit 1
+fi
+[[ ! -e "$badp" ]] || { echo "invalid endpoint must not create the file" >&2; exit 1; }
+[[ ! -e "$(dirname "$badp")" ]] ||
+  { echo "invalid endpoint must not create the parent directory" >&2; exit 1; }
+if build_site_answers_to_path "$badp" "https://p.example" - - "-" - \
+  >/dev/null 2>&1; then
+  echo "missing credentials should fail" >&2; exit 1
+fi
+[[ ! -e "$badp" && ! -e "$(dirname "$badp")" ]] ||
+  { echo "failed credential check must not write" >&2; exit 1; }
+if build_site_answers_to_path "$badp" "https://p.example" - - id secret 1 1 pangorga pangmorga yes \
+  >/dev/null 2>&1; then
+  echo "invalid disableSsh flag should fail" >&2; exit 1
+fi
+
+# build_site_answers keeps writing <dir>/site.json, delegates to the path
+# builder, and passes the disableSsh argument through.
+build_site_answers "$p2dir/ssh" "https://p.example" - - id secret \
+  1 1 pangorga pangmorga 1 || { echo "ssh-disabled answers" >&2; exit 1; }
+assert_eq \
+  '{"endpoint":"https://p.example","id":"id","secret":"secret","native":true,"interface":"pangorga","nativeMain":true,"interfaceMain":"pangmorga","disableSsh":true}' \
+  "$(<"$p2dir/ssh/site.json")"
+[[ "$(stat -c '%a' "$p2dir/ssh")" == "700" ]] ||
+  { echo "answers dir mode" >&2; exit 1; }
+build_site_answers "$p2dir/plain" "https://p.example" - - id secret \
+  0 0 pangolin pangolin || { echo "ten-argument answers" >&2; exit 1; }
+python3 - "$p2dir/plain/site.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "disableSsh" not in d, d
+assert "native" not in d, d
+PY
+build_site_answers "$p2dir/sshbad" "https://p.example" - - id secret \
+  0 0 pangolin pangolin yes >/dev/null 2>&1 && {
+  echo "invalid disableSsh flag should fail" >&2; exit 1
+}
+[[ ! -e "$p2dir/sshbad/site.json" ]] ||
+  { echo "failed validation must not write answers" >&2; exit 1; }
+rm -rf "$p2dir"
+
+# Interface collision checks: a fake `ip` says eth0 exists; a fake `pct`
+# records the exec call for LXC targets.
+iface="$(mktemp -d)"
+mkdir -p "$iface/bin"
+cat >"$iface/bin/ip" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-} ${2:-}" == "link show" ]] || exit 1
+[[ "${3:-}" == eth0 ]] && exit 0
+exit 1
+EOF
+cat >"$iface/bin/pct" <<'EOF'
+#!/usr/bin/env bash
+echo "pct $*" >>"$IFACE_LOG"
+[[ "${1:-}" == exec && "${2:-}" == 101 ]] || exit 1
+shift 3
+[[ "${1:-} ${2:-} ${3:-}" == "ip link show" ]] || exit 1
+[[ "${4:-}" == eth0 ]] && exit 0
+exit 1
+EOF
+chmod 755 "$iface/bin/ip" "$iface/bin/pct"
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  _interface_exists_on_target host eth0 ||
+  { echo "fake ip should report eth0" >&2; exit 1; }
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  _interface_exists_on_target host pangorga && {
+  echo "fake ip should not report pangorga" >&2; exit 1
+}
+: >"$iface/log"
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  _interface_exists_on_target 101 eth0 ||
+  { echo "fake pct should report eth0 on 101" >&2; exit 1; }
+grep -q 'pct exec 101 -- ip link show eth0' "$iface/log" ||
+  { echo "LXC check must use pct exec" >&2; exit 1; }
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  validate_interface_names_on_target host $'pangorga\npangmorga' ||
+  { echo "free names should pass" >&2; exit 1; }
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  validate_interface_names_on_target host $'pangorga\neth0' >/dev/null 2>&1 && {
+  echo "an existing interface should fail" >&2; exit 1
+}
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  validate_interface_names_on_target 101 $'pangorga\neth0' >/dev/null 2>&1 && {
+  echo "an existing LXC interface should fail" >&2; exit 1
+}
+dup_rc=0
+dup_out="$(IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  validate_interface_names_on_target host $'pangorga\npangorga' 2>&1)" || dup_rc=$?
+[[ "$dup_rc" -ne 0 ]] || { echo "duplicate names should fail" >&2; exit 1; }
+case "$dup_out" in
+*Duplicate*) ;;
+*) echo "duplicate name message: $dup_out" >&2; exit 1 ;;
+esac
+blank_rc=0
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  validate_interface_names_on_target host $'pangorga\n\npangmorga' >/dev/null 2>&1 ||
+  blank_rc=$?
+[[ "$blank_rc" -ne 0 ]] || { echo "blank names should fail" >&2; exit 1; }
+IFACE_LOG="$iface/log" PATH="$iface/bin:$PATH" \
+  validate_interface_names_on_target host $'pang\neth0\npangm' >/dev/null 2>&1 && {
+  echo "the existing name in the middle should fail" >&2; exit 1
+}
+if grep -q 'id\|secret' "$iface/log"; then
+  echo "interface validation must not consult credentials" >&2; exit 1
+fi
+rm -rf "$iface"
+
 echo "Entry tests passed"
 echo "Orchestration tests passed"

@@ -117,36 +117,44 @@ json_escape() {
   printf '%s' "$value"
 }
 
-# Print the JSON keys for the enabled site native modes. A flag equal to 1 adds
-# its boolean and interface name; disabled modes add nothing so the CLI defaults
-# apply. Callers validate the values before building a configuration.
+# Print the JSON keys for the enabled site native modes and disabled SSH. A
+# flag equal to 1 adds its boolean and interface name; disabled modes add
+# nothing so the CLI defaults apply. disableSsh is appended only when it is 1:
+# the SSH owner slug keeps no key and the legacy JSON stays byte-identical.
+# Callers validate the values before building a configuration.
 _native_config_suffix() {
   local native="${1-0}" native_main="${2-0}"
-  local interface="${3-pangolin}" interface_main="${4-pangolin}" out=""
+  local interface="${3-pangolin}" interface_main="${4-pangolin}"
+  local disable_ssh="${5-0}" out=""
   if [[ "$native" == 1 ]]; then
     out=",\"native\":true,\"interface\":\"$(json_escape "$interface")\""
   fi
   if [[ "$native_main" == 1 ]]; then
     out+=",\"nativeMain\":true,\"interfaceMain\":\"$(json_escape "$interface_main")\""
   fi
+  if [[ "$disable_ssh" == 1 ]]; then
+    out+=",\"disableSsh\":true"
+  fi
   printf '%s' "$out"
 }
 
 # Print a static-credential site configuration as JSON. The optional trailing
-# native arguments add the kernel interface keys when a mode is enabled.
+# native arguments add the kernel interface keys when a mode is enabled, and
+# the disableSsh argument adds the SSH opt-out key.
 site_config_static() {
   local suffix
-  suffix="$(_native_config_suffix "${4-0}" "${5-0}" "${6-pangolin}" "${7-pangolin}")" ||
+  suffix="$(_native_config_suffix "${4-0}" "${5-0}" "${6-pangolin}" "${7-pangolin}" "${8-0}")" ||
     return 1
   printf '{"endpoint":"%s","id":"%s","secret":"%s"%s}\n' \
     "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")" "$suffix"
 }
 
 # Print a provisioning-key site configuration as JSON. The optional trailing
-# native arguments add the kernel interface keys when a mode is enabled.
+# native arguments add the kernel interface keys when a mode is enabled, and
+# the disableSsh argument adds the SSH opt-out key.
 site_config_provisioning() {
   local suffix
-  suffix="$(_native_config_suffix "${4-0}" "${5-0}" "${6-pangolin}" "${7-pangolin}")" ||
+  suffix="$(_native_config_suffix "${4-0}" "${5-0}" "${6-pangolin}" "${7-pangolin}" "${8-0}")" ||
     return 1
   printf '{"endpoint":"%s","provisioningKey":"%s","name":"%s"%s}\n' \
     "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")" "$suffix"
@@ -158,6 +166,29 @@ site_config_has_credentials() {
   grep -q '"id"[[:space:]]*:' "$path" &&
     grep -q '"secret"[[:space:]]*:' "$path" &&
     ! grep -q '"provisioningKey"[[:space:]]*:' "$path"
+}
+
+# Print the directory that holds the per-slug site configurations. The single
+# legacy site stays at /etc/pangolin/site.json.
+site_config_dir() {
+  p /etc/pangolin/sites
+}
+
+# Print the configuration path for one validated slug, mode 0600 when written.
+site_config_path() {
+  p "/etc/pangolin/sites/$1.json"
+}
+
+# Print the default native interface name for a validated slug. The prefixes
+# make Pangolin ownership explicit; with the 10-character slug cap the names
+# never exceed Linux IFNAMSIZ (15 characters).
+default_site_interface() {
+  printf 'pang%s' "$1"
+}
+
+# Print the default native main-tunnel interface name for a validated slug.
+default_site_interface_main() {
+  printf 'pangm%s' "$1"
 }
 
 # Write content to a private file, creating the parent directory if needed.
