@@ -2048,6 +2048,12 @@ exec)
   *"test -f /etc/pangolin/site.json"*)
     [[ -f "$FAKE_CT_ROOT/$ctid/etc/pangolin/site.json" ]]
     ;;
+  *"grep -q"*"/etc/pangolin/sites/"*)
+    slug="$(printf '%s' "$*" | sed -n 's|.*sites/\([a-z0-9-]*\)\.json.*|\1|p' | head -n1)"
+    f="$FAKE_CT_ROOT/$ctid/etc/pangolin/sites/$slug.json"
+    [[ -f "$f" ]] &&
+      { grep -q '"provisioningKey"' "$f" || { grep -q '"id"' "$f" && grep -q '"secret"' "$f"; }; }
+    ;;
   *site-layout*|*"pangolin-site@"*) printf '%s\n' "${FAKE_CT_LAYOUT:-single}" ;;
   *hostname*) printf 'ct%s\n' "$ctid" ;;
   *) exit 1 ;;
@@ -2574,7 +2580,7 @@ if ! (
   export FAKE_SITES_OUT='"default" "orga" "done"'
   export FAKE_OWNER_OUT=orga
   export PANGOLIN_ROOT="$s6/fakeroot" FAKE_LOG="$s6/log"
-  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
   SITE_PAIR_ID=()
   SITE_PAIR_SECRET=()
   SITE_PAIR_KEY=()
@@ -2608,7 +2614,7 @@ if ! (
   unset var_site_interface var_site_interface_main var_reconfigure
   export PATH="$s6/bin:$PATH" FAKE_WHIPTAIL_LOG="$s6/wlog"
   export FAKE_SITEMODE_OUT=one
-  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
   _target_site_verified() { return 1; }
   _target_has_legacy_site() { return 1; }
   _default_site_name() { printf 'pve\n'; }
@@ -2625,7 +2631,8 @@ fi
 
 # E16: an existing verified site must not hide the one-site/multi-site menu.
 # Choosing "multi" opens the label editor; no reuse/replace offer is made for
-# the verified target in that flow.
+# the verified target in that flow. The chosen plan is stored per target, not
+# in the global var_sites.
 _reset6
 : >"$s6/wlog"
 if ! (
@@ -2638,9 +2645,10 @@ if ! (
   export FAKE_SITEMODE_OUT=multi
   export FAKE_SITES_OUT='"default" "orga" "done"'
   export FAKE_OWNER_OUT=orga
-  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
   SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
   TARGETS=(host)
+  TARGET_SLUG_PLANS=()
   _target_site_verified() { return 0; }
   _target_has_legacy_site() { return 1; }
   _default_site_name() { printf 'pve\n'; }
@@ -2652,8 +2660,10 @@ if ! (
   if grep -q 'Existing site' "$s6/wlog"; then
     echo "E16 the label editor flow must not show reuse/replace first" >&2; exit 1
   fi
-  [[ "$var_sites" == "default orga" ]] ||
-    { echo "E16 var_sites wrong: [$var_sites]" >&2; exit 1; }
+  [[ "${TARGET_SLUG_PLANS[0]:-}" == "default orga" ]] ||
+    { echo "E16 plan stored wrong: [${TARGET_SLUG_PLANS[0]:-}]" >&2; exit 1; }
+  [[ -z "${var_sites:-}" ]] ||
+    { echo "E16 the editor must not write the global var_sites" >&2; exit 1; }
 ) >"$s6/e16out" 2>&1; then
   echo "E16 verified target multi-site menu failed:" >&2
   cat "$s6/e16out" >&2
@@ -2671,9 +2681,10 @@ if ! (
   export PATH="$s6/bin:$PATH" PANGOLIN_ROOT="$s6/fakeroot" FAKE_LOG="$s6/log"
   export FAKE_WHIPTAIL_LOG="$s6/wlog"
   export FAKE_SITEMODE_OUT=one
-  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
   SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
   TARGETS=(host)
+  TARGET_SLUG_PLANS=()
   _target_site_verified() { return 0; }
   _target_has_legacy_site() { return 1; }
   _default_site_name() { printf 'pve\n'; }
@@ -2709,8 +2720,8 @@ if ! (
   _prompt_site_labels host || exit 1
   grep -q 'default Site label default ON orga Site label orga ON orgb Site label orgb ON add' "$s6/wlog" ||
     { echo "E18 host labels must be seeded ON: $(cat "$s6/wlog")" >&2; exit 1; }
-  [[ "$var_sites" == "default orga orgb" ]] ||
-    { echo "E18 var_sites wrong: [$var_sites]" >&2; exit 1; }
+  [[ "$SITE_LABEL_PLAN" == "default orga orgb" ]] ||
+    { echo "E18 plan wrong: [$SITE_LABEL_PLAN]" >&2; exit 1; }
 ) >"$s6/e18out" 2>&1; then
   echo "E18 label editor host seeding failed:" >&2
   cat "$s6/e18out" >&2
@@ -2735,8 +2746,8 @@ if ! (
   if grep -q 'Site label default' "$s6/wlog"; then
     echo "E18b default must not be seeded without a default config" >&2; exit 1
   fi
-  [[ "$var_sites" == "orga orgb" ]] ||
-    { echo "E18b var_sites wrong: [$var_sites]" >&2; exit 1; }
+  [[ "$SITE_LABEL_PLAN" == "orga orgb" ]] ||
+    { echo "E18b plan wrong: [$SITE_LABEL_PLAN]" >&2; exit 1; }
 ) >"$s6/e18bout" 2>&1; then
   echo "E18b label editor LXC seeding failed:" >&2
   cat "$s6/e18bout" >&2
@@ -2767,8 +2778,8 @@ if ! (
       echo "E18c malformed label must be ignored: [$bad]" >&2; exit 1
     fi
   done
-  [[ "$var_sites" == "orga" ]] ||
-    { echo "E18c var_sites wrong: [$var_sites]" >&2; exit 1; }
+  [[ "$SITE_LABEL_PLAN" == "orga" ]] ||
+    { echo "E18c plan wrong: [$SITE_LABEL_PLAN]" >&2; exit 1; }
 ) >"$s6/e18cout" 2>&1; then
   echo "E18c label editor malformed-name seeding failed:" >&2
   cat "$s6/e18cout" >&2
@@ -2791,17 +2802,17 @@ if ! (
     { echo "E18d fresh target must seed default: $(cat "$s6/wlog")" >&2; exit 1; }
   [[ "$(grep -c 'Site label ' "$s6/wlog")" == 1 ]] ||
     { echo "E18d only default may be seeded" >&2; exit 1; }
-  [[ "$var_sites" == "default" ]] ||
-    { echo "E18d var_sites wrong: [$var_sites]" >&2; exit 1; }
+  [[ "$SITE_LABEL_PLAN" == "default" ]] ||
+    { echo "E18d plan wrong: [$SITE_LABEL_PLAN]" >&2; exit 1; }
 ) >"$s6/e18dout" 2>&1; then
   echo "E18d label editor fresh-target seeding failed:" >&2
   cat "$s6/e18dout" >&2
   exit 1
 fi
 
-# E19: choosing the discovered verified label plus a new one sets both in
-# var_sites, reuses the verified default without a credentials prompt, and
-# never prints the existing config contents.
+# E19: choosing the discovered verified label plus a new one stores both in
+# the target's plan, reuses the verified default without a credentials
+# prompt, and never prints the existing config contents.
 _reset6
 rm -rf "$s6/proot"
 mkdir -p "$s6/proot/etc/pangolin"
@@ -2819,13 +2830,16 @@ if ! (
   export FAKE_WHIPTAIL_LOG="$s6/wlog"
   export FAKE_SITEMODE_OUT=multi FAKE_SITES_SEQ="$s6/sites-seq"
   export FAKE_SLUG_ADD=orga FAKE_OWNER_OUT=orga
-  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
   SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
   TARGETS=(host)
+  TARGET_SLUG_PLANS=()
   _default_site_name() { printf 'pve\n'; }
   _prompt_inputs host 1 0 || exit 1
-  [[ "$var_sites" == "default orga" ]] ||
-    { echo "E19 var_sites wrong: [$var_sites]" >&2; exit 1; }
+  [[ "${TARGET_SLUG_PLANS[0]:-}" == "default orga" ]] ||
+    { echo "E19 plan wrong: [${TARGET_SLUG_PLANS[0]:-}]" >&2; exit 1; }
+  [[ -z "${var_sites:-}" ]] ||
+    { echo "E19 the editor must not write the global var_sites" >&2; exit 1; }
   grep -q 'default Site label default ON' "$s6/wlog" ||
     { echo "E19 verified default must be seeded ON" >&2; exit 1; }
   [[ "$(grep -c 'New site label' "$s6/wlog")" == 1 ]] ||
@@ -2859,9 +2873,10 @@ if ! (
   unset var_site_interface var_site_interface_main var_reconfigure
   export PATH="$s6/bin:$PATH" PANGOLIN_ROOT="$s6/fakeroot" FAKE_LOG="$s6/log"
   export FAKE_WHIPTAIL_LOG="$s6/wlog"
-  SITES_PROMPTED=0 SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
   SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
   TARGETS=(host)
+  TARGET_SLUG_PLANS=()
   var_sites="default"
   _target_site_verified() { return 0; }
   _target_has_legacy_site() { return 1; }
@@ -2880,6 +2895,220 @@ if ! (
 ) >"$s6/e20out" 2>&1; then
   echo "E20 explicit var_sites bypass failed:" >&2
   cat "$s6/e20out" >&2
+  exit 1
+fi
+
+# E21: a discovered non-default label whose target config already holds a
+# site id and secret is reused without a credentials prompt, exactly like the
+# verified default.
+_reset6
+rm -rf "$s6/proot"
+mkdir -p "$s6/proot/etc/pangolin/sites"
+printf '{"id":"did","secret":"dsec"}\n' >"$s6/proot/etc/pangolin/site.json"
+printf '{"id":"oid","secret":"osec-val"}\n' >"$s6/proot/etc/pangolin/sites/orga.json"
+: >"$s6/wlog"
+if ! (
+  unset var_mode var_unattended var_targets var_target var_sites var_site_ssh_owner
+  unset var_site_id var_site_secret var_site_provisioning_key var_site_name
+  unset var_pangolin_endpoint var_site_native var_site_native_main
+  unset var_site_interface var_site_interface_main var_reconfigure
+  export PATH="$s6/bin:$PATH" PANGOLIN_ROOT="$s6/proot" FAKE_LOG="$s6/log"
+  export FAKE_WHIPTAIL_LOG="$s6/wlog"
+  export FAKE_SITEMODE_OUT=multi
+  export FAKE_SITES_OUT='"default" "orga" "done"'
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
+  TARGETS=(host)
+  TARGET_SLUG_PLANS=()
+  _default_site_name() { printf 'pve\n'; }
+  _prompt_inputs host 1 0 || exit 1
+  [[ "${TARGET_SLUG_PLANS[0]:-}" == "default orga" ]] ||
+    { echo "E21 plan wrong: [${TARGET_SLUG_PLANS[0]:-}]" >&2; exit 1; }
+  [[ "$(grep -c 'Site credentials:' "$s6/wlog")" == 0 ]] ||
+    { echo "E21 existing nondefault config must not re-prompt" >&2; exit 1; }
+  [[ -z "${SITE_PAIR_ID[orga|host]:-}" ]] ||
+    { echo "E21 orga must keep its existing target config" >&2; exit 1; }
+  if grep -q 'osec-val' "$s6/wlog" "$s6/log"; then
+    echo "E21 config content leaked into prompts or logs" >&2; exit 1
+  fi
+) >"$s6/e21out" 2>&1; then
+  echo "E21 existing nondefault label reuse failed:" >&2
+  cat "$s6/e21out" >&2
+  exit 1
+fi
+
+# E21b: a malformed nondefault config is not reusable; the label is asked
+# for credentials.
+_reset6
+rm -rf "$s6/proot"
+mkdir -p "$s6/proot/etc/pangolin/sites"
+printf '{"id":"did","secret":"dsec"}\n' >"$s6/proot/etc/pangolin/site.json"
+printf '{}\n' >"$s6/proot/etc/pangolin/sites/orga.json"
+: >"$s6/wlog"
+if ! (
+  unset var_mode var_unattended var_targets var_target var_sites var_site_ssh_owner
+  unset var_site_id var_site_secret var_site_provisioning_key var_site_name
+  unset var_pangolin_endpoint var_site_native var_site_native_main
+  unset var_site_interface var_site_interface_main var_reconfigure
+  export PATH="$s6/bin:$PATH" PANGOLIN_ROOT="$s6/proot" FAKE_LOG="$s6/log"
+  export FAKE_WHIPTAIL_LOG="$s6/wlog"
+  export FAKE_SITEMODE_OUT=multi
+  export FAKE_SITES_OUT='"default" "orga" "done"'
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
+  TARGETS=(host)
+  TARGET_SLUG_PLANS=()
+  _default_site_name() { printf 'pve\n'; }
+  _prompt_inputs host 1 0 || exit 1
+  [[ "$(grep -c 'Site credentials:' "$s6/wlog")" == 1 ]] ||
+    { echo "E21b a corrupt config must force one credential prompt" >&2; exit 1; }
+  [[ "${SITE_PAIR_ID[orga|host]}" == id ]] ||
+    { echo "E21b orga credentials missing" >&2; exit 1; }
+  [[ -z "${SITE_PAIR_ID[default|host]:-}" ]] ||
+    { echo "E21b the verified default must stay unreferenced" >&2; exit 1; }
+) >"$s6/e21bout" 2>&1; then
+  echo "E21b corrupt nondefault config failed:" >&2
+  cat "$s6/e21bout" >&2
+  exit 1
+fi
+
+# E21c: a nondefault config holding only a provisioning key is reusable, and
+# an LXC is probed the same way through read-only pct calls.
+_reset6
+rm -rf "$s6/proot" "$s6/ctroot"
+mkdir -p "$s6/proot/etc/pangolin/sites" "$s6/ctroot/101/etc/pangolin/sites"
+printf '{"id":"did","secret":"dsec"}\n' >"$s6/proot/etc/pangolin/site.json"
+printf '{"provisioningKey":"spk-a"}\n' >"$s6/proot/etc/pangolin/sites/orga.json"
+printf '{"id":"bid","secret":"bsec-val"}\n' >"$s6/ctroot/101/etc/pangolin/sites/orgb.json"
+: >"$s6/wlog"
+if ! (
+  unset var_mode var_unattended var_targets var_target var_sites var_site_ssh_owner
+  unset var_site_id var_site_secret var_site_provisioning_key var_site_name
+  unset var_pangolin_endpoint var_site_native var_site_native_main
+  unset var_site_interface var_site_interface_main var_reconfigure
+  export PATH="$s6/bin:$PATH" PANGOLIN_ROOT="$s6/proot" FAKE_LOG="$s6/log"
+  export FAKE_WHIPTAIL_LOG="$s6/wlog" FAKE_CT_ROOT="$s6/ctroot"
+  export FAKE_SITEMODE_OUT=multi
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
+  TARGETS=(host 101)
+  TARGET_SLUG_PLANS=()
+  _default_site_name() { printf 'pve\n'; }
+  export FAKE_SITES_OUT='"default" "orga" "done"'
+  _prompt_inputs host 1 0 || exit 1
+  [[ "$(grep -c 'Site credentials:' "$s6/wlog")" == 0 ]] ||
+    { echo "E21c provisioning-key config must be reusable on the host" >&2; exit 1; }
+  export FAKE_SITES_OUT='"orgb" "done"'
+  _prompt_inputs 101 1 0 || exit 1
+  [[ "${TARGET_SLUG_PLANS[1]:-}" == "orgb" ]] ||
+    { echo "E21c 101 plan wrong: [${TARGET_SLUG_PLANS[1]:-}]" >&2; exit 1; }
+  [[ "$(grep -c 'Site credentials:' "$s6/wlog")" == 0 ]] ||
+    { echo "E21c existing LXC config must be reusable without pct prompts" >&2; exit 1; }
+  [[ -z "${SITE_PAIR_ID[orgb|101]:-}" ]] ||
+    { echo "E21c orgb must keep its existing target config" >&2; exit 1; }
+  if grep -q 'bsec-val' "$s6/wlog" "$s6/log"; then
+    echo "E21c LXC config content leaked" >&2; exit 1
+  fi
+) >"$s6/e21cout" 2>&1; then
+  echo "E21c provisioning-key and LXC reuse failed:" >&2
+  cat "$s6/e21cout" >&2
+  exit 1
+fi
+
+# E22: more than eight discovered labels do not abort the target. Confirming
+# an over-long selection re-shows the editor with an actionable warning so
+# the operator can deselect labels and continue.
+_reset6
+rm -rf "$s6/proot"
+mkdir -p "$s6/proot/etc/pangolin/sites"
+for i in 1 2 3 4 5 6 7 8 9; do
+  printf '{}\n' >"$s6/proot/etc/pangolin/sites/sl$i.json"
+done
+printf '"sl1" "sl2" "sl3" "sl4" "sl5" "sl6" "sl7" "sl8" "sl9" "done"\n' >"$s6/sites-seq"
+printf '"sl1" "sl2" "sl3" "sl4" "sl5" "sl6" "sl7" "sl8" "done"\n' >>"$s6/sites-seq"
+rm -f "$s6/sites-seq.n"
+: >"$s6/wlog"
+: >"$s6/warn22"
+if ! (
+  unset var_sites
+  export PATH="$s6/bin:$PATH" PANGOLIN_ROOT="$s6/proot" FAKE_LOG="$s6/log"
+  export FAKE_WHIPTAIL_LOG="$s6/wlog" FAKE_SITES_SEQ="$s6/sites-seq"
+  _target_has_legacy_site() { return 1; }
+  msg_warn() { printf 'WARN:%s\n' "$*" >>"$s6/warn22"; }
+  _prompt_site_labels host || exit 1
+  [[ "$(grep -c 'Site labels' "$s6/wlog")" == 2 ]] ||
+    { echo "E22 the editor must re-show after an over-long selection" >&2; exit 1; }
+  grep -q 'WARN:Eight site labels is the maximum' "$s6/warn22" ||
+    { echo "E22 missing actionable warning: $(cat "$s6/warn22")" >&2; exit 1; }
+  [[ "$SITE_LABEL_PLAN" == "sl1 sl2 sl3 sl4 sl5 sl6 sl7 sl8" ]] ||
+    { echo "E22 plan wrong: [$SITE_LABEL_PLAN]" >&2; exit 1; }
+) >"$s6/e22out" 2>&1; then
+  echo "E22 over-eight label selection failed:" >&2
+  cat "$s6/e22out" >&2
+  exit 1
+fi
+
+# E23: multi-target interactive runs keep label discovery and plans per
+# target. The host has hosta, CT 101 has ct101b; each editor lists only its
+# own target's labels, each plan is stored per target, the menu is offered
+# for both targets, and existing configs are reused without any credential
+# prompt or global var_sites write.
+_reset6
+rm -rf "$s6/proot" "$s6/ctroot"
+mkdir -p "$s6/proot/etc/pangolin/sites" "$s6/ctroot/101/etc/pangolin/sites"
+printf '{"id":"hid","secret":"hsec-val"}\n' >"$s6/proot/etc/pangolin/sites/hosta.json"
+printf '{"id":"cid","secret":"csec-val"}\n' >"$s6/ctroot/101/etc/pangolin/sites/ct101b.json"
+printf '"hosta" "done"\n' >"$s6/sites-seq"
+printf '"ct101b" "done"\n' >>"$s6/sites-seq"
+rm -f "$s6/sites-seq.n"
+: >"$s6/wlog"
+if ! (
+  unset var_mode var_unattended var_targets var_target var_sites var_site_ssh_owner
+  unset var_site_id var_site_secret var_site_provisioning_key var_site_name
+  unset var_pangolin_endpoint var_site_native var_site_native_main
+  unset var_site_interface var_site_interface_main var_reconfigure
+  export PATH="$s6/bin:$PATH" PANGOLIN_ROOT="$s6/proot" FAKE_LOG="$s6/log"
+  export FAKE_WHIPTAIL_LOG="$s6/wlog" FAKE_CT_ROOT="$s6/ctroot"
+  export FAKE_SITEMODE_OUT=multi FAKE_SITES_SEQ="$s6/sites-seq"
+  SITE_OWNER_PROMPTED=0 NATIVE_PROMPTED=0
+  SITE_PAIR_ID=() SITE_PAIR_SECRET=() SITE_PAIR_KEY=() SITE_PAIR_NAME=()
+  TARGETS=(host 101)
+  TARGET_SLUG_PLANS=()
+  _default_site_name() { printf 'pve\n'; }
+  _prompt_inputs host 1 0 || exit 1
+  _prompt_inputs 101 1 0 || exit 1
+  [[ "${TARGET_SLUG_PLANS[0]:-}" == "hosta" ]] ||
+    { echo "E23 host plan wrong: [${TARGET_SLUG_PLANS[0]:-}]" >&2; exit 1; }
+  [[ "${TARGET_SLUG_PLANS[1]:-}" == "ct101b" ]] ||
+    { echo "E23 101 plan wrong: [${TARGET_SLUG_PLANS[1]:-}]" >&2; exit 1; }
+  [[ -z "${var_sites:-}" ]] ||
+    { echo "E23 global var_sites contaminated: [$var_sites]" >&2; exit 1; }
+  [[ "$(grep -c 'manage multiple site labels' "$s6/wlog")" == 2 ]] ||
+    { echo "E23 each target must get its own menu" >&2; exit 1; }
+  [[ "$(grep -c 'Site labels' "$s6/wlog")" == 2 ]] ||
+    { echo "E23 each target must get its own editor" >&2; exit 1; }
+  if grep 'Site labels' "$s6/wlog" | grep 'label hosta' | grep -q 'label ct101b'; then
+    echo "E23 host editor leaked the LXC label" >&2; exit 1
+  fi
+  if grep 'Site labels' "$s6/wlog" | grep 'label ct101b' | grep -q 'label hosta'; then
+    echo "E23 LXC editor leaked the host label" >&2; exit 1
+  fi
+  [[ "$(grep -c 'Site credentials:' "$s6/wlog")" == 0 ]] ||
+    { echo "E23 existing configs must not re-prompt" >&2; exit 1; }
+  [[ "$(grep -c 'Pangolin endpoint' "$s6/wlog")" == 1 ]] ||
+    { echo "E23 the endpoint must stay a shared selection" >&2; exit 1; }
+  _resolve_target_slug_plan host || exit 1
+  [[ "${SLUG_ARRAY[0]}" == hosta ]] ||
+    { echo "E23 host re-resolution wrong" >&2; exit 1; }
+  _resolve_target_slug_plan 101 || exit 1
+  [[ "${SLUG_ARRAY[0]}" == ct101b ]] ||
+    { echo "E23 101 re-resolution wrong" >&2; exit 1; }
+  if grep -q 'hsec-val\|csec-val' "$s6/wlog" "$s6/log"; then
+    echo "E23 config content leaked into prompts or logs" >&2; exit 1
+  fi
+) >"$s6/e23out" 2>&1; then
+  echo "E23 per-target label plans failed:" >&2
+  cat "$s6/e23out" >&2
   exit 1
 fi
 

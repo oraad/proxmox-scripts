@@ -75,6 +75,9 @@ REMOTE_TARGETS=()
 # multi-site decision, parallel to TARGETS.
 TARGET_SLUGS=()
 TARGET_MULTI=()
+# Site label plans chosen by the interactive editor, parallel to TARGETS. An
+# empty entry means the target kept the explicit or default selection.
+TARGET_SLUG_PLANS=()
 # Per-target "site <slug>: verified|failed" summary lines, parallel to TARGETS.
 TARGET_SLUG_STATUS=()
 # Site credentials collected interactively for a (slug,target) pair, keyed
@@ -93,10 +96,11 @@ SITE_INTERFACE_MAIN_RAW=""
 # duplicate fails the affected target instead of the Pangolin server.
 SEEN_SITE_IDS=$'\n'
 SEEN_CLIENT_IDS=$'\n'
-# The site label and SSH owner menus are shared selections like the endpoint;
-# each is asked at most once per run.
-SITES_PROMPTED=0
+# The SSH owner menu is a shared selection like the endpoint; it is asked at
+# most once per run. The label editor is target-aware: it stores the last
+# selection in SITE_LABEL_PLAN and the caller records it per target.
 SITE_OWNER_PROMPTED=0
+SITE_LABEL_PLAN=""
 # Slug plan for the target being processed, set by _resolve_target_slug_plan.
 SLUG_LIST=""
 SLUG_TOTAL=1
@@ -780,12 +784,21 @@ _normalize_bool() {
 }
 
 # Print the validated site slug list selected for a target, one per line.
-# Resolution order: var_sites_<target>, then var_sites, then `default`.
+# Resolution order: the explicit per-target override var_sites_<target>, then
+# the global explicit var_sites, then the plan the interactive label editor
+# stored for this target in TARGET_SLUG_PLANS, then `default`.
 _sites_for_target() {
-  local target="${1:-host}" name="var_sites_${1:-host}" raw
+  local target="${1:-host}" name="var_sites_${1:-host}" raw i
   raw="${!name-}"
   if [[ -z "$raw" ]]; then
     raw="${var_sites:-}"
+  fi
+  if [[ -z "$raw" ]]; then
+    for ((i = 0; i < ${#TARGETS[@]}; i++)); do
+      if [[ "${TARGETS[i]}" == "$target" ]] && [[ -n "${TARGET_SLUG_PLANS[i]:-}" ]]; then
+        raw="${TARGET_SLUG_PLANS[i]}"
+      fi
+    done
   fi
   if [[ -z "$raw" ]]; then
     raw="default"
@@ -1047,6 +1060,34 @@ _target_site_slug_exists() {
     return
   fi
   pct exec "$target" -- sh -c "test -f /etc/pangolin/sites/$slug.json" >/dev/null 2>&1
+}
+
+# Succeed when the target already holds a reusable site configuration for a
+# slug: the per-slug file exists and carries either an id and secret or a
+# provisioning key, so the payload can serve the slug without new answers.
+# A missing or malformed file is not reusable. The slug is validated before
+# it is used in a path or a remote command, the probe is read-only, and no
+# config content leaves the target.
+_target_site_slug_reusable() {
+  local target="${1:-}" slug="${2:-}" path
+  validate_site_slug "$slug" || return 1
+  if [[ "$target" == host ]]; then
+    if declare -F site_config_path >/dev/null 2>&1; then
+      path="$(site_config_path "$slug" 2>/dev/null)" || return 1
+    else
+      path="/etc/pangolin/sites/$slug.json"
+    fi
+    [[ -f "$path" ]] || return 1
+    if grep -q '"provisioningKey"[[:space:]]*:' "$path"; then
+      return 0
+    fi
+    grep -q '"id"[[:space:]]*:' "$path" &&
+      grep -q '"secret"[[:space:]]*:' "$path"
+    return
+  fi
+  pct exec "$target" -- sh -c \
+    "grep -q '\"provisioningKey\"[[:space:]]*:' /etc/pangolin/sites/$slug.json 2>/dev/null || { grep -q '\"id\"[[:space:]]*:' /etc/pangolin/sites/$slug.json 2>/dev/null && grep -q '\"secret\"[[:space:]]*:' /etc/pangolin/sites/$slug.json 2>/dev/null; }" \
+    >/dev/null 2>&1
 }
 
 # Remember a static site ID for this run and reject a duplicate before the
@@ -1659,11 +1700,11 @@ _discover_site_slugs() {
   printf '%s' "$out"
 }
 
-# Run the interactive site label editor for one target and set var_sites to
-# the selected space-separated list. The editor seeds every label that already
-# has a configuration on the target, all starting selected, so an existing
-# site is never left out of the plan; the operator can only add labels.
-# Returns 1 on cancel or an empty selection.
+# Run the interactive site label editor for one target and set
+# SITE_LABEL_PLAN to the selected space-separated list. The editor seeds
+# every label that already has a configuration on the target, all starting
+# selected, so an existing site is never left out of the plan; the operator
+# can only add labels. Returns 1 on cancel or an empty selection.
 _prompt_site_labels() {
   local target="${1:-host}"
   local -a slugs=()
@@ -1725,8 +1766,13 @@ _prompt_site_labels() {
       echo "Select at least one site label" >&2
       return 1
     fi
+    if ((${#kept[@]} > 8)); then
+      msg_warn "Eight site labels is the maximum. Deselect labels to continue." >&2
+      slugs=("${kept[@]}")
+      continue
+    fi
     _parse_sites "${kept[*]}" >/dev/null || return 1
-    var_sites="${kept[*]}"
+    SITE_LABEL_PLAN="${kept[*]}"
     return 0
   done
 }
@@ -1799,12 +1845,15 @@ _prompt_site_pair_credentials() {
 # as reuse or replace once the operator chooses the one-site path; client
 # credentials are always prompted when missing. A site enrollment ends with
 # the native interface toggles; names are never prompted. In a site
-# enrollment with no explicit var_sites the operator first chooses one site
+# enrollment with no explicit var_sites every target first chooses one site
 # or manages several site labels, even when a verified existing site is
-# detected, so an extra slug can always be added to the existing site. A
-# multi-site selection then asks for the SSH owner, the shared native
-# toggles, and the credentials of every slug/target pair the environment
-# does not already answer and the target cannot serve.
+# detected, so an extra slug can always be added to the existing site; the
+# editor's answer is stored for that target alone, never in the global
+# var_sites. A multi-site selection then asks for the SSH owner, the shared
+# native toggles, and the credentials of every slug/target pair the
+# environment does not answer and the target cannot serve: a pair whose
+# existing config already holds credentials or a provisioning key is reused
+# as it is.
 _prompt_inputs() {
   local target="$1" site="$2" client="$3" choice default_name
   local enrolling=0
@@ -1817,14 +1866,24 @@ _prompt_inputs() {
     if [[ "${var_reconfigure:-0}" != 1 ]] && _target_site_verified "$target"; then
       may_reuse=1
     fi
-    if ((explicit == 0)) && [[ "$SITES_PROMPTED" != 1 ]] && ! _is_noninteractive; then
+    if ((explicit == 0)) && ! _is_noninteractive; then
       choice="$(whiptail --title "Pangolin Addon" --menu \
         "Configure one site or manage multiple site labels:" 15 74 2 \
         one "One site (the default label)" \
         multi "Manage multiple site labels" 3>&1 1>&2 2>&3)" || return 1
-      SITES_PROMPTED=1
       if [[ "$choice" == multi ]]; then
         _prompt_site_labels "$target" || return 1
+        local plan_idx=-1 pi
+        for ((pi = 0; pi < ${#TARGETS[@]}; pi++)); do
+          if [[ "${TARGETS[pi]}" == "$target" ]]; then
+            plan_idx=$pi
+          fi
+        done
+        if ((plan_idx < 0)); then
+          echo "Target $target is not part of this run; cannot store its site label plan." >&2
+          return 1
+        fi
+        TARGET_SLUG_PLANS[plan_idx]="$SITE_LABEL_PLAN"
       fi
     fi
     _resolve_target_slug_plan "$target" || return 1
@@ -1859,10 +1918,13 @@ _prompt_inputs() {
           pair_found=1
           _store_site_pair "$mslug" "$target"
         fi
-        if ((pair_found == 0)) && [[ "$mslug" == default ]] &&
-          [[ "${var_reconfigure:-0}" != 1 ]]; then
-          if _target_site_verified "$target" || _target_has_legacy_site "$target" ||
-            _target_site_slug_exists "$target" "$mslug"; then
+        if ((pair_found == 0)) && [[ "${var_reconfigure:-0}" != 1 ]]; then
+          if [[ "$mslug" == default ]]; then
+            if _target_site_verified "$target" || _target_has_legacy_site "$target" ||
+              _target_site_slug_exists "$target" "$mslug"; then
+              continue
+            fi
+          elif _target_site_slug_reusable "$target" "$mslug"; then
             continue
           fi
         fi
@@ -1871,7 +1933,6 @@ _prompt_inputs() {
         fi
       done
     elif [[ "$may_reuse" == 1 ]]; then
-      SITES_PROMPTED=1
       choice="$(whiptail --title "Existing site" --menu \
         "A verified site configuration already exists." 15 64 2 \
         reuse "Reuse the existing site configuration" \
@@ -2457,8 +2518,8 @@ main() {
   REMOTE_TARGET=""
   WORK_DIR=""
   NATIVE_PROMPTED=0
-  SITES_PROMPTED=0
   SITE_OWNER_PROMPTED=0
+  SITE_LABEL_PLAN=""
   SEEN_SITE_IDS=$'\n'
   SEEN_CLIENT_IDS=$'\n'
   SITE_PAIR_ID=()
@@ -2478,6 +2539,7 @@ main() {
   TARGET_CLIENT_SECRET=()
   TARGET_SLUGS=()
   TARGET_MULTI=()
+  TARGET_SLUG_PLANS=()
   TARGET_SLUG_STATUS=()
 
   PANGOLIN_DRY_RUN="${PANGOLIN_DRY_RUN:-0}"
