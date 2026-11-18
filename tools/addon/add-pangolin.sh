@@ -1596,11 +1596,86 @@ _prompt_site_native_checklist() {
   esac
 }
 
-# Run the interactive site label editor and set var_sites to the selected
-# space-separated list. Returns 1 on cancel or an empty selection.
+# Print the site labels that already have a configuration on the target: one
+# slug per line, deduplicated, `default` first, malformed names ignored. The
+# host globs the payload's site directory under the private root; an LXC is
+# probed with read-only pct calls that never interpolate a caller-supplied
+# slug. Config contents are never read or printed. `default` answers for a
+# legacy site.json, a legacy site env, and for any target where discovery
+# finds nothing, so at least one label is always available.
+_discover_site_slugs() {
+  local target="${1:-host}" entry slug dir sitejson
+  local -a names=() others=()
+  local has_default=0 found=0 seen=$'\n' out=""
+  if [[ "$target" == host ]]; then
+    if declare -F site_config_dir >/dev/null 2>&1; then
+      dir="$(site_config_dir)"
+      sitejson="$(p /etc/pangolin/site.json)"
+    else
+      dir="/etc/pangolin/sites"
+      sitejson="/etc/pangolin/site.json"
+    fi
+    shopt -s nullglob
+    for entry in "$dir"/*.json; do
+      names+=("${entry##*/}")
+    done
+    shopt -u nullglob
+    [[ -f "$sitejson" ]] && has_default=1
+  else
+    while IFS= read -r entry; do
+      if [[ -n "$entry" ]]; then
+        names+=("$entry")
+      fi
+    done < <(pct exec "$target" -- ls -1 /etc/pangolin/sites 2>/dev/null || true)
+    if pct exec "$target" -- sh -c \
+      'test -f /etc/pangolin/site.json' >/dev/null 2>&1; then
+      has_default=1
+    fi
+  fi
+  if _target_has_legacy_site "$target"; then
+    has_default=1
+  fi
+  for entry in "${names[@]}"; do
+    [[ "$entry" == *.json ]] || continue
+    slug="${entry%.json}"
+    validate_site_slug "$slug" || continue
+    found=1
+    if [[ "$slug" == default ]]; then
+      has_default=1
+    elif [[ "$seen" != *$'\n'"$slug"$'\n'* ]]; then
+      seen+="$slug"$'\n'
+      others+=("$slug")
+    fi
+  done
+  if ((found == 0)); then
+    has_default=1
+  fi
+  if ((has_default == 1)); then
+    out+=$'default\n'
+  fi
+  for slug in "${others[@]}"; do
+    out+="$slug"$'\n'
+  done
+  printf '%s' "$out"
+}
+
+# Run the interactive site label editor for one target and set var_sites to
+# the selected space-separated list. The editor seeds every label that already
+# has a configuration on the target, all starting selected, so an existing
+# site is never left out of the plan; the operator can only add labels.
+# Returns 1 on cancel or an empty selection.
 _prompt_site_labels() {
-  local -a slugs=(default)
-  local out item new label s dup
+  local target="${1:-host}"
+  local -a slugs=()
+  local out item new label s dup slug
+  while IFS= read -r slug; do
+    if [[ -n "$slug" ]]; then
+      slugs+=("$slug")
+    fi
+  done < <(_discover_site_slugs "$target")
+  if ((${#slugs[@]} == 0)); then
+    slugs=(default)
+  fi
   local -a selected kept
   while :; do
     local -a rows=()
@@ -1721,12 +1796,15 @@ _prompt_site_pair_credentials() {
 }
 
 # Collect interactive credentials. Existing verified site configs are offered
-# as reuse or replace; client credentials are always prompted when missing. A
-# site enrollment ends with the native interface toggles; names are never
-# prompted. In a multi-site enrollment the operator first chooses one site or
-# manages several site labels, then the SSH owner, the shared native toggles,
-# and the credentials of every slug/target pair the environment does not
-# already answer.
+# as reuse or replace once the operator chooses the one-site path; client
+# credentials are always prompted when missing. A site enrollment ends with
+# the native interface toggles; names are never prompted. In a site
+# enrollment with no explicit var_sites the operator first chooses one site
+# or manages several site labels, even when a verified existing site is
+# detected, so an extra slug can always be added to the existing site. A
+# multi-site selection then asks for the SSH owner, the shared native
+# toggles, and the credentials of every slug/target pair the environment
+# does not already answer and the target cannot serve.
 _prompt_inputs() {
   local target="$1" site="$2" client="$3" choice default_name
   local enrolling=0
@@ -1739,15 +1817,14 @@ _prompt_inputs() {
     if [[ "${var_reconfigure:-0}" != 1 ]] && _target_site_verified "$target"; then
       may_reuse=1
     fi
-    if ((explicit == 0)) && [[ "$SITES_PROMPTED" != 1 ]] && ((may_reuse == 0)) &&
-      ! _is_noninteractive; then
+    if ((explicit == 0)) && [[ "$SITES_PROMPTED" != 1 ]] && ! _is_noninteractive; then
       choice="$(whiptail --title "Pangolin Addon" --menu \
         "Configure one site or manage multiple site labels:" 15 74 2 \
         one "One site (the default label)" \
         multi "Manage multiple site labels" 3>&1 1>&2 2>&3)" || return 1
       SITES_PROMPTED=1
       if [[ "$choice" == multi ]]; then
-        _prompt_site_labels || return 1
+        _prompt_site_labels "$target" || return 1
       fi
     fi
     _resolve_target_slug_plan "$target" || return 1
